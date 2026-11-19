@@ -261,51 +261,32 @@ final class PinyinSegmenter {
 
     /// T9 九宫格数字串切分，支持传入左侧筛选栏锁定的前置音节。
     func t9Segmentations(digits: String, lockedPrefixes: [String] = []) -> [[PinyinToken]] {
-        let allowedT9Chars = Set("23456789'")
-        let clean = digits.filter { allowedT9Chars.contains($0) }
-        guard !clean.isEmpty else { return [] }
+        let allowed: Set<Character> = Set(["2", "3", "4", "5", "6", "7", "8", "9", "'"])
+        let clean: String = String(digits.filter { allowed.contains($0) })
+        if clean.isEmpty {
+            return []
+        }
 
-        var results: [[PinyinToken]] = [[PinyinToken]()]
-        var offset = 0
-        var lockIndex = 0
-        let parts = clean.split(separator: "'", omittingEmptySequences: false)
+        var results: [[PinyinToken]] = [[]]
+        var offset: Int = 0
+        var lockIndex: Int = 0
+        let parts: [Substring] = clean.split(separator: "'", omittingEmptySequences: false)
 
         for part in parts {
-            let chunk = String(part)
+            let chunk: String = String(part)
             if !chunk.isEmpty {
-                var baseTokens: [PinyinToken] = []
-                var posInChunk = 0
-                let chars = Array(chunk)
+                let (baseTokens, newLockIndex, posInChunk) = extractLockedTokens(
+                    chunk: chunk,
+                    lockedPrefixes: lockedPrefixes,
+                    currentLockIndex: lockIndex,
+                    baseOffset: offset
+                )
+                lockIndex = newLockIndex
 
-                while lockIndex < lockedPrefixes.count && posInChunk < chars.count {
-                    let syl = lockedPrefixes[lockIndex]
-                    let code = sylToT9[syl] ?? Self.t9Code(for: syl)
-                    let endInChunk = posInChunk + code.count
-                    if endInChunk <= chars.count && String(chars[posInChunk..<endInChunk]) == code {
-                        baseTokens.append(PinyinToken(
-                            text: code,
-                            raw: code,
-                            kind: .complete,
-                            end: offset + endInChunk,
-                            lockedSyllable: syl
-                        ))
-                        posInChunk = endInChunk
-                        lockIndex += 1
-                    } else {
-                        break
-                    }
-                }
-
-                let rem: String
-                if posInChunk < chars.count {
-                    rem = String(chars[posInChunk..<chars.count])
-                } else {
-                    rem = ""
-                }
-
+                let rem: String = (posInChunk < chunk.count) ? String(chunk.dropFirst(posInChunk)) : ""
                 let tails: [[PinyinToken]]
                 if rem.isEmpty {
-                    tails = [[PinyinToken]()]
+                    tails = [[]]
                 } else {
                     tails = segmentT9Chunk(rem, baseOffset: offset + posInChunk)
                 }
@@ -313,13 +294,17 @@ final class PinyinSegmenter {
                 var next: [[PinyinToken]] = []
                 for prefix in results {
                     for tail in tails {
-                        var combined = prefix
+                        var combined: [PinyinToken] = prefix
                         combined.append(contentsOf: baseTokens)
                         combined.append(contentsOf: tail)
                         next.append(combined)
-                        if next.count >= Self.maxSegmentations { break }
+                        if next.count >= Self.maxSegmentations {
+                            break
+                        }
                     }
-                    if next.count >= Self.maxSegmentations { break }
+                    if next.count >= Self.maxSegmentations {
+                        break
+                    }
                 }
                 results = next
             }
@@ -329,6 +314,43 @@ final class PinyinSegmenter {
             return results
         }
         return []
+    }
+
+    private func extractLockedTokens(
+        chunk: String,
+        lockedPrefixes: [String],
+        currentLockIndex: Int,
+        baseOffset: Int
+    ) -> ([PinyinToken], Int, Int) {
+        var baseTokens: [PinyinToken] = []
+        var posInChunk: Int = 0
+        var lockIndex: Int = currentLockIndex
+        let chars: [Character] = Array(chunk)
+
+        while lockIndex < lockedPrefixes.count && posInChunk < chars.count {
+            let syl: String = lockedPrefixes[lockIndex]
+            let code: String = sylToT9[syl] ?? Self.t9Code(for: syl)
+            let endInChunk: Int = posInChunk + code.count
+            if endInChunk <= chars.count {
+                let sliceChars: [Character] = Array(chars[posInChunk..<endInChunk])
+                let sliceStr: String = String(sliceChars)
+                if sliceStr == code {
+                    let token = PinyinToken(
+                        text: code,
+                        raw: code,
+                        kind: .complete,
+                        end: baseOffset + endInChunk,
+                        lockedSyllable: syl
+                    )
+                    baseTokens.append(token)
+                    posInChunk = endInChunk
+                    lockIndex += 1
+                    continue
+                }
+            }
+            break
+        }
+        return (baseTokens, lockIndex, posInChunk)
     }
 
     func candidateSyllablesForT9Prefix(_ digits: String, lockedCount: Int, tokens: [PinyinToken]) -> [String] {
@@ -523,14 +545,18 @@ final class PinyinSegmenter {
                 }
                 let tok = PinyinToken(text: sub, raw: sub, kind: kind, end: baseOffset + j)
                 for (prevC, prevToks) in paths[i] {
-                    paths[j].append((prevC + stepCost, prevToks + [tok]))
+                    var nextToks = prevToks
+                    nextToks.append(tok)
+                    paths[j].append((cost: prevC + stepCost, tokens: nextToks))
                 }
             }
             if paths[i + 1].isEmpty {
                 let ch = String(chars[i])
                 let tok = PinyinToken(text: ch, raw: ch, kind: .invalid, end: baseOffset + i + 1)
                 for (prevC, prevToks) in paths[i] {
-                    paths[i + 1].append((prevC + 5.0, prevToks + [tok]))
+                    var nextToks = prevToks
+                    nextToks.append(tok)
+                    paths[i + 1].append((cost: prevC + 5.0, tokens: nextToks))
                 }
             }
             for target in (i + 1)...upper where paths[target].count > 6 {
