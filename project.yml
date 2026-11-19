@@ -1,0 +1,136 @@
+# XcodeGen 工程描述文件
+# 生成 Xcode 工程:  brew install xcodegen && xcodegen generate
+name: Lingxi
+options:
+  bundleIdPrefix: com.lingxi
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  developmentLanguage: zh-Hans
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_OPTIMIZATION_LEVEL: "-O"
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+
+targets:
+  Lingxi:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+          - "*.entitlements"
+      - path: Shared
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 灵犀输入法
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        ITSAppUsesNonExemptEncryption: false
+        LingxiAppGroup: group.com.lingxi.ime
+        NSPhotoLibraryUsageDescription: 用于选择键盘背景图片
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    entitlements:
+      path: App/Lingxi.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.lingxi.ime
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.ime
+        PRODUCT_NAME: Lingxi
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    dependencies:
+      - target: LingxiKeyboard
+        embed: true
+
+  LingxiKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Keyboard
+        excludes:
+          - Info.plist
+          - "*.entitlements"
+          - "Resources/**"
+      - path: Keyboard/Resources/pinyin.sqlite
+        buildPhase: resources
+      - path: Shared
+    info:
+      path: Keyboard/Info.plist
+      properties:
+        CFBundleDisplayName: 灵犀输入法
+        LingxiAppGroup: group.com.lingxi.ime
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: zh-Hans
+            RequestsOpenAccess: true
+    entitlements:
+      path: Keyboard/LingxiKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.lingxi.ime
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.ime.keyboard
+        PRODUCT_NAME: LingxiKeyboard
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  LingxiTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      - path: Shared
+      - path: Keyboard/Engine
+      - path: Keyboard/Resources/pinyin.sqlite
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.ime.tests
+        PRODUCT_NAME: LingxiTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
+
+schemes:
+  Lingxi:
+    build:
+      targets:
+        Lingxi: all
+        LingxiKeyboard: all
+        LingxiTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - LingxiTests
+    archive:
+      config: Release

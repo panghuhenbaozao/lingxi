@@ -1,0 +1,91 @@
+# 回归集：每条都必须通过（CI 里 100%，scripts/eval.sh 里 --strict regress）。
+# 格式：输入<TAB>期望（| 分隔多个答案）[<TAB>上文[<TAB>属性]]，属性见 core/src/bin/eval.rs：
+#   top=N 期望在前 N 名（默认 top=1）、at=N 正好第 N 名、before-single 期望都在第一个单字前、sp=方案 按双拼打。
+# 这里只放用真实词库（rime-ice + words.lm + english.txt，外壳的配置）核实过「现在就是对的」的用例；
+# 现在不对、修好了要加进来的写在 tools/eval/README.md「回归集」一节。改排序把这里的某条弄坏了，
+# 要么修好，要么在提交说明里写清为什么新的结果更好、再改这一条。
+
+# 打全了的词排第一，补全、纠错、拼凑的往后（docs/ENGINE.md「半成品输入」）
+nihao	你好
+xianzai	现在
+zhongdi	种地
+beiji	北极
+ka	卡
+jieran	截然
+qingyuan	情愿
+mingyuan	名媛
+shishi	事实
+fangan	方案
+# 三个音节以上的同音词排在拼凑出来的整句前面
+qidongqi	启动器
+qianhouduan	前后端
+houxuanci	候选词
+# 儿化（音节 + r）
+wanr	玩儿
+zher	这儿
+yidianr	一点儿
+haowanr	好玩儿
+# 同音词都在第一个单字前面
+tongde	通的		before-single
+# 英文原词：放在第 6 个（前面是中文词）
+like	like		at=6
+danger	danger		at=6
+# 只出英文的输入
+iphone	iPhone
+hello	hello
+deepseek	DeepSeek|deepseek
+github	GitHub|github
+python	Python|python
+# 双拼（小鹤）
+womfdewoxihr	我们的我喜欢		sp=xiaohe
+
+# 单字：没有上文时句首语言模型分不能把常用字压下去（计划 R1-a）
+le	了
+he	和
+bei	被
+li	里
+ma	吗
+hui	会
+# 西安在 xian 的前 5，第一个是「先」（计划 R1-c）
+xian	先
+xian	西安		top=5
+
+# 接着上文打（计划 R1-b）
+zhidao	知道	我
+yao	要	我
+hui	会	我
+he	和	我
+ma	吗	你好
+le	了	你好
+zhidao	知道	不
+xiang	想	我们
+hui	会	我们
+shi	是	我们
+zai	在	我们
+yao	要	我们
+le	了	吃饭
+ma	吗	吃饭
+
+# 按错键（计划 R2-b）
+meiyuo	没有
+tianqu	天气		top=2
+nihoa	你好
+zhognguo	中国
+wiexin	微信
+jitnian	今天
+
+# 模糊音关着时不出硬拼的怪词（计划 R2-c）
+shengme	什么
+penyou	朋友
+
+# 词频修正和热词（计划 R3）
+laoshi	老师
+nh	你好
+xz	现在
+wx	微信		top=2
+pyq	朋友圈
+gzh	公众号		top=3
+weish	为啥
+zaijianl	再见了
+msl	没事了
+heishenhua	黑神话

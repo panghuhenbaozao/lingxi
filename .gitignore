@@ -1,0 +1,19 @@
+# Xcode & Build Artifacts
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS / Windows / Python
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Raw upstream dictionaries downloaded by build_dict.py (compiled pinyin.sqlite is tracked)
+Tools/data/rime_ice/
+Tools/data/rime_u/
+Tools/data/rime_wubi/

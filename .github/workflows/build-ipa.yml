@@ -1,0 +1,66 @@
+name: Build & Test Lingxi iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Pinyin Dictionary & Prototype
+        run: |
+          python3 Tools/engine_prototype.py
+
+      - name: Select Xcode & Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -version
+
+      - name: Run Unit Tests on iOS Simulator
+        run: |
+          DEST=$(xcrun simctl list devices available iPhone | grep -m1 -oE '[0-9A-F-]{36}')
+          if [ -z "$DEST" ]; then
+            echo "No available iPhone simulator found"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using iOS Simulator: $DEST"
+          xcodebuild test \
+            -project Lingxi.xcodeproj \
+            -scheme Lingxi \
+            -destination "platform=iOS Simulator,id=${DEST}" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build Unsigned Release App & Package IPA
+        run: |
+          xcodebuild build \
+            -project Lingxi.xcodeproj \
+            -scheme Lingxi \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+          mkdir -p build/Payload
+          cp -R build/Build/Products/Release-iphoneos/Lingxi.app build/Payload/
+          test -d build/Payload/Lingxi.app/PlugIns/LingxiKeyboard.appex
+          test -f build/Payload/Lingxi.app/PlugIns/LingxiKeyboard.appex/pinyin.sqlite
+          cd build
+          zip -r -q Lingxi-unsigned.ipa Payload
+          ls -lh Lingxi-unsigned.ipa
+
+      - name: Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lingxi-unsigned-ipa
+          path: build/Lingxi-unsigned.ipa
+          retention-days: 30
