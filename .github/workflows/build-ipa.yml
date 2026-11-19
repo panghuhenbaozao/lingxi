@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-and-test:
     runs-on: macos-15
@@ -40,22 +43,12 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee test.log; then
-            ERRS=$(grep -E "(error:|fatal error:|failed \(|Test Case .* failed|BUILD FAILED|TEST FAILED|Testing failed)" test.log | head -n 8 || true)
-            if [ -n "$ERRS" ]; then
-              while IFS= read -r line; do
-                echo "::error::${line}"
-              done <<< "$ERRS"
-            fi
-            TAIL=$(tail -n 12 test.log | tr '\n' ' | ' | cut -c1-800)
-            echo "::error::TAIL: ${TAIL}"
+            ERR_SUMMARY=$(grep -iE "(swift:[0-9]+:|error:|failed \(|Test Case .* failed|XCTAssert)" test.log | head -n 12 | tr '\r\n' ' | ' | cut -c1-1200 || true)
+            echo "::error::TEST_ERRORS: ${ERR_SUMMARY}"
+            TAIL=$(tail -n 15 test.log | tr '\r\n' ' | ' | cut -c1-900)
+            echo "::error::TEST_TAIL: ${TAIL}"
             exit 1
           fi
-          {
-            echo "### LingxiTests PASSED"
-            echo '```'
-            grep -E "Test Case .* passed|Executed [0-9]+ tests" test.log | tail -n 30 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build Unsigned Release App & Package IPA
         run: |
@@ -69,13 +62,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee release.log; then
-            ERRS=$(grep -E "(error:|fatal error:|BUILD FAILED)" release.log | head -n 8 || true)
-            if [ -n "$ERRS" ]; then
-              while IFS= read -r line; do
-                echo "::error::${line}"
-              done <<< "$ERRS"
-            fi
-            TAIL=$(tail -n 12 release.log | tr '\n' ' | ' | cut -c1-800)
+            ERR_SUMMARY=$(grep -iE "(swift:[0-9]+:|error:|BUILD FAILED)" release.log | head -n 12 | tr '\r\n' ' | ' | cut -c1-1200 || true)
+            echo "::error::RELEASE_ERRORS: ${ERR_SUMMARY}"
+            TAIL=$(tail -n 15 release.log | tr '\r\n' ' | ' | cut -c1-900)
             echo "::error::RELEASE_TAIL: ${TAIL}"
             exit 1
           fi
@@ -87,7 +76,6 @@ jobs:
           cd build
           zip -r -q Lingxi-unsigned.ipa Payload
           ls -lh Lingxi-unsigned.ipa
-          echo "### Release IPA Packaged: $(du -h Lingxi-unsigned.ipa | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Unsigned IPA Artifact
         uses: actions/upload-artifact@v4
@@ -95,3 +83,15 @@ jobs:
           name: Lingxi-unsigned-ipa
           path: build/Lingxi-unsigned.ipa
           retention-days: 30
+
+      - name: Publish Unsigned IPA to GitHub Release (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest build/Lingxi-unsigned.ipa --clobber
+          else
+            gh release create latest build/Lingxi-unsigned.ipa \
+              --title "Lingxi iOS IME (Unsigned IPA)" \
+              --notes "Auto-built unsigned iOS IPA for SideStore / AltStore sideloading (verified with LingxiTests & WowType regress.tsv)."
+          fi

@@ -696,7 +696,7 @@ final class PinyinEngine {
             guard let ptr = sqlite3_column_text(stmt, 0) else { continue }
             var word = String(cString: ptr)
             if startsUpper, let first = word.first, first.isLowercase {
-                word = first.uppercased() + word.dropFirst()
+                word = first.uppercased() + String(word.dropFirst())
             }
             if word != prefix {
                 words.append(word)
@@ -946,9 +946,9 @@ final class PinyinEngine {
                 var alts: [String] = []
                 for (dg, sg) in [("zh", "z"), ("ch", "c"), ("sh", "s")] {
                     if st.hasPrefix(dg) {
-                        alts.append(sg + st.dropFirst(2))
+                        alts.append(sg + String(st.dropFirst(2)))
                     } else if st.hasPrefix(sg) {
-                        alts.append(dg + st.dropFirst(1))
+                        alts.append(dg + String(st.dropFirst(1)))
                     }
                 }
                 for (finA, finB) in [("ang", "an"), ("eng", "en"), ("ing", "in")] {
@@ -1390,13 +1390,13 @@ final class PinyinEngine {
 
     private func normalizeFuzzy(_ s: String, options: FuzzyPinyinOptions) -> String {
         var r = s
-        if options.zhZ && r.hasPrefix("zh") { r = "z" + r.dropFirst(2) }
-        else if options.chC && r.hasPrefix("ch") { r = "c" + r.dropFirst(2) }
-        else if options.shS && r.hasPrefix("sh") { r = "s" + r.dropFirst(2) }
-        else if options.nl && r.hasPrefix("n") { r = "l" + r.dropFirst(1) }
-        else if options.rl && r.hasPrefix("r") { r = "l" + r.dropFirst(1) }
+        if options.zhZ && r.hasPrefix("zh") { r = "z" + String(r.dropFirst(2)) }
+        else if options.chC && r.hasPrefix("ch") { r = "c" + String(r.dropFirst(2)) }
+        else if options.shS && r.hasPrefix("sh") { r = "s" + String(r.dropFirst(2)) }
+        else if options.nl && r.hasPrefix("n") { r = "l" + String(r.dropFirst(1)) }
+        else if options.rl && r.hasPrefix("r") { r = "l" + String(r.dropFirst(1)) }
         else if options.huangWang && r == "huang" { r = "wang" }
-        else if options.fh && r.hasPrefix("f") { r = "h" + r.dropFirst(1) }
+        else if options.fh && r.hasPrefix("f") { r = "h" + String(r.dropFirst(1)) }
 
         if options.ianIang && r.hasSuffix("iang") { r = String(r.dropLast(1)) }
         else if options.uanUang && r.hasSuffix("uang") { r = String(r.dropLast(1)) }
