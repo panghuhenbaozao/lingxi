@@ -542,7 +542,7 @@ final class KeyboardCanvasView: UIView {
             if case .character(let p, _, _, _) = hitKey.kind,
                p.count == 1,
                let c = p.lowercased().first,
-               ("a"..."z").contains(c) {
+               c >= "a" && c <= "z" {
                 initialVisited = [String(c)]
             }
 
@@ -625,7 +625,7 @@ final class KeyboardCanvasView: UIView {
                        case .character(let hp, _, _, _) = hovered.kind,
                        hp.count == 1,
                        let hc = hp.lowercased().first,
-                       ("a"..."z").contains(hc) {
+                       hc >= "a" && hc <= "z" {
                         let hs = String(hc)
                         if track.visitedLetterKeys.last != hs {
                             track.visitedLetterKeys.append(hs)
@@ -927,7 +927,7 @@ final class KeyboardCanvasView: UIView {
             if case .character(let primary, _, _, _) = key.kind,
                primary.count == 1,
                let ch = primary.lowercased().first,
-               ("a"..."z").contains(ch) {
+               ch >= "a" && ch <= "z" {
                 let mid = CGPoint(x: key.rect.midX, y: key.rect.midY)
                 centers[ch] = mid
                 if ch == "q" { qCenter = mid }

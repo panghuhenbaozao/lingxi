@@ -1068,7 +1068,7 @@ final class KeyboardViewController: UIInputViewController {
                     recomputeCandidates()
                     return
                 }
-                if let firstChar = lower.first, ("a"..."y").contains(firstChar) {
+                if let firstChar = lower.first, firstChar >= "a" && firstChar <= "y" {
                     if wubiEmptyCode {
                         rawComposing = ""
                         wubiEmptyCode = false

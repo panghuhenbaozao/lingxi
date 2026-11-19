@@ -261,7 +261,8 @@ final class PinyinSegmenter {
 
     /// T9 九宫格数字串切分，支持传入左侧筛选栏锁定的前置音节。
     func t9Segmentations(digits: String, lockedPrefixes: [String] = []) -> [[PinyinToken]] {
-        let clean = digits.filter { ("2"..."9").contains($0) || $0 == "'" }
+        let allowedT9Chars = Set("23456789'")
+        let clean = digits.filter { allowedT9Chars.contains($0) }
         guard !clean.isEmpty else { return [] }
 
         var results: [[PinyinToken]] = [[]]
@@ -295,7 +296,7 @@ final class PinyinSegmenter {
                     }
                 }
 
-                let rem = String(chars[posInChunk...])
+                let rem = posInChunk < chars.count ? String(chars[posInChunk...]) : ""
                 let tails: [[PinyinToken]] = rem.isEmpty
                     ? [[]]
                     : segmentT9Chunk(rem, baseOffset: offset + posInChunk)
@@ -303,7 +304,10 @@ final class PinyinSegmenter {
                 var next: [[PinyinToken]] = []
                 for prefix in results {
                     for tail in tails {
-                        next.append(prefix + baseTokens + tail)
+                        var combined = prefix
+                        combined.append(contentsOf: baseTokens)
+                        combined.append(contentsOf: tail)
+                        next.append(combined)
                         if next.count >= Self.maxSegmentations { break }
                     }
                     if next.count >= Self.maxSegmentations { break }
@@ -312,7 +316,7 @@ final class PinyinSegmenter {
             }
             offset += chunk.count + 1
         }
-        return results.first?.isEmpty == false ? results : []
+        return (results.first?.isEmpty == false) ? results : []
     }
 
     func candidateSyllablesForT9Prefix(_ digits: String, lockedCount: Int, tokens: [PinyinToken]) -> [String] {

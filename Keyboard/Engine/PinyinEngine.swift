@@ -382,7 +382,7 @@ final class PinyinEngine {
 
         // 2. 标准五笔 86 查表（仅 a-y，1~4 码，严格按码表原序不动态调频）
         guard lower.count <= 4,
-              lower.allSatisfy({ ("a"..."y").contains($0) }),
+              lower.allSatisfy({ $0 >= "a" && $0 <= "y" }),
               let exactStmt = wubiExactStmt else {
             return WubiQueryResult(candidates: [], isEmptyCode: true, isUnique4: false, isTempPinyin: false, displayBuffer: lower)
         }
