@@ -270,7 +270,7 @@ final class PinyinSegmenter {
         var results: [[PinyinToken]] = [[]]
         var offset: Int = 0
         var lockIndex: Int = 0
-        let parts: [Substring] = clean.split(separator: "'", omittingEmptySequences: false)
+        let parts: [Substring] = clean.split(separator: "'", omittingEmptySubsequences: false)
 
         for part in parts {
             let chunk: String = String(part)
@@ -416,7 +416,7 @@ final class PinyinSegmenter {
     private func segmentQuanpin(_ raw: String) -> [[PinyinToken]] {
         var results: [[PinyinToken]] = [[PinyinToken]()]
         var offset = 0
-        for part in raw.split(separator: "'", omittingEmptySequences: false) {
+        for part in raw.split(separator: "'", omittingEmptySubsequences: false) {
             let chunk = String(part)
             if !chunk.isEmpty {
                 let alts = segmentChunk(chunk, baseOffset: offset)
@@ -584,7 +584,7 @@ final class PinyinSegmenter {
     private func segmentDoublePinyin(_ raw: String, table: [String: [String]], layout: DoublePinyinLayout) -> [[PinyinToken]] {
         var results: [[PinyinToken]] = [[PinyinToken]()]
         var offset = 0
-        for part in raw.split(separator: "'", omittingEmptySequences: false) {
+        for part in raw.split(separator: "'", omittingEmptySubsequences: false) {
             let chunk = String(part)
             if !chunk.isEmpty {
                 let alts = segmentDoubleChunk(chunk, baseOffset: offset, table: table, layout: layout)
