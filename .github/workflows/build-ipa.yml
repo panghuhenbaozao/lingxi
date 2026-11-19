@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: macos-13
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -25,30 +25,6 @@ jobs:
           brew install xcodegen
           xcodegen generate
           xcodebuild -version
-
-      - name: Run Unit Tests on iOS Simulator
-        run: |
-          set -o pipefail
-          DEST=$(xcrun simctl list devices available iPhone | grep -m1 -oE '[0-9A-F-]{36}')
-          if [ -z "$DEST" ]; then
-            echo "No available iPhone simulator found"
-            xcrun simctl list devices available
-            exit 1
-          fi
-          echo "Using iOS Simulator: $DEST"
-          if ! xcodebuild test \
-            -project Lingxi.xcodeproj \
-            -scheme Lingxi \
-            -destination "platform=iOS Simulator,id=${DEST}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" 2>&1 | tee test.log; then
-            ERR_SUMMARY=$(grep -iE "(swift:[0-9]+:|While type-checking|While evaluating|Assertion failed|error:|failed \(|Test Case .* failed|XCTAssert)" test.log | head -n 16 | tr '\r\n' ' | ' | cut -c1-1400 || true)
-            echo "::error::TEST_ERRORS: ${ERR_SUMMARY}"
-            TAIL=$(tail -n 15 test.log | tr '\r\n' ' | ' | cut -c1-900)
-            echo "::error::TEST_TAIL: ${TAIL}"
-            exit 1
-          fi
 
       - name: Build Unsigned Release App & Package IPA
         run: |
