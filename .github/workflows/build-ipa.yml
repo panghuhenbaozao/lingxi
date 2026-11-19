@@ -43,7 +43,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee test.log; then
-            ERR_SUMMARY=$(grep -iE "(swift:[0-9]+:|error:|failed \(|Test Case .* failed|XCTAssert)" test.log | head -n 12 | tr '\r\n' ' | ' | cut -c1-1200 || true)
+            ERR_SUMMARY=$(grep -iE "(swift:[0-9]+:|While type-checking|While evaluating|Assertion failed|error:|failed \(|Test Case .* failed|XCTAssert)" test.log | head -n 16 | tr '\r\n' ' | ' | cut -c1-1400 || true)
             echo "::error::TEST_ERRORS: ${ERR_SUMMARY}"
             TAIL=$(tail -n 15 test.log | tr '\r\n' ' | ' | cut -c1-900)
             echo "::error::TEST_TAIL: ${TAIL}"

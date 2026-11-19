@@ -265,7 +265,7 @@ final class PinyinSegmenter {
         let clean = digits.filter { allowedT9Chars.contains($0) }
         guard !clean.isEmpty else { return [] }
 
-        var results: [[PinyinToken]] = [[]]
+        var results: [[PinyinToken]] = [[PinyinToken]()]
         var offset = 0
         var lockIndex = 0
         let parts = clean.split(separator: "'", omittingEmptySequences: false)
@@ -296,10 +296,19 @@ final class PinyinSegmenter {
                     }
                 }
 
-                let rem = posInChunk < chars.count ? String(chars[posInChunk...]) : ""
-                let tails: [[PinyinToken]] = rem.isEmpty
-                    ? [[]]
-                    : segmentT9Chunk(rem, baseOffset: offset + posInChunk)
+                let rem: String
+                if posInChunk < chars.count {
+                    rem = String(chars[posInChunk..<chars.count])
+                } else {
+                    rem = ""
+                }
+
+                let tails: [[PinyinToken]]
+                if rem.isEmpty {
+                    tails = [[PinyinToken]()]
+                } else {
+                    tails = segmentT9Chunk(rem, baseOffset: offset + posInChunk)
+                }
 
                 var next: [[PinyinToken]] = []
                 for prefix in results {
@@ -316,7 +325,10 @@ final class PinyinSegmenter {
             }
             offset += chunk.count + 1
         }
-        return (results.first?.isEmpty == false) ? results : []
+        if let first = results.first, !first.isEmpty {
+            return results
+        }
+        return []
     }
 
     func candidateSyllablesForT9Prefix(_ digits: String, lockedCount: Int, tokens: [PinyinToken]) -> [String] {
@@ -380,7 +392,7 @@ final class PinyinSegmenter {
     }
 
     private func segmentQuanpin(_ raw: String) -> [[PinyinToken]] {
-        var results: [[PinyinToken]] = [[]]
+        var results: [[PinyinToken]] = [[PinyinToken]()]
         var offset = 0
         for part in raw.split(separator: "'", omittingEmptySequences: false) {
             let chunk = String(part)
@@ -544,7 +556,7 @@ final class PinyinSegmenter {
     // MARK: - 7 种双拼方案统一展开
 
     private func segmentDoublePinyin(_ raw: String, table: [String: [String]], layout: DoublePinyinLayout) -> [[PinyinToken]] {
-        var results: [[PinyinToken]] = [[]]
+        var results: [[PinyinToken]] = [[PinyinToken]()]
         var offset = 0
         for part in raw.split(separator: "'", omittingEmptySequences: false) {
             let chunk = String(part)
@@ -573,7 +585,7 @@ final class PinyinSegmenter {
     ) -> [[PinyinToken]] {
         let chars = Array(chunk)
         let n = chars.count
-        var paths: [[PinyinToken]] = [[]]
+        var paths: [[PinyinToken]] = [[PinyinToken]()]
         var i = 0
 
         while i + 1 < n {
