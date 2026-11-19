@@ -40,14 +40,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee test.log; then
-            {
-              echo "### xcodebuild test FAILED"
-              echo '```'
-              grep -E "(error:|fatal error:|failed \(|Test Case .* failed|BUILD FAILED|TEST FAILED)" test.log | head -n 80 || true
-              echo "--- TAIL 60 ---"
-              tail -n 60 test.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            ERRS=$(grep -E "(error:|fatal error:|failed \(|Test Case .* failed|BUILD FAILED|TEST FAILED|Testing failed)" test.log | head -n 8 || true)
+            if [ -n "$ERRS" ]; then
+              while IFS= read -r line; do
+                echo "::error::${line}"
+              done <<< "$ERRS"
+            fi
+            TAIL=$(tail -n 12 test.log | tr '\n' ' | ' | cut -c1-800)
+            echo "::error::TAIL: ${TAIL}"
             exit 1
           fi
           {
@@ -69,14 +69,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee release.log; then
-            {
-              echo "### xcodebuild Release FAILED"
-              echo '```'
-              grep -E "(error:|fatal error:|BUILD FAILED)" release.log | head -n 80 || true
-              echo "--- TAIL 60 ---"
-              tail -n 60 release.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            ERRS=$(grep -E "(error:|fatal error:|BUILD FAILED)" release.log | head -n 8 || true)
+            if [ -n "$ERRS" ]; then
+              while IFS= read -r line; do
+                echo "::error::${line}"
+              done <<< "$ERRS"
+            fi
+            TAIL=$(tail -n 12 release.log | tr '\n' ' | ' | cut -c1-800)
+            echo "::error::RELEASE_TAIL: ${TAIL}"
             exit 1
           fi
 
