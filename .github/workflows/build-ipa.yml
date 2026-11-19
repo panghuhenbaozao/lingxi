@@ -25,6 +25,7 @@ jobs:
 
       - name: Run Unit Tests on iOS Simulator
         run: |
+          set -o pipefail
           DEST=$(xcrun simctl list devices available iPhone | grep -m1 -oE '[0-9A-F-]{36}')
           if [ -z "$DEST" ]; then
             echo "No available iPhone simulator found"
@@ -32,15 +33,34 @@ jobs:
             exit 1
           fi
           echo "Using iOS Simulator: $DEST"
-          xcodebuild test \
+          if ! xcodebuild test \
             -project Lingxi.xcodeproj \
             -scheme Lingxi \
             -destination "platform=iOS Simulator,id=${DEST}" \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 2>&1 | tee test.log; then
+            {
+              echo "### xcodebuild test FAILED"
+              echo '```'
+              grep -E "(error:|fatal error:|failed \(|Test Case .* failed|BUILD FAILED|TEST FAILED)" test.log | head -n 80 || true
+              echo "--- TAIL 60 ---"
+              tail -n 60 test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "### LingxiTests PASSED"
+            echo '```'
+            grep -E "Test Case .* passed|Executed [0-9]+ tests" test.log | tail -n 30 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build Unsigned Release App & Package IPA
         run: |
-          xcodebuild build \
+          set -o pipefail
+          if ! xcodebuild build \
             -project Lingxi.xcodeproj \
             -scheme Lingxi \
             -configuration Release \
@@ -48,7 +68,17 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_IDENTITY="" 2>&1 | tee release.log; then
+            {
+              echo "### xcodebuild Release FAILED"
+              echo '```'
+              grep -E "(error:|fatal error:|BUILD FAILED)" release.log | head -n 80 || true
+              echo "--- TAIL 60 ---"
+              tail -n 60 release.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
           mkdir -p build/Payload
           cp -R build/Build/Products/Release-iphoneos/Lingxi.app build/Payload/
@@ -57,6 +87,7 @@ jobs:
           cd build
           zip -r -q Lingxi-unsigned.ipa Payload
           ls -lh Lingxi-unsigned.ipa
+          echo "### Release IPA Packaged: $(du -h Lingxi-unsigned.ipa | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Unsigned IPA Artifact
         uses: actions/upload-artifact@v4
