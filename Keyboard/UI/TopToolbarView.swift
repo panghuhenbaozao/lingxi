@@ -67,6 +67,8 @@ final class TopToolbarView: UIView {
     private let pasteTargetView = PasteTargetView()
     private var pasteControl: UIPasteControl?
     private var currentBannerState: ClipboardBannerState = .hidden
+    /// 防闪烁：上次重建剪贴板胶囊时的状态签名，未变化时跳过全量重建
+    private var lastBannerKey = ""
 
     // 长按候选词操作浮条
     private let wordActionContainer = UIView()
@@ -354,7 +356,8 @@ final class TopToolbarView: UIView {
         translateCloseBtn.tintColor = theme.keyText
 
         candidateBar.apply(theme: theme)
-        rebuildBanner()
+        // 主题变化后强制重建胶囊以应用新配色
+        rebuildBanner(force: true)
     }
 
     func update(
@@ -503,6 +506,14 @@ final class TopToolbarView: UIView {
     }
 
     private func rebuildBanner() {
+        rebuildBanner(force: false)
+    }
+
+    private func rebuildBanner(force: Bool) {
+        // 防闪烁：refreshUI 高频触发本方法，剪贴板状态未变化时跳过全量重建（含 UIPasteControl 重建）
+        let bannerKey = "\(currentBannerState)|\(hasFullAccess)"
+        if !force && bannerKey == lastBannerKey { return }
+        lastBannerKey = bannerKey
         bannerStack.arrangedSubviews.forEach {
             bannerStack.removeArrangedSubview($0)
             $0.removeFromSuperview()

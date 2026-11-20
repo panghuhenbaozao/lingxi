@@ -13,6 +13,11 @@ final class CandidateBarView: UIView {
     private var longPressPool: [UILongPressGestureRecognizer] = []
     private var candidates: [PinyinCandidate] = []
     private var theme: ResolvedTheme?
+    /// 防闪烁：上次应用的候选签名与展开状态，未变化时跳过整轮重建
+    private var lastSignature = ""
+    private var lastExpanded = false
+    /// 防闪烁：每个按钮已应用的配置签名，未变化时跳过标题/背景/边框重设
+    private var buttonAppliedKeys: [String] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -51,10 +56,17 @@ final class CandidateBarView: UIView {
     func apply(theme: ResolvedTheme) {
         self.theme = theme
         expandButton.tintColor = theme.keyHintText
+        // 主题变化后强制所有按钮重新应用配色
+        for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
         reloadButtons()
     }
 
     func updateCandidates(_ newList: [PinyinCandidate], expanded: Bool) {
+        // 防闪烁：refreshUI 在打字链路中高频触发，候选与展开状态均未变化时整体跳过
+        let signature = newList.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
+        if signature == lastSignature && expanded == lastExpanded { return }
+        lastSignature = signature
+        lastExpanded = expanded
         self.candidates = newList
         let iconName = expanded ? "chevron.up" : "chevron.down"
         let config = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
@@ -79,6 +91,7 @@ final class CandidateBarView: UIView {
             stackView.addArrangedSubview(btn)
             buttonPool.append(btn)
             longPressPool.append(lp)
+            buttonAppliedKeys.append("")
         }
         return (buttonPool[idx], longPressPool[idx])
     }
@@ -92,6 +105,10 @@ final class CandidateBarView: UIView {
 
     private func reloadButtons() {
         guard let theme else { return }
+        // 关闭隐式动画，避免边框/背景色渐变在 refreshUI 动画上下文中造成闪烁
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         let visibleCount = min(candidates.count, 24)
 
         for idx in 0..<visibleCount {
@@ -107,6 +124,14 @@ final class CandidateBarView: UIView {
             let mainFont = UIFont.systemFont(ofSize: 16.5, weight: isPrimary ? .semibold : .regular)
             // 极简白：首选 = ink 实底 + 白字（Apple 候选栏风格），其余 = ink 文字
             let mainColor = isPrimary ? theme.accentText : theme.candidateText
+
+            // 防闪烁：按钮配置未变化时跳过重设（重设标题/背景/边框会引起视觉抖动）
+            let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)"
+            if buttonAppliedKeys[idx] == configKey {
+                lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
+                continue
+            }
+            buttonAppliedKeys[idx] = configKey
 
             if !cand.codeHint.isEmpty {
                 let attr = NSMutableAttributedString(
@@ -189,6 +214,8 @@ final class ExpandedCandidatesView: UIView {
     private var visibleIndices: [Int] = []
     private var currentFilter: Filter = .all
     private var theme: ResolvedTheme?
+    /// 防闪烁：上次应用的候选签名，未变化时跳过重置筛选与全量重建
+    private var lastSignature = ""
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -237,6 +264,10 @@ final class ExpandedCandidatesView: UIView {
     }
 
     func update(candidates: [PinyinCandidate]) {
+        // 防闪烁：候选未变化时跳过重置筛选与全量重建（打字链路 refreshUI 高频触发）
+        let signature = candidates.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
+        if signature == lastSignature { return }
+        lastSignature = signature
         self.allCandidates = candidates
         currentFilter = .all
         filterControl.selectedSegmentIndex = 0
@@ -251,6 +282,10 @@ final class ExpandedCandidatesView: UIView {
     }
 
     private func rebuildButtons() {
+        // 关闭隐式动画，避免按钮移除/重建过程在动画上下文中闪烁
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         gridContainer.subviews.forEach { $0.removeFromSuperview() }
         guard let theme else { return }
 
