@@ -24,6 +24,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Windows 终端默认 GBK 编码，打印含生僻字的候选词会触发 UnicodeEncodeError；
+# 统一强制 UTF-8 输出，保证脚本在 Windows / macOS / Linux 行为一致。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "Keyboard" / "Resources" / "pinyin.sqlite"
 REGRESS_TSV = ROOT / "Tools" / "data" / "wowtype" / "regress.tsv"

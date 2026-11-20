@@ -134,7 +134,7 @@ struct ThemeStudioView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 8, y: 4)
+        .shadow(color: Color(Design.Palette.stone).opacity(0.12), radius: 8, y: 4)
     }
 
     private func mockKey(_ label: String, fill: Color, text: Color, radius: Double, widthWeight: Double = 1.0) -> some View {
@@ -189,7 +189,7 @@ struct ThemeStudioView: View {
                             Spacer()
                             if isSelected {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(Color(Design.Palette.ink))
                             }
                         }
                         .padding(10)
@@ -197,7 +197,7 @@ struct ThemeStudioView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+                                .stroke(isSelected ? Color(Design.Palette.ink) : .clear, lineWidth: 2)
                         )
                     }
                     .buttonStyle(.plain)
@@ -230,8 +230,8 @@ struct ThemeStudioView: View {
                     Spacer()
                 }
                 .padding(12)
-                .background(Color.accentColor.opacity(0.12))
-                .foregroundStyle(Color.accentColor)
+                .background(Color(Design.Palette.ink).opacity(0.12))
+                .foregroundStyle(Color(Design.Palette.ink))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 

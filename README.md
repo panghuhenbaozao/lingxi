@@ -44,7 +44,7 @@
 1. 将本 `Lingxi` 目录推送到你的 GitHub 仓库（私有或公开均可）。
 2. 打开仓库 **Actions -> Build & Test Lingxi iOS IPA**，点击 **Run workflow**（`push` 也会自动触发）。
 3. macOS runner 会先跑完 `Tools/engine_prototype.py`（含 WowType `regress.tsv` 回归集）与 Xcode `LingxiTests` 单元测试，随后上传 `Lingxi-unsigned-ipa`。
-4. 下载并通过 **SideStore / AltStore** 安装到 iPhone；[AppGroup.swift](file:///C:/Users/14559/.gemini/antigravity/scratch/Lingxi/Shared/AppGroup.swift) 已内置适配侧载生成的 `ALTAppGroups`。
+4. 下载并通过 **SideStore / AltStore** 安装到 iPhone；[AppGroup.swift](Shared/AppGroup.swift) 已内置适配侧载生成的 `ALTAppGroups`。
 
 ### 方式 B：Mac 本地 Xcode 编译
 

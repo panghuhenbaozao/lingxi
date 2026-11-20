@@ -340,10 +340,11 @@ final class UserLexicon {
                 sqlite3_bind_text(stmt, 2, py, -1, Self.sqliteTransient)
             }
             sqlite3_step(stmt)
-            // 同时清理相关二元联想中的孤立项
+            // 同时清理相关二元联想中的孤立项（无论该词是 prev 还是 next）
             var bgStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "DELETE FROM bigrams WHERE next_word = ?", -1, &bgStmt, nil) == SQLITE_OK, let bgStmt {
+            if sqlite3_prepare_v2(db, "DELETE FROM bigrams WHERE next_word = ? OR prev_word = ?", -1, &bgStmt, nil) == SQLITE_OK, let bgStmt {
                 sqlite3_bind_text(bgStmt, 1, word, -1, Self.sqliteTransient)
+                sqlite3_bind_text(bgStmt, 2, word, -1, Self.sqliteTransient)
                 sqlite3_step(bgStmt)
                 sqlite3_finalize(bgStmt)
             }

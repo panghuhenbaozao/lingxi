@@ -162,7 +162,7 @@ final class ClipboardStore {
     /// 记录一条新的剪贴板内容（自动去重并保留置顶状态）。
     @discardableResult
     static func record(_ rawText: String, changeCount: Int? = nil) -> ClipboardItem? {
-        let trimmed = rawText.trimmingCharacters(in: .newlines)
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
         var st = storage

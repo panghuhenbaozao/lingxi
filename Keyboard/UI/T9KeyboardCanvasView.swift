@@ -95,7 +95,6 @@ final class T9KeyboardCanvasView: UIView {
     private var activeTouches: [UITouch: ActiveTouch] = [:]
     private var longPressWorkItems: [UITouch: DispatchWorkItem] = [:]
     private var repeatDeleteTimer: Timer?
-    private var repeatDeleteStartTime: CFTimeInterval = 0
 
     private let idlePunctuations = ["，", "。", "？", "！", "、", "：", "；", "…", "～", "@"]
 
@@ -601,14 +600,10 @@ final class T9KeyboardCanvasView: UIView {
 
     private func startRepeatDelete() {
         stopRepeatDelete()
-        repeatDeleteStartTime = CACurrentMediaTime()
         onEvent?(.backspaceRepeat)
         repeatDeleteTimer = Timer.scheduledTimer(withTimeInterval: 0.085, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.onEvent?(.backspaceRepeat)
-            if CACurrentMediaTime() - self.repeatDeleteStartTime > 1.1 {
-                self.onEvent?(.backspaceRepeat)
-            }
         }
     }
 
@@ -701,6 +696,8 @@ private final class T9KeyCapView: UIView {
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = theme.keyShadowOpacity
+        bgView.layer.borderWidth = 0.7
+        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
 
         iconView.isHidden = true
         titleLabel.isHidden = false

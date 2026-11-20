@@ -24,6 +24,11 @@
 import argparse
 import sys
 
+# 强制 UTF-8 输出：输出内容含大量中文词条，Windows GBK 终端重定向时会损坏生成的 tsv。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 MIN_WEIGHT = 1  # 规范字没有权重时用的保底频次
 CODE_CHARS = set("abcdefghijklmnopqrstuvwxy")
 

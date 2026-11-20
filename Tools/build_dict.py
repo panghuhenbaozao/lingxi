@@ -26,6 +26,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# 同 engine_prototype.py：强制 UTF-8 输出，避免 Windows GBK 终端打印中文时报 UnicodeEncodeError。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "Tools" / "data"
 RIME_ICE = DATA / "rime_ice"

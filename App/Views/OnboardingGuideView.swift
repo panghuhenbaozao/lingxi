@@ -7,20 +7,27 @@ struct OnboardingGuideView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("第一步：添加灵犀输入法") {
+                Section {
                     guideRow(step: "1", title: "前往系统设置", detail: "点击下方「打开系统设置」，进入「灵犀输入法 -> 键盘」。")
                     guideRow(step: "2", title: "开启灵犀键盘", detail: "打开「灵犀输入法」开关；如果列表里没有，请在 系统设置 -> 通用 -> 键盘 -> 键盘 -> 添加新键盘 中选择「灵犀输入法」。")
+                } header: {
+                    Text("第一步：添加灵犀输入法").font(.headline)
                 }
 
-                Section("第二步：开启「允许完全访问」") {
+                Section {
                     guideRow(step: "3", title: "打开允许完全访问", detail: "用于：AI 联网润色翻译、读取系统按键音效、以及主 App 与键盘之间同步皮肤/词库/剪贴板。")
                     Text("隐私承诺：普通拼音打字完全在本地 SQLite 引擎运行，绝不上传您的按键记录。")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color(Design.Palette.slate))
+                        .padding(.top, Design.Spacing.xs)
+                } header: {
+                    Text("第二步：开启「允许完全访问」").font(.headline)
                 }
 
-                Section("第三步：切出键盘即可开打") {
+                Section {
                     guideRow(step: "4", title: "切换键盘", detail: "在任意输入框长按左下角地球仪 🌐 图标，选择「灵犀输入法」。")
+                } header: {
+                    Text("第三步：切出键盘即可开打").font(.headline)
                 }
 
                 Section {
@@ -37,8 +44,10 @@ struct OnboardingGuideView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(Color(Design.Palette.ink))
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("启用灵犀输入法")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -50,18 +59,26 @@ struct OnboardingGuideView: View {
     }
 
     private func guideRow(step: String, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 14) {
             Text(step)
-                .font(.caption.bold())
-                .frame(width: 24, height: 24)
-                .background(Color.accentColor.opacity(0.15))
-                .foregroundStyle(Color.accentColor)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(Design.Palette.ink))
+                .frame(width: 26, height: 26)
+                .background(Color(Design.Palette.surface))
                 .clipShape(Circle())
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline)
-                Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                .overlay(
+                    Circle()
+                        .stroke(Color(Design.Palette.hairline), lineWidth: 1)
+                )
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(Color(Design.Palette.ink))
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(Color(Design.Palette.slate))
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 }

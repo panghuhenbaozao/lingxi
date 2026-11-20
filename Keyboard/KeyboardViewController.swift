@@ -26,7 +26,7 @@ final class KeyboardViewController: UIInputViewController {
     // 配置与外观
     private var settings = LingxiSettings.load()
     private var themeCustomization = ThemeCustomization.load()
-    private var resolvedTheme: ResolvedTheme!
+    private var resolvedTheme = ResolvedTheme.resolve(isDarkAppearance: false, targetSize: CGSize(width: 430, height: 280))
     private var heightConstraint: NSLayoutConstraint?
 
     // 视图层级
@@ -624,6 +624,7 @@ final class KeyboardViewController: UIInputViewController {
 
         case .cursorMove(let steps):
             feedback.triggerCursorTick(settings: settings)
+            feedback.triggerCursorSound(settings: settings)
             if steps != 0 && aiPromptDraft == nil {
                 lastSelectionUndo = nil
                 performEdit {
@@ -670,6 +671,7 @@ final class KeyboardViewController: UIInputViewController {
 
         case .glideCompleted(let touchPoints, let keyCenters, let keyPitch):
             feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
+            feedback.triggerCursorSound(settings: settings)
             handleGlideInput(touchPoints: touchPoints, keyCenters: keyCenters, keyPitch: keyPitch)
         }
     }
@@ -812,6 +814,7 @@ final class KeyboardViewController: UIInputViewController {
 
         case .cursorMove(let steps):
             feedback.triggerCursorTick(settings: settings)
+            feedback.triggerCursorSound(settings: settings)
             if steps != 0 && aiPromptDraft == nil {
                 lastSelectionUndo = nil
                 performEdit {
@@ -1661,7 +1664,9 @@ final class KeyboardViewController: UIInputViewController {
 
     private func selectCandidate(at index: Int) {
         guard currentCandidates.indices.contains(index) else { return }
+        // 选词反馈：一次按键级震动 + 一声音效即可，不再叠加 triggerCursorTick（双震会粘连）。
         feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
+        feedback.triggerCursorSound(settings: settings)
         clearUndoBuffer()
         let cand = currentCandidates[index]
 
@@ -1879,6 +1884,7 @@ final class KeyboardViewController: UIInputViewController {
         let cand = currentCandidates[index]
         guard cand.source == .dictionary || cand.source == .userLearned else { return }
         feedback.triggerCursorTick(settings: settings)
+        feedback.triggerCursorSound(settings: settings)
         let isPinned = engine?.userLexicon.allEntries(limit: 100)
             .first(where: { $0.word == cand.word && $0.py == cand.py })?.isPinned ?? false
         toolbarView.showWordActionBar(word: cand.word, py: cand.py, isPinned: isPinned)
@@ -2506,7 +2512,8 @@ final class KeyboardViewController: UIInputViewController {
     private func refreshToolbar() {
         var composingDisplay: String
         if rawComposing.isEmpty {
-            composingDisplay = ""
+            // 英文联想模式：输入中预览要可见（打字就有显示，不能空）
+            composingDisplay = englishComposing
         } else if !isEnglishMode && !isUsingT9Layout && SmartCandidateHelper.isVToolQuery(rawComposing, scheme: settings.inputScheme) {
             if rawComposing.count == 1 && CustomWordStore.match(rawInput: rawComposing).isEmpty {
                 let keyHint = settings.inputScheme == .quanpin ? "v" : "V"

@@ -6,7 +6,7 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            HomeTestView()
+            HomeTestView(onSelectTab: { selectedTab = $0 })
                 .tabItem {
                     Label("体验", systemImage: "keyboard")
                 }
@@ -32,7 +32,7 @@ struct ContentView: View {
 
             DictionarySettingsView()
                 .tabItem {
-                    Label("词库设置", systemImage: "slider.horizontal.3")
+                    Label("设置", systemImage: "gearshape")
                 }
                 .tag(4)
         }

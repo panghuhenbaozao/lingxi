@@ -105,7 +105,8 @@ final class CandidateBarView: UIView {
             let displayWord = cand.word.replacingOccurrences(of: "\n", with: " ")
             let prefixMark = needsBolt ? "⚡ " : ""
             let mainFont = UIFont.systemFont(ofSize: 16.5, weight: isPrimary ? .semibold : .regular)
-            let mainColor = isPrimary ? theme.candidateHighlight : theme.candidateText
+            // 极简白：首选 = ink 实底 + 白字（Apple 候选栏风格），其余 = ink 文字
+            let mainColor = isPrimary ? theme.accentText : theme.candidateText
 
             if !cand.codeHint.isEmpty {
                 let attr = NSMutableAttributedString(
@@ -128,8 +129,15 @@ final class CandidateBarView: UIView {
                 btn.setTitleColor(mainColor, for: .normal)
             }
             btn.backgroundColor = isPrimary
-                ? theme.candidateHighlight.withAlphaComponent(0.12)
+                ? theme.candidateHighlight
                 : .clear
+            // 极简白：首选变深底/白字（Apple 风），次选补 hairline 边框与提亮文字，层次分明
+            if isPrimary {
+                btn.layer.borderWidth = 0
+            } else {
+                btn.layer.borderWidth = 0.5
+                btn.layer.borderColor = theme.hairline.cgColor
+            }
             lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
         }
 
@@ -139,6 +147,7 @@ final class CandidateBarView: UIView {
     }
 
     @objc private func handleCandidateTap(_ sender: UIButton) {
+        // 点选反馈由 KVC selectCandidate 统一承担（triggerKeyFeedback + triggerCursorTick + 音效），此处不再重复震动。
         onSelectCandidate?(sender.tag)
     }
 

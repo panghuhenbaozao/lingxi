@@ -188,8 +188,9 @@ final class AIAssistantPanelView: UIView {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
         let nonLeading = String(beforeCursor.drop(while: { $0.isWhitespace }))
-        self.beforeCursorReplaceCount = nonLeading.count
         self.beforeCursorText = nonLeading.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 替换计数只算到剥除尾部空白后的文本，不吞用户的尾随空格
+        self.beforeCursorReplaceCount = self.beforeCursorText.count
         self.clipboardText = (clipboardText ?? ClipboardStore.items().first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let preferredAction {
@@ -313,8 +314,8 @@ final class AIAssistantPanelView: UIView {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
         let nonLeading = String(beforeCursor.drop(while: { $0.isWhitespace }))
-        self.beforeCursorReplaceCount = nonLeading.count
         self.beforeCursorText = nonLeading.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.beforeCursorReplaceCount = self.beforeCursorText.count
         applyTheme(theme)
         rebuildActionButtons(theme: theme)
 

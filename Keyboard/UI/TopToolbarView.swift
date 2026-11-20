@@ -111,7 +111,7 @@ final class TopToolbarView: UIView {
         }
         addSubview(pasteTargetView)
 
-        composingLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
+        composingLabel.font = .systemFont(ofSize: 13.5, weight: .semibold)
         composingLabel.isHidden = true
         addSubview(composingLabel)
 
@@ -129,7 +129,7 @@ final class TopToolbarView: UIView {
 
         addSubview(idleContainer)
         buttonsStack.axis = .horizontal
-        buttonsStack.alignment = .center
+        buttonsStack.alignment = .fill // .fill：系统按钮被拉伸到 44pt，触摸目标符合 HIG
         buttonsStack.spacing = 3
         idleContainer.addSubview(buttonsStack)
 
@@ -271,7 +271,9 @@ final class TopToolbarView: UIView {
         idleContainer.frame = bounds
         let buttonsSize = buttonsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         let buttonsWidth = min(buttonsSize.width, bounds.width - 12)
-        buttonsStack.frame = CGRect(x: 8, y: (bounds.height - 30) / 2, width: buttonsWidth, height: 30)
+        // 新布局：工具按钮 44pt 打底（符合触摸目标规范），AI 按钮最醒目
+        let toolH: CGFloat = 44
+        buttonsStack.frame = CGRect(x: 8, y: (bounds.height - toolH) / 2, width: buttonsWidth, height: toolH)
 
         let bannerX = buttonsStack.frame.maxX + 6
         let bannerW = max(0, bounds.width - bannerX - 6)

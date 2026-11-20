@@ -100,7 +100,11 @@ struct AISettingsView: View {
                     if let msg = testStatusMessage {
                         Text(msg)
                             .font(.footnote)
-                            .foregroundStyle(testSucceeded ? .green : .red)
+                            .foregroundStyle(
+                                testSucceeded
+                                    ? Color(Design.Palette.success)
+                                    : Color(Design.Palette.error)
+                            )
                     }
                 } header: {
                     Text("连通性诊断")

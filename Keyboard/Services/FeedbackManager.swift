@@ -53,6 +53,12 @@ final class FeedbackManager {
         selectionFeedback.prepare()
     }
 
+    /// 动态音效：光标/滑行/滑动指示（每步小声滴，给“动”的节奏感）
+    func triggerCursorSound(settings: LingxiSettings) {
+        guard settings.keySoundEnabled else { return }
+        UIDevice.current.playInputClick()
+    }
+
     private func playSound(tone: KeyTone, hasFullAccess: Bool) {
         if hasFullAccess {
             let soundID: SystemSoundID

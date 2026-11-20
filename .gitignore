@@ -1,11 +1,13 @@
 # Xcode & Build Artifacts
 build/
+build-test/
 DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 *.ipa
 *.dSYM.zip
 *.dSYM
+*.log
 
 # macOS / Windows / Python
 .DS_Store

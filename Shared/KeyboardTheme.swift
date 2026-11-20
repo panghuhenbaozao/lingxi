@@ -59,6 +59,28 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
 
     static let presets: [KeyboardThemePreset] = [
         KeyboardThemePreset(
+            id: "lingxi_pure",
+            name: "极简白",
+            subtitle: "净洁直白 · 线条静美",
+            isDark: false,
+            canvasTop: HexColor("#FFFFFF"),
+            canvasBottom: HexColor("#FFFFFF"),
+            toolbarBackground: HexColor("#FFFFFF"),
+            keyFill: HexColor("#FFFFFF"),
+            keyPressedFill: HexColor("#D4D7DC"),
+            specialKeyFill: HexColor("#EDEDF0"),
+            specialKeyPressedFill: HexColor("#D4D7DC"),
+            accentFill: HexColor("#0A0A0A"),
+            accentPressedFill: HexColor("#222222"),
+            keyText: HexColor("#0A0A0A"),
+            keyHintText: HexColor("#6E6E73"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#0A0A0A"),
+            candidateHighlight: HexColor("#0A0A0A"),
+            keyShadowHex: HexColor("#E5E7EB"),
+            keyShadowOpacity: 0.1
+        ),
+        KeyboardThemePreset(
             id: "lingxi_light",
             name: "灵犀白昼",
             subtitle: "通透磨砂 · 清晰护眼",
@@ -199,7 +221,7 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
 
 /// 用户皮肤自定义配置。
 struct ThemeCustomization: Codable, Equatable {
-    var selectedThemeID: String = "lingxi_light"
+    var selectedThemeID: String = "lingxi_pure"
     var darkThemeID: String = "midnight_geek"
     var adaptiveDarkMode: Bool = true
     var customBackgroundFileName: String? = nil
@@ -240,7 +262,11 @@ struct ThemeCustomization: Codable, Equatable {
             if chosen.isDark {
                 return chosen
             }
-            return KeyboardThemePreset.find(id: darkThemeID)
+            let dark = KeyboardThemePreset.find(id: darkThemeID)
+            if dark.isDark {
+                return dark
+            }
+            return KeyboardThemePreset.presets.first(where: { $0.isDark }) ?? dark
         }
         return KeyboardThemePreset.find(id: selectedThemeID)
     }

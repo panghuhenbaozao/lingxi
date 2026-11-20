@@ -26,6 +26,23 @@ jobs:
           xcodegen generate
           xcodebuild -version
 
+      - name: Run Unit Tests (LingxiTests)
+        run: |
+          set -o pipefail
+          if ! xcodebuild test \
+            -project Lingxi.xcodeproj \
+            -scheme Lingxi \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -derivedDataPath build-test \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee test.log; then
+            ERR_SUMMARY=$(grep -iE "(error:|failed|TEST FAILED)" test.log | head -n 12 | tr '\r\n' ' | ' | cut -c1-1200 || true)
+            echo "::error::TEST_ERRORS: ${ERR_SUMMARY}"
+            TAIL=$(tail -n 15 test.log | tr '\r\n' ' | ' | cut -c1-900)
+            echo "::error::TEST_TAIL: ${TAIL}"
+            exit 1
+          fi
+
       - name: Build Unsigned Release App & Package IPA
         run: |
           set -o pipefail

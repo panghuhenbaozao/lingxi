@@ -80,8 +80,8 @@ struct ClipboardPhrasesView: View {
                                     .font(.caption.bold())
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Color.accentColor.opacity(0.15))
-                                    .foregroundStyle(Color.accentColor)
+                                    .background(Color(Design.Palette.surfaceSoft))
+                                    .foregroundStyle(Color(Design.Palette.ink))
                                     .clipShape(Capsule())
                             }
                             if item.isPinned {

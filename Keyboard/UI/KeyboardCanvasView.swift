@@ -111,7 +111,6 @@ final class KeyboardCanvasView: UIView {
     private var activeTouches: [UITouch: ActiveTouch] = [:]
     private var longPressWorkItems: [UITouch: DispatchWorkItem] = [:]
     private var repeatDeleteTimer: Timer?
-    private var repeatDeleteStartTime: CFTimeInterval = 0
     private var lastShiftTapTime: CFTimeInterval = 0
 
     override init(frame: CGRect) {
@@ -535,6 +534,8 @@ final class KeyboardCanvasView: UIView {
             let pt = touch.location(in: keysContainer)
             guard let hitKey = nearestKey(at: pt) else { continue }
 
+            KeyboardVibrator.shared.lightTap()
+
             // Rollover：如果有前一个尚未抬起的字符键，按下新键瞬间立即先提交前一个键
             flushPreviousCharacterTouches(excluding: touch)
 
@@ -579,17 +580,19 @@ final class KeyboardCanvasView: UIView {
 
             switch key.kind {
             case .space:
-                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= 14) {
+                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= 10) {
                     if !track.trackpadActive {
                         track.trackpadActive = true
                         track.lastTrackpadX = pt.x
                         cancelLongPress(for: touch)
+                        KeyboardVibrator.shared.softTap()
                     }
                     let delta = pt.x - track.lastTrackpadX
                     let stepWidth: CGFloat = 10
                     if abs(delta) >= stepWidth {
                         let steps = Int(delta / stepWidth)
                         track.lastTrackpadX += CGFloat(steps) * stepWidth
+                        // 每步敲击由 KVC cursorMove 的 triggerCursorTick + triggerCursorSound 承担，不再重复 spaceTick。
                         onEvent?(.cursorMove(steps: steps))
                     }
                     activeTouches[touch] = track
@@ -603,7 +606,6 @@ final class KeyboardCanvasView: UIView {
                     activeTouches[touch] = track
                     onEvent?(.backspaceSwipeClear)
                 }
-
             case .character(_, let secondary, let downPunct, _):
                 if track.longPressTriggered && popupView.isShowingAlternatives {
                     let hostPt = touch.location(in: self)
@@ -757,6 +759,8 @@ final class KeyboardCanvasView: UIView {
     private func commitKey(_ key: KeyModel, track: ActiveTouch) {
         switch key.kind {
         case .character(let primary, let secondary, let downPunct, _):
+            // 提交反馈由 KVC 事件回调的 triggerKeyFeedback 统一承担（含音效与强度映射），
+            // 此处不再重复触发 mediumTap，避免同刻双震粘连。
             if track.longPressTriggered, let picked = popupView.selectedText {
                 onEvent?(.character(picked))
             } else if track.flickedSecondary, let sec = secondary {
@@ -810,13 +814,13 @@ final class KeyboardCanvasView: UIView {
         let delay: TimeInterval
         switch key.kind {
         case .backspace:
-            delay = 0.34
+            delay = 0.30
         case .character(_, _, _, let alts) where !alts.isEmpty:
-            delay = 0.38
+            delay = 0.32
         case .punctuation(_, let alts) where !alts.isEmpty:
-            delay = 0.35
+            delay = 0.30
         case .space:
-            delay = 0.25
+            delay = 0.22
         default:
             return
         }
@@ -829,6 +833,7 @@ final class KeyboardCanvasView: UIView {
             switch key.kind {
             case .backspace:
                 self.startRepeatDelete()
+                KeyboardVibrator.shared.heavyTap()
             case .character(_, _, _, let alts):
                 let anchor = self.keysContainer.convert(key.rect, to: self)
                 self.popupView.showAlternatives(alts, anchorRect: anchor, in: self.bounds)
@@ -853,15 +858,10 @@ final class KeyboardCanvasView: UIView {
 
     private func startRepeatDelete() {
         stopRepeatDelete()
-        repeatDeleteStartTime = CACurrentMediaTime()
         onEvent?(.backspaceRepeat)
         repeatDeleteTimer = Timer.scheduledTimer(withTimeInterval: 0.085, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let elapsed = CACurrentMediaTime() - self.repeatDeleteStartTime
             self.onEvent?(.backspaceRepeat)
-            if elapsed > 1.1 {
-                self.onEvent?(.backspaceRepeat)
-            }
         }
     }
 
@@ -944,23 +944,24 @@ final class KeyboardCanvasView: UIView {
     }
 
     private func nearestKey(at point: CGPoint) -> KeyModel? {
-        // 1. 若落点位于按键核心内圈（留出 3.5pt 键缝缓冲），直接命中该键
-        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 3.5, dy: 3.5).contains(point) }) {
+        // 1. 若落点位于按键核心内圈（留出 1.5pt 键缝缓冲），直接命中该键
+        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 1.5, dy: 1.5).contains(point) }) {
             return coreHit
         }
-        // 2. 边缘/键缝区域：Apple 原生手感扩边 + 动态下一合法拼音按键热区加权（降低 26% 有效距离）
+        // 2. 边缘/键缝区域：紧凑扩边（Apple 原生手感 ~5pt/键宽，防误触抢占邻键）
+        //    + 动态下一合法拼音按键热区加权（降低 26% 有效距离）
         let gridW = keysContainer.bounds.width
         let useDynamicBias = settings.dynamicKeyHitBoxEnabled && !validNextLetters.isEmpty && !isEnglishMode
         var best: KeyModel?
         var bestDist = CGFloat.infinity
         for key in keys {
-            var hitRect = key.rect.insetBy(dx: -8, dy: -8)
+            var hitRect = key.rect.insetBy(dx: -3, dy: -5)
             if key.id == "k_a" {
                 hitRect = CGRect(x: 0, y: hitRect.minY, width: hitRect.maxX, height: hitRect.height)
             } else if key.id == "k_l" {
                 hitRect = CGRect(x: hitRect.minX, y: hitRect.minY, width: max(hitRect.width, gridW - hitRect.minX), height: hitRect.height)
             } else if key.id == "k_space" {
-                hitRect = key.rect.insetBy(dx: -4, dy: -10)
+                hitRect = key.rect.insetBy(dx: -2, dy: -4)
             }
             guard hitRect.contains(point) else { continue }
             let dx = point.x - key.rect.midX
@@ -993,6 +994,7 @@ private final class KeyCapView: UIView {
 
     private var theme: ResolvedTheme?
     private var model: KeyModel?
+    private var spaceGradLayer: CAGradientLayer?
 
     private static let doublePinyinHintsByScheme: [InputScheme: [String: String]] = {
         var dict: [InputScheme: [String: String]] = [:]
@@ -1071,6 +1073,9 @@ private final class KeyCapView: UIView {
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = theme.keyShadowOpacity
+        // 极简白：每个键帽以 hairline 边框分界（边框=键体深色淡版），已按的态用 keyPressedFill
+        bgView.layer.borderWidth = 0.7
+        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
         if bgView.bounds.width > 0 {
             bgView.layer.shadowPath = UIBezierPath(
                 roundedRect: bgView.bounds,
@@ -1180,12 +1185,37 @@ private final class KeyCapView: UIView {
 
     func setPressed(_ pressed: Bool) {
         guard let theme, let model else { return }
+        // 极简白：按下微移 -1pt，视觉上变“压实”
+        bgView.transform = pressed ? CGAffineTransform(translationX: 0, y: -1) : .identity
+        if let theme {
+            bgView.layer.shadowRadius = pressed ? 0 : 0.6
+        }
+        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
         if model.isAccent {
             bgView.backgroundColor = pressed ? theme.accentPressedFill : theme.accentFill
         } else if model.isSpecial {
             bgView.backgroundColor = pressed ? theme.specialKeyPressedFill : theme.specialKeyFill
         } else {
             bgView.backgroundColor = pressed ? theme.keyPressedFill : theme.keyFill
+        }
+
+        // 空格键：边缘微淡，给空格一点节奏感
+        if model.kind == .space, spaceGradLayer == nil {
+            let grad = CAGradientLayer()
+            grad.startPoint = CGPoint(x: 0, y: 0.5)
+            grad.endPoint = CGPoint(x: 1, y: 0.5)
+            bgView.layer.addSublayer(grad)
+            spaceGradLayer = grad
+        }
+        if let grad = spaceGradLayer {
+            grad.colors = [
+                theme.keyFill.withAlphaComponent(0.0).cgColor,
+                theme.keyFill.withAlphaComponent(0.5).cgColor,
+                theme.keyFill.withAlphaComponent(0.5).cgColor,
+                theme.keyFill.withAlphaComponent(0.0).cgColor
+            ]
+            grad.locations = [0, 0.08, 0.92, 1]
+            grad.frame = bgView.bounds.insetBy(dx: -2, dy: -2)
         }
     }
 }
