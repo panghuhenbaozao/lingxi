@@ -57,6 +57,8 @@ open Lingxi.xcodeproj
 
 为 `Lingxi` 和 `LingxiKeyboard` 选好 Apple ID **Team** 后连接 iPhone 按 `Cmd + R` 运行。
 
+> 注意：`project.yml` 中 `DEVELOPMENT_TEAM` 默认为空（CI 未签名构建无需设置）。本地真机运行或自行签名打包时，请先将其改为你的 Apple Developer Team ID，或在 Xcode 的 Signing & Capabilities 中直接选择 Team。
+
 ## 开源致谢与数据许可
 
 - **Engine Design, Shuangpin / Wubi 86 Logic, Hotwords, Emoji Mapping & Regression Suite**: [Gloridust/WowType](https://github.com/Gloridust/WowType) (MIT / Apache-2.0)

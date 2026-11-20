@@ -35,6 +35,7 @@ jobs:
             -configuration Debug \
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
             -derivedDataPath build-test \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee test.log; then
             ERR_SUMMARY=$(grep -iE "(error:|failed|TEST FAILED)" test.log | head -n 12 | tr '\r\n' ' | ' | cut -c1-1200 || true)
             echo "::error::TEST_ERRORS: ${ERR_SUMMARY}"
@@ -52,6 +53,7 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" 2>&1 | tee release.log; then
