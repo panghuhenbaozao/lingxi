@@ -38,6 +38,8 @@ final class TopToolbarView: UIView {
         case pickLastChar(String)
         case sendAIPrompt
         case cancelAIPrompt
+        /// v4：聚合面板内触发被收纳按钮的动作
+        case overflowTrigger(ToolbarButtonID)
     }
 
     var onAction: ((Action) -> Void)?
@@ -59,6 +61,14 @@ final class TopToolbarView: UIView {
     private let layoutButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
     private let undoButton = UIButton(type: .system)
+    /// v4 极简态：『⋯』聚合按钮——收纳被配置隐藏的低频按钮，点开弹出选择面板
+    private let overflowButton = UIButton(type: .system)
+    /// 聚合面板（半屏菜单）：展示被收起的按钮，选中即触发对应动作
+    private let overflowPanel = UIView()
+    private var overflowPanelButtons: [(id: ToolbarButtonID, btn: UIButton)] = []
+    private var isOverflowPanelVisible = false
+    /// 当前被收纳的按钮清单（applyToolbarConfiguration 时更新，主题重建用）
+    private var currentHiddenIDs: [ToolbarButtonID] = []
 
     // 剪贴板智能胶囊
     private let bannerContainer = UIView()
@@ -148,11 +158,13 @@ final class TopToolbarView: UIView {
         configureToolButton(editButton, title: nil, symbol: "arrow.up.and.down.and.arrow.left.and.right", action: #selector(didTapEdit))
         configureToolButton(layoutButton, title: "九键", symbol: nil, action: #selector(didTapLayout))
         configureToolButton(settingsButton, title: nil, symbol: "slider.horizontal.3", action: #selector(didTapSettings))
+        configureToolButton(overflowButton, title: nil, symbol: "ellipsis", action: #selector(didTapOverflow))
         // VoiceOver：纯图标按钮补充功能标签（带文字标题的按钮沿用标题）
         clipboardButton.accessibilityLabel = "剪贴板"
         emojiButton.accessibilityLabel = "表情符号"
         editButton.accessibilityLabel = "文本编辑面板"
         settingsButton.accessibilityLabel = "键盘设置"
+        overflowButton.accessibilityLabel = "更多功能"
 
         undoButton.setTitle(" 撤销", for: .normal)
         let undoImg = UIImage(systemName: "arrow.uturn.backward", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
@@ -164,7 +176,7 @@ final class TopToolbarView: UIView {
         undoButton.accessibilityLabel = "撤销"
         undoButton.addTarget(self, action: #selector(didTapUndo), for: .touchUpInside)
 
-        [aiButton, translateButton, clipboardButton, emojiButton, editButton, layoutButton, settingsButton, undoButton].forEach {
+        [aiButton, translateButton, clipboardButton, emojiButton, editButton, layoutButton, settingsButton, undoButton, overflowButton].forEach {
             buttonsStack.addArrangedSubview($0)
         }
 
@@ -180,6 +192,19 @@ final class TopToolbarView: UIView {
 
         wordActionContainer.isHidden = true
         addSubview(wordActionContainer)
+
+        // v4 聚合面板：横排胶囊浮层，覆盖工具栏区域（与词操作浮条同层）
+        // 点击面板任意处关闭（cancelsTouchesInView=false，按钮 touchUpInside 不受影响）
+        let overflowDismissTap = UITapGestureRecognizer(target: self, action: #selector(didTapOverflowDismiss))
+        overflowDismissTap.cancelsTouchesInView = false
+        overflowPanel.addGestureRecognizer(overflowDismissTap)
+        overflowPanel.isHidden = true
+        overflowPanel.layer.cornerRadius = 14
+        overflowPanel.layer.shadowColor = UIColor.black.cgColor
+        overflowPanel.layer.shadowOpacity = 0.12
+        overflowPanel.layer.shadowRadius = 8
+        overflowPanel.layer.shadowOffset = CGSize(width: 0, height: 3)
+        addSubview(overflowPanel)
 
         setupAIPromptBar()
         setupTranslateBar()
@@ -274,6 +299,7 @@ final class TopToolbarView: UIView {
         let key = sorted.map { "\($0.buttonID.rawValue):\($0.isVisible ? 1 : 0)" }.joined(separator: ",")
         guard key != lastToolbarLayoutKey else { return }
         lastToolbarLayoutKey = key
+        var hiddenIDs: [ToolbarButtonID] = []
         for item in sorted {
             let btn = button(for: item.buttonID)
             buttonsStack.addArrangedSubview(btn)
@@ -282,8 +308,14 @@ final class TopToolbarView: UIView {
                 btn.isHidden = !item.isVisible || undoButton.isHidden
             } else {
                 btn.isHidden = !item.isVisible
+                if !item.isVisible { hiddenIDs.append(item.buttonID) }
             }
         }
+        // v4 极简态：『⋯』固定在栈尾，仅当存在被收纳按钮时显示；面板内容同步重建
+        buttonsStack.addArrangedSubview(overflowButton)
+        overflowButton.isHidden = hiddenIDs.isEmpty
+        currentHiddenIDs = hiddenIDs
+        rebuildOverflowPanel(hiddenIDs: hiddenIDs)
         setNeedsLayout()
     }
 
@@ -338,6 +370,12 @@ final class TopToolbarView: UIView {
 
         wordActionContainer.frame = bounds
 
+        // v4 聚合面板与工具栏同层覆盖；stack 跟随面板实际尺寸（构建时面板 bounds 尚为零，不能只靠 autoresizing）
+        overflowPanel.frame = bounds
+        if let stack = overflowPanel.subviews.first as? UIStackView {
+            stack.frame = overflowPanel.bounds.insetBy(dx: 8, dy: 0)
+        }
+
         aiPromptBar.frame = bounds
         let cancelW: CGFloat = 50
         let sendW: CGFloat = 62
@@ -376,11 +414,12 @@ final class TopToolbarView: UIView {
         translateButton.tintColor = theme.keyText
         translateButton.setTitleColor(theme.keyText, for: .normal)
 
-        for btn in [clipboardButton, emojiButton, editButton, layoutButton, settingsButton] {
+        for btn in [clipboardButton, emojiButton, editButton, layoutButton, settingsButton, overflowButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.75)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
         }
+        overflowPanel.backgroundColor = theme.toolbarBg
         undoButton.backgroundColor = theme.accentFill
         undoButton.tintColor = theme.accentText
         undoButton.setTitleColor(theme.accentText, for: .normal)
@@ -409,6 +448,8 @@ final class TopToolbarView: UIView {
         candidateBar.apply(theme: theme)
         // 主题变化后强制重建胶囊以应用新配色
         rebuildBanner(force: true)
+        // v4：主题变化后同步重建聚合面板配色
+        rebuildOverflowPanel(hiddenIDs: currentHiddenIDs)
     }
 
     func update(
@@ -485,7 +526,12 @@ final class TopToolbarView: UIView {
 
         composingLabel.text = showComposingStrip ? composingDisplay : ""
         candidateBar.isHidden = !hasCandidates
-        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
+        // v4：聚合面板打开时工具按钮区保持隐藏（update 高频触发不能破坏面板态）
+        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden) || isOverflowPanelVisible
+        // v4：离开空闲态时自动收起聚合面板
+        if hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden) {
+            if isOverflowPanelVisible { hideOverflowPanel() }
+        }
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
         if let theme {
@@ -680,6 +726,89 @@ final class TopToolbarView: UIView {
             self?.onAction?(.dismissClipboardBanner)
         }
         return btn
+    }
+
+    // MARK: v4 聚合面板（⋯）
+
+    /// 重建聚合面板：横排胶囊按钮（被收纳功能）+ 收起按钮
+    private func rebuildOverflowPanel(hiddenIDs: [ToolbarButtonID]) {
+        overflowPanel.subviews.forEach { $0.removeFromSuperview() }
+        overflowPanelButtons = []
+        guard !hiddenIDs.isEmpty, let theme else { return }
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = 6
+        stack.frame = overflowPanel.bounds.insetBy(dx: 8, dy: 0)
+        stack.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        for id in hiddenIDs {
+            let btn = ActionClosureButton(type: .system)
+            let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            btn.setImage(UIImage(systemName: id.symbolName, withConfiguration: cfg), for: .normal)
+            btn.setTitle(" " + overflowDisplayName(for: id), for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.9)
+            btn.tintColor = theme.keyText
+            btn.setTitleColor(theme.keyText, for: .normal)
+            btn.layer.cornerRadius = 13
+            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
+            btn.accessibilityLabel = overflowDisplayName(for: id)
+            btn.actionHandler = { [weak self] in
+                self?.hideOverflowPanel()
+                self?.onAction?(.overflowTrigger(id))
+            }
+            stack.addArrangedSubview(btn)
+            overflowPanelButtons.append((id, btn))
+        }
+        let closeBtn = ActionClosureButton(type: .system)
+        let xCfg = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        closeBtn.setImage(UIImage(systemName: "chevron.up", withConfiguration: xCfg), for: .normal)
+        closeBtn.tintColor = theme.keyHintText
+        closeBtn.accessibilityLabel = "收起更多功能"
+        closeBtn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        closeBtn.actionHandler = { [weak self] in self?.hideOverflowPanel() }
+        stack.addArrangedSubview(closeBtn)
+        overflowPanel.addSubview(stack)
+    }
+
+    /// 聚合面板按钮显示名
+    private func overflowDisplayName(for id: ToolbarButtonID) -> String {
+        switch id {
+        case .ai: return "AI 助手"
+        case .translate: return "边打边译"
+        case .clipboard: return "剪贴板"
+        case .emoji: return "表情"
+        case .edit: return "文本编辑"
+        case .layout: return "九键/26键"
+        case .settings: return "快捷设置"
+        case .undo: return "撤销"
+        }
+    }
+
+    private func showOverflowPanel() {
+        guard !overflowPanelButtons.isEmpty else { return }
+        isOverflowPanelVisible = true
+        overflowPanel.isHidden = false
+        idleContainer.isHidden = true
+        setNeedsLayout()
+    }
+
+    private func hideOverflowPanel() {
+        guard isOverflowPanelVisible else { return }
+        isOverflowPanelVisible = false
+        overflowPanel.isHidden = true
+        // 恢复空闲区可见性：与 update() 的判定一致
+        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
+        setNeedsLayout()
+    }
+
+    @objc private func didTapOverflow() {
+        isOverflowPanelVisible ? hideOverflowPanel() : showOverflowPanel()
+    }
+
+    /// v4：点击聚合面板空白处关闭（按钮自身点击由 actionHandler 处理，重复 hide 有 guard 无副作用）
+    @objc private func didTapOverflowDismiss() {
+        if isOverflowPanelVisible { hideOverflowPanel() }
     }
 
     @objc private func didTapAI() { onAction?(.toggleAI) }

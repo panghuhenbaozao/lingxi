@@ -914,9 +914,25 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    /// v4：聚合面板中被收纳按钮的动作转发（复用既有处理链路，含反馈音效）
+    private func handleOverflowTrigger(_ id: ToolbarButtonID) {
+        switch id {
+        case .ai: handleToolbarAction(.toggleAI)
+        case .translate: handleToolbarAction(.toggleTranslateMode)
+        case .clipboard: handleToolbarAction(.toggleClipboard)
+        case .emoji: handleToolbarAction(.toggleEmoji)
+        case .edit: handleToolbarAction(.toggleTextEditing)
+        case .layout: handleToolbarAction(.toggleLayoutQuick)
+        case .settings: handleToolbarAction(.toggleQuickSettings)
+        case .undo: handleToolbarAction(.undoDelete)
+        }
+    }
+
     private func handleToolbarAction(_ action: TopToolbarView.Action) {
         feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
         switch action {
+        case .overflowTrigger(let id):
+            handleOverflowTrigger(id)
         case .toggleAI:
             if activePanel == .ai {
                 aiPromptDraft = nil

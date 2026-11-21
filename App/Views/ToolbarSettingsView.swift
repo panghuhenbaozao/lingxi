@@ -20,8 +20,8 @@ struct ToolbarSettingsView: View {
         }
     }
 
-    /// 极简方案：仅保留 AI、剪贴板、快捷设置
-    private static let minimalVisible: Set<ToolbarButtonID> = [.ai, .clipboard, .settings]
+    /// v4 极简方案：与 defaultToolbarLayout 一致——AI/译/剪贴板/设置/撤销上栏，低频按钮收纳
+    private static let minimalVisible: Set<ToolbarButtonID> = [.ai, .translate, .clipboard, .settings, .undo]
 
     private var sortedItems: [ToolbarItemConfig] {
         LingxiSettings.normalizedToolbarLayout(appState.settings.toolbarLayout)
@@ -49,7 +49,7 @@ struct ToolbarSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             } footer: {
-                Text("选择预设快速应用；手动调整后自动变为自定义。")
+                Text("选择预设快速应用；手动调整后自动变为自定义。被关闭的按钮收纳进键盘上的『⋯』菜单。")
             }
 
             Section {
@@ -180,7 +180,10 @@ struct ToolbarSettingsView: View {
         var settings = appState.settings
         switch preset {
         case .standard:
-            settings.toolbarLayout = defaultToolbarLayout
+            // 全部可见的完整布局（不再引用 defaultToolbarLayout——它自 v4 起为极简默认）
+            settings.toolbarLayout = ToolbarButtonID.allCases.enumerated().map { idx, bid in
+                ToolbarItemConfig(buttonID: bid, isVisible: true, order: idx)
+            }
         case .minimal:
             settings.toolbarLayout = ToolbarButtonID.allCases.enumerated().map { idx, bid in
                 ToolbarItemConfig(buttonID: bid, isVisible: Self.minimalVisible.contains(bid), order: idx)

@@ -535,7 +535,10 @@ final class LingxiTests: XCTestCase {
         let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data(legacyJSON.utf8))
         XCTAssertEqual(legacy.toolbarLayout.count, ToolbarButtonID.allCases.count)
         XCTAssertEqual(legacy.toolbarLayout.map({ $0.buttonID }), ToolbarButtonID.allCases)
-        XCTAssertTrue(legacy.toolbarLayout.allSatisfy({ $0.isVisible }))
+        // v4 新默认：AI/译/剪贴板/设置/撤销可见，表情/编辑面板/九键切换默认收纳进『⋯』
+        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .clipboard, .settings, .undo]
+        let visibleByDefault = Set(legacy.toolbarLayout.filter(\.isVisible).map(\.buttonID))
+        XCTAssertEqual(visibleByDefault, expectedVisible)
         XCTAssertTrue(legacy.showComposingStrip)
         XCTAssertEqual(legacy.candidateBarHeight, 50, accuracy: 0.001)
         XCTAssertEqual(legacy.candidateFontSize, 16.5, accuracy: 0.001)

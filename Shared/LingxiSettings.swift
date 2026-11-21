@@ -57,9 +57,11 @@ struct ToolbarItemConfig: Codable, Equatable, Identifiable {
     }
 }
 
-/// Default toolbar layout matching the original fixed button order.
+/// v4 极简默认布局：高频按钮上栏（AI/译/剪贴板/设置 + 撤销事件位），
+/// 低频按钮（表情/编辑面板/九键切换）默认收起——可在『键盘工具栏』设置页开启。
 let defaultToolbarLayout: [ToolbarItemConfig] = ToolbarButtonID.allCases.enumerated().map { idx, bid in
-    ToolbarItemConfig(buttonID: bid, isVisible: true, order: idx)
+    let collapsedByDefault: Set<ToolbarButtonID> = [.emoji, .edit, .layout]
+    return ToolbarItemConfig(buttonID: bid, isVisible: !collapsedByDefault.contains(bid), order: idx)
 }
 
 /// 键盘排布模式。
