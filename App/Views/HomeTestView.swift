@@ -527,7 +527,7 @@ private struct PlayTip {
     let title: String
     let desc: String
     /// 默认只折叠卡里展示的“必要项”；其余藏在“展开全部 N 条”里。
-    let isPopular: Bool = false
+    var isPopular: Bool = false
 }
 
 /// 统一按压反馈：极简白不靠色块变化，只降透明度。
