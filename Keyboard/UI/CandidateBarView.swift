@@ -165,7 +165,7 @@ final class CandidateBarView: UIView {
                 btn.layer.borderWidth = 0
             } else {
                 btn.layer.borderWidth = 0.5
-                btn.layer.borderColor = theme.hairline.cgColor
+                btn.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
             }
             lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
         }

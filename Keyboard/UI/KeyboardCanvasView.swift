@@ -1204,9 +1204,7 @@ private final class KeyCapView: UIView {
         guard let theme, let model else { return }
         // 极简白：按下微移 +1pt（向屏幕内侧下沉），配合阴影收起，视觉上变“压实”
         bgView.transform = pressed ? CGAffineTransform(translationX: 0, y: 1) : .identity
-        if let theme {
-            bgView.layer.shadowRadius = pressed ? 0 : 0.6
-        }
+        bgView.layer.shadowRadius = pressed ? 0 : 0.6
         bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
         if model.isAccent {
             bgView.backgroundColor = pressed ? theme.accentPressedFill : theme.accentFill
@@ -1217,7 +1215,7 @@ private final class KeyCapView: UIView {
         }
 
         // 空格键：边缘微淡，给空格一点节奏感
-        if model.kind == .space, spaceGradLayer == nil {
+        if case .space = model.kind, spaceGradLayer == nil {
             let grad = CAGradientLayer()
             grad.startPoint = CGPoint(x: 0, y: 0.5)
             grad.endPoint = CGPoint(x: 1, y: 0.5)
