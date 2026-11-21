@@ -66,21 +66,21 @@ final class TypingStatsStore {
         let todayChars: Int
         let dayCount: Int
     }
-    func summary() -> Summary {
+    func summary(now: Date = Date()) -> Summary {
         queue.sync {
-            summarizeLocked()
+            summarizeLocked(now: now)
         }
     }
-    private func summarizeLocked() -> Summary {
+    private func summarizeLocked(now: Date) -> Summary {
         let totalChars = days.values.reduce(0) { $0 + $1.chars }
         let totalSeconds = days.values.reduce(0.0) { $0 + $1.activeSeconds }
         let minutes = totalSeconds / 60
         let cpm = minutes > 0.5 ? Double(totalChars) / minutes : 0
-        let todayKey = Self.dayKey()
+        let todayKey = Self.dayKey(for: now)
         let todayChars = days[todayKey]?.chars ?? 0
         // 连续天数：从今天（若今天无记录则从昨天）向前倒推连续有记录的天数
         var streak = 0
-        var cursor = Date()
+        var cursor = now
         if days[todayKey] == nil {
             cursor = Calendar.current.date(byAdding: .day, value: -1, to: cursor) ?? cursor
         }

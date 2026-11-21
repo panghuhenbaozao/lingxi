@@ -517,13 +517,13 @@ final class LingxiTests: XCTestCase {
         store.recordCommit(text: "世界", at: base.addingTimeInterval(10))
         // 间隔 120s > 30s 阈值，不计入活跃时长
         store.recordCommit(text: "长间隔后", at: base.addingTimeInterval(130))
-        let summary = store.summary()
+        let summary = store.summary(now: base.addingTimeInterval(130))
         XCTAssertEqual(summary.todayChars, 2 + 2 + 4)
         XCTAssertEqual(summary.totalActiveSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(summary.streakDays, 1)
         // 清除后归零
         store.clearAll()
-        let cleared = store.summary()
+        let cleared = store.summary(now: base)
         XCTAssertEqual(cleared.totalChars, 0)
         XCTAssertEqual(cleared.todayChars, 0)
         XCTAssertEqual(cleared.streakDays, 0)
