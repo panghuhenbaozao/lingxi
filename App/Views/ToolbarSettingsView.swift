@@ -115,7 +115,7 @@ struct ToolbarSettingsView: View {
             } header: {
                 Text("候选栏外观")
             } footer: {
-                Text("调整后键盘会自动重新加载，立即生效。")
+                Text("调整后键盘会自动重新加载，立即生效。开启拼音预览条且栏高较低时，候选字号会自动适当收敛以适配空间。")
             }
         }
         .navigationTitle("键盘工具栏")

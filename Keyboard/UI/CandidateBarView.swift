@@ -16,6 +16,10 @@ final class CandidateBarView: UIView {
     private var theme: ResolvedTheme?
     /// 候选词主字号（可由设置页调节，默认 16.5）
     private var candidateFontSize: CGFloat = 16.5
+    /// 上次布局时实际生效的字号：开启拼音预览条且栏高较低时，会按可用高度自动收敛
+    private var appliedFontSize: CGFloat = 16.5
+    /// 上次布局时的可用高度，高度变化后需重算生效字号并重建按钮
+    private var lastLayoutHeight: CGFloat = 0
     /// 防闪烁：上次应用的候选签名与展开状态，未变化时跳过整轮重建
     private var lastSignature = ""
     private var lastExpanded = false
@@ -49,6 +53,16 @@ final class CandidateBarView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        // 栏高变化（设置页调节或拼音预览条显隐）后，实际生效字号可能随之收敛/恢复，需重建按钮
+        if abs(bounds.height - lastLayoutHeight) > 0.5 {
+            lastLayoutHeight = bounds.height
+            let size = effectiveFontSize()
+            if abs(size - appliedFontSize) > 0.05 {
+                appliedFontSize = size
+                for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
+                reloadButtons()
+            }
+        }
         let expandWidth: CGFloat = 34
         expandButton.frame = CGRect(x: bounds.width - expandWidth - 2, y: 0, width: expandWidth, height: bounds.height)
         scrollView.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - expandWidth - 4), height: bounds.height)
@@ -65,10 +79,19 @@ final class CandidateBarView: UIView {
         reloadButtons()
     }
 
+    /// 实际生效字号：候选条可用高度容纳不下设置字号时自动收敛（下限 12）
+    /// 典型场景：候选栏高度调到最低 44 且开启拼音预览条（占 16）时，候选条仅剩 28，22pt 字号会溢出到拼音条
+    private func effectiveFontSize() -> CGFloat {
+        let available = bounds.height - 10
+        guard available > 0 else { return candidateFontSize }
+        return min(candidateFontSize, max(12, floor((available / 1.2) * 2) / 2))
+    }
+
     /// 应用新的候选字号：清空按钮配置缓存并重建，保证立即生效
     func applyCandidateFontSize(_ size: CGFloat) {
         guard abs(size - candidateFontSize) > 0.05 else { return }
         candidateFontSize = size
+        appliedFontSize = effectiveFontSize()
         for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
         reloadButtons()
         setNeedsLayout()
@@ -136,12 +159,12 @@ final class CandidateBarView: UIView {
             let needsBolt = (cand.source == .smartHelper) && !Self.isPureEmojiOrSymbol(cand.word)
             let displayWord = cand.word.replacingOccurrences(of: "\n", with: " ")
             let prefixMark = needsBolt ? "⚡ " : ""
-            let mainFont = UIFont.systemFont(ofSize: candidateFontSize, weight: isPrimary ? .semibold : .regular)
+            let mainFont = UIFont.systemFont(ofSize: appliedFontSize, weight: isPrimary ? .semibold : .regular)
             // 轻盈中选态：首选 = 主题色文字 + 淡色底（iOS 原生候选栏观感），其余 = ink 文字
             let mainColor = isPrimary ? theme.candidateHighlight : theme.candidateText
 
             // 防闪烁：按钮配置未变化时跳过重设（重设标题/背景/边框会引起视觉抖动）
-            let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)|\(candidateFontSize)"
+            let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)|\(appliedFontSize)"
             if buttonAppliedKeys[idx] == configKey {
                 lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
                 continue
