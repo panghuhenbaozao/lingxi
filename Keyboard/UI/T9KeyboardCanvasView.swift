@@ -139,6 +139,16 @@ final class T9KeyboardCanvasView: UIView {
         returnTitle: String,
         returnHighlighted: Bool
     ) {
+        // 防闪烁：与 26 键画布对齐的视觉去重——refreshCanvas 随 refreshUI 高频触发，
+        // 视觉字段未变化时跳过全量键帽重设，仅让左栏音节走 LeftSignature 去重
+        let visualChanged =
+            self.theme?.preset.id != theme.preset.id ||
+            self.theme?.customization != theme.customization ||
+            self.settings != settings ||
+            self.isComposing != isComposing ||
+            self.needsGlobeKey != needsGlobeKey ||
+            self.returnTitle != returnTitle ||
+            self.returnHighlighted != returnHighlighted
         self.theme = theme
         self.settings = settings
         self.isComposing = isComposing
@@ -148,8 +158,12 @@ final class T9KeyboardCanvasView: UIView {
         self.returnTitle = returnTitle
         self.returnHighlighted = returnHighlighted
 
-        popupView.apply(theme: theme)
-        rebuildLayout(forceSync: true)
+        if visualChanged || lastLayoutSignature == nil {
+            popupView.apply(theme: theme)
+            rebuildLayout(forceSync: true)
+        } else {
+            rebuildLayout(forceSync: false)
+        }
     }
 
     override func layoutSubviews() {
