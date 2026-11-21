@@ -615,6 +615,28 @@ final class KeyboardCanvasView: UIView {
                     break
                 }
 
+                // 上划/下滑快捷输入（flick）优先于滑行激活判定：垂直快速滑动先落定 flick，
+                // 否则从字母键垂直滑动扫过相邻键时会被抢先判为滑行，导致角落字符打不出来
+                if settings.swipeUpForHint, let sec = secondary, dy <= -20, abs(dy) > abs(dx) * 0.75 {
+                    if !track.flickedSecondary {
+                        track.flickedSecondary = true
+                        track.flickedDown = false
+                        cancelLongPress(for: touch)
+                        activeTouches[touch] = track
+                        let anchorInHost = keysContainer.convert(key.rect, to: self)
+                        popupView.showSingle(text: sec, anchorRect: anchorInHost, in: bounds)
+                    }
+                } else if settings.swipeDownForPunctuation, let down = downPunct, dy >= 20, abs(dy) > abs(dx) * 0.75 {
+                    if !track.flickedDown {
+                        track.flickedDown = true
+                        track.flickedSecondary = false
+                        cancelLongPress(for: touch)
+                        activeTouches[touch] = track
+                        let anchorInHost = keysContainer.convert(key.rect, to: self)
+                        popupView.showSingle(text: down, anchorRect: anchorInHost, in: bounds)
+                    }
+                }
+
                 // 记录滑行轨迹并检测是否已跨越至少 2 个不同字母键（启用滑行输入时）
                 let canGlide = settings.glideTypingEnabled && (isEnglishMode || settings.inputScheme == .quanpin)
                 if canGlide && !track.visitedLetterKeys.isEmpty {
@@ -652,26 +674,6 @@ final class KeyboardCanvasView: UIView {
                         break
                     }
                     activeTouches[touch] = track
-                }
-
-                if settings.swipeUpForHint, let sec = secondary, dy <= -20, abs(dy) > abs(dx) * 0.75 {
-                    if !track.flickedSecondary {
-                        track.flickedSecondary = true
-                        track.flickedDown = false
-                        cancelLongPress(for: touch)
-                        activeTouches[touch] = track
-                        let anchorInHost = keysContainer.convert(key.rect, to: self)
-                        popupView.showSingle(text: sec, anchorRect: anchorInHost, in: bounds)
-                    }
-                } else if settings.swipeDownForPunctuation, let down = downPunct, dy >= 20, abs(dy) > abs(dx) * 0.75 {
-                    if !track.flickedDown {
-                        track.flickedDown = true
-                        track.flickedSecondary = false
-                        cancelLongPress(for: touch)
-                        activeTouches[touch] = track
-                        let anchorInHost = keysContainer.convert(key.rect, to: self)
-                        popupView.showSingle(text: down, anchorRect: anchorInHost, in: bounds)
-                    }
                 }
 
             case .punctuation:

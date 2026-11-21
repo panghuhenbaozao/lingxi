@@ -126,8 +126,8 @@ final class CandidateBarView: UIView {
             let displayWord = cand.word.replacingOccurrences(of: "\n", with: " ")
             let prefixMark = needsBolt ? "⚡ " : ""
             let mainFont = UIFont.systemFont(ofSize: 16.5, weight: isPrimary ? .semibold : .regular)
-            // 极简白：首选 = ink 实底 + 白字（Apple 候选栏风格），其余 = ink 文字
-            let mainColor = isPrimary ? theme.accentText : theme.candidateText
+            // 轻盈中选态：首选 = 主题色文字 + 淡色底（iOS 原生候选栏观感），其余 = ink 文字
+            let mainColor = isPrimary ? theme.candidateHighlight : theme.candidateText
 
             // 防闪烁：按钮配置未变化时跳过重设（重设标题/背景/边框会引起视觉抖动）
             let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)"
@@ -158,9 +158,9 @@ final class CandidateBarView: UIView {
                 btn.setTitleColor(mainColor, for: .normal)
             }
             btn.backgroundColor = isPrimary
-                ? theme.candidateHighlight
+                ? theme.candidateHighlight.withAlphaComponent(0.12)
                 : .clear
-            // 极简白：首选变深底/白字（Apple 风），次选补 hairline 边框与提亮文字，层次分明
+            // 轻盈中选态：首选淡底+主题色文字，次选补 hairline 边框，层次分明不压抑
             if isPrimary {
                 btn.layer.borderWidth = 0
             } else {

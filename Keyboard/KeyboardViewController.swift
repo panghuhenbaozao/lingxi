@@ -94,6 +94,11 @@ final class KeyboardViewController: UIInputViewController {
         let inTranslateBuffer: Bool
         let learnRecord: UserLearnRecord?
         let extraLearnRecord: UserLearnRecord?
+        let createdAt: TimeInterval = CACurrentMediaTime()
+        /// 退格重选仅在上屏后极短时间窗内有效（对齐微信/Gboard 手感），
+        /// 超时后按普通删除处理，避免用户正常删字时拼音被意外恢复回来
+        static let validityWindow: TimeInterval = 6.0
+        var isExpired: Bool { CACurrentMediaTime() - createdAt > Self.validityWindow }
     }
     private var lastSelectionUndo: SelectionUndoRecord?
 
@@ -1285,7 +1290,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         // 退格重选：紧接上屏后点按 ⌫，撤销已上屏词条、回退误学记录，并恢复原拼音/编码重选
-        if !isRepeat, let selUndo = lastSelectionUndo {
+        if !isRepeat, let selUndo = lastSelectionUndo, !selUndo.isExpired {
             lastSelectionUndo = nil
             if let rec = selUndo.learnRecord {
                 engine?.userLexicon.undoLearn(rec)
