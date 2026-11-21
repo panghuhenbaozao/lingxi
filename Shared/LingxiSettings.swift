@@ -226,6 +226,7 @@ struct LingxiSettings: Codable, Equatable {
     var smartOTPExtraction: Bool = true
     var autoCapitalizeEnglish: Bool = true
     var doubleSpacePeriod: Bool = true
+    var typingStatsEnabled: Bool = false
     var translateTargetLang: String = "英文"
     var translateFormalTone: Bool = false
     var stylishFontID: String = StylishFontStyle.normal.rawValue
@@ -242,7 +243,8 @@ struct LingxiSettings: Codable, Equatable {
         case userLearningEnabled, autoLearnThreshold, bigramPredictionEnabled
         case wubiAutoCommitUnique4, wubiShowCodeHints
         case clipboardBannerEnabled, autoReadClipboardPreview, smartOTPExtraction
-        case autoCapitalizeEnglish, doubleSpacePeriod, translateTargetLang, translateFormalTone, stylishFontID
+        case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled
+        case translateTargetLang, translateFormalTone, stylishFontID
     }
 
     init() {}
@@ -288,6 +290,7 @@ struct LingxiSettings: Codable, Equatable {
         smartOTPExtraction = try c.decodeIfPresent(Bool.self, forKey: .smartOTPExtraction) ?? d.smartOTPExtraction
         autoCapitalizeEnglish = try c.decodeIfPresent(Bool.self, forKey: .autoCapitalizeEnglish) ?? d.autoCapitalizeEnglish
         doubleSpacePeriod = try c.decodeIfPresent(Bool.self, forKey: .doubleSpacePeriod) ?? d.doubleSpacePeriod
+        typingStatsEnabled = try c.decodeIfPresent(Bool.self, forKey: .typingStatsEnabled) ?? d.typingStatsEnabled
         translateTargetLang = try c.decodeIfPresent(String.self, forKey: .translateTargetLang) ?? d.translateTargetLang
         translateFormalTone = try c.decodeIfPresent(Bool.self, forKey: .translateFormalTone) ?? d.translateFormalTone
         stylishFontID = try c.decodeIfPresent(String.self, forKey: .stylishFontID) ?? d.stylishFontID

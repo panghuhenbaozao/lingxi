@@ -133,6 +133,8 @@ final class SymbolEmojiPanelView: UIView {
         footerView.addSubview(backButton)
 
         deleteButton.setImage(UIImage(systemName: "delete.left"), for: .normal)
+        deleteButton.accessibilityLabel = "删除"
+        deleteButton.accessibilityHint = "点按删除一个字符，长按连续删除"
         deleteButton.actionHandler = { [weak self] in self?.onBackspace?() }
         let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
         lp.minimumPressDuration = 0.32

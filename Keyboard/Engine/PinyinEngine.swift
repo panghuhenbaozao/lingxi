@@ -939,6 +939,20 @@ final class PinyinEngine {
                 add(String(addG))
             }
         }
+        // 音节首字母邻键替换（mihao -> nihao）：声母是错拼高发位，且音节边界已由 bestSeg 给出，
+        // 只替换每个音节的首字母可将变体量控制在 O(音节数 × 邻键数)，避免全字母表膨胀。
+        // 是否真正前置仍由下方 lp 阈值与上下文消歧把关，弱纠正不会冒泡。
+        var sylOffset = 0
+        for st in bestSeg.map(\.text) {
+            if let first = st.first, let reps = Self.adjacentKeys[first], !reps.isEmpty {
+                for rep in reps {
+                    var sub = chars
+                    sub[sylOffset] = rep
+                    add(String(sub))
+                }
+            }
+            sylOffset += st.count
+        }
         // WowType fuzzy_fallback：模糊音未开时，对无精确词的硬拼输入尝试平翘舌/前后鼻音音节替换（如 yingai->应该, zidao->知道）
         if settings.fuzzyFallbackEnabled {
             let sylTexts = bestSeg.map(\.text)

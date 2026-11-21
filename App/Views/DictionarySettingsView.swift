@@ -173,6 +173,7 @@ private struct KeyboardFeelSettingsView: View {
 
 private struct SmartInputSettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var statsRefresh = 0
 
     var body: some View {
         Form {
@@ -209,6 +210,25 @@ private struct SmartInputSettingsView: View {
                 Toggle("顶部剪贴板快速粘贴胶囊", isOn: $appState.settings.clipboardBannerEnabled)
                 Toggle("智能提取短信验证码", isOn: $appState.settings.smartOTPExtraction)
                 Toggle("自动读取剪贴板预览（需允许系统授权）", isOn: $appState.settings.autoReadClipboardPreview)
+            }
+            Section {
+                Toggle("打字统计（仅本机按天计数）", isOn: $appState.settings.typingStatsEnabled)
+                if appState.settings.typingStatsEnabled {
+                    let _ = statsRefresh
+                    let summary = TypingStatsStore.shared.summary()
+                    LabeledContent("今日字数", value: "\(summary.todayChars)")
+                    LabeledContent("累计字数", value: "\(summary.totalChars)")
+                    LabeledContent("平均速度", value: String(format: "%.1f 字/分", summary.averageCharsPerMinute))
+                    LabeledContent("连续打字", value: "\(summary.streakDays) 天")
+                    Button("清除全部统计数据", role: .destructive) {
+                        TypingStatsStore.shared.clearAll()
+                        statsRefresh += 1
+                    }
+                }
+            } header: {
+                Text("打字统计（借鉴 WowType）")
+            } footer: {
+                Text("仅在本机按天记录字数与活跃打字时长，不记录任何输入内容；密码、邮箱、网址输入框自动跳过统计。")
             }
         }
         .navigationTitle("智能输入")

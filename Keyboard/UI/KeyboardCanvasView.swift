@@ -111,6 +111,7 @@ final class KeyboardCanvasView: UIView {
     private var activeTouches: [UITouch: ActiveTouch] = [:]
     private var longPressWorkItems: [UITouch: DispatchWorkItem] = [:]
     private var repeatDeleteTimer: Timer?
+    private var repeatDeleteCount = 0
     private var lastShiftTapTime: CFTimeInterval = 0
 
     override init(frame: CGRect) {
@@ -263,19 +264,20 @@ final class KeyboardCanvasView: UIView {
         guard let theme else { return }
 
         let swapIcon = settings.handedness == .left ? "arrow.right.to.line" : "arrow.left.to.line"
-        let items: [(String, Event)] = [
-            ("arrow.up.left.and.arrow.down.right", .sideRailToggleFull),
-            (swapIcon, .sideRailSwapHand),
-            ("doc.on.clipboard", .sideRailClipboard),
-            ("sparkles", .sideRailAI),
+        let items: [(String, String, Event)] = [
+            ("arrow.up.left.and.arrow.down.right", "切换全尺寸键盘", .sideRailToggleFull),
+            (swapIcon, "切换左右手布局", .sideRailSwapHand),
+            ("doc.on.clipboard", "剪贴板", .sideRailClipboard),
+            ("sparkles", "AI 助手", .sideRailAI),
         ]
         let symCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-        for (icon, event) in items {
+        for (icon, label, event) in items {
             let btn = ActionClosureButton(type: .system)
             btn.setImage(UIImage(systemName: icon, withConfiguration: symCfg), for: .normal)
             btn.tintColor = theme.keyText
             btn.backgroundColor = theme.specialKeyFill
             btn.layer.cornerRadius = theme.keyCornerRadius
+            btn.accessibilityLabel = label
             btn.actionHandler = { [weak self] in
                 self?.onEvent?(event)
             }
@@ -858,11 +860,26 @@ final class KeyboardCanvasView: UIView {
 
     private func startRepeatDelete() {
         stopRepeatDelete()
+        repeatDeleteCount = 0
         onEvent?(.backspaceRepeat)
-        repeatDeleteTimer = Timer.scheduledTimer(withTimeInterval: 0.085, repeats: true) { [weak self] _ in
+        // 必须注册到 .common mode：手指按住期间 runloop 处于 tracking mode，
+        // scheduledTimer 默认只在 default mode 触发，会导致长按只能删一下
+        let timer = Timer(timeInterval: 0.085, repeats: true) { [weak self] timer in
             guard let self else { return }
+            self.repeatDeleteCount += 1
             self.onEvent?(.backspaceRepeat)
+            // 连删 12 次后提速到 0.05s/次，对齐 iOS 系统键盘连删加速手感
+            if self.repeatDeleteCount == 12 {
+                timer.invalidate()
+                let fast = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                    self?.onEvent?(.backspaceRepeat)
+                }
+                RunLoop.main.add(fast, forMode: .common)
+                self.repeatDeleteTimer = fast
+            }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        repeatDeleteTimer = timer
     }
 
     private func stopRepeatDelete() {
@@ -1185,8 +1202,8 @@ private final class KeyCapView: UIView {
 
     func setPressed(_ pressed: Bool) {
         guard let theme, let model else { return }
-        // 极简白：按下微移 -1pt，视觉上变“压实”
-        bgView.transform = pressed ? CGAffineTransform(translationX: 0, y: -1) : .identity
+        // 极简白：按下微移 +1pt（向屏幕内侧下沉），配合阴影收起，视觉上变“压实”
+        bgView.transform = pressed ? CGAffineTransform(translationX: 0, y: 1) : .identity
         if let theme {
             bgView.layer.shadowRadius = pressed ? 0 : 0.6
         }

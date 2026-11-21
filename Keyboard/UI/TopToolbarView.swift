@@ -142,6 +142,11 @@ final class TopToolbarView: UIView {
         configureToolButton(editButton, title: nil, symbol: "arrow.up.and.down.and.arrow.left.and.right", action: #selector(didTapEdit))
         configureToolButton(layoutButton, title: "九键", symbol: nil, action: #selector(didTapLayout))
         configureToolButton(settingsButton, title: nil, symbol: "slider.horizontal.3", action: #selector(didTapSettings))
+        // VoiceOver：纯图标按钮补充功能标签（带文字标题的按钮沿用标题）
+        clipboardButton.accessibilityLabel = "剪贴板"
+        emojiButton.accessibilityLabel = "表情符号"
+        editButton.accessibilityLabel = "文本编辑面板"
+        settingsButton.accessibilityLabel = "键盘设置"
 
         undoButton.setTitle(" 撤销", for: .normal)
         let undoImg = UIImage(systemName: "arrow.uturn.backward", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
@@ -150,6 +155,7 @@ final class TopToolbarView: UIView {
         undoButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
         undoButton.layer.cornerRadius = 13
         undoButton.isHidden = true
+        undoButton.accessibilityLabel = "撤销"
         undoButton.addTarget(self, action: #selector(didTapUndo), for: .touchUpInside)
 
         [aiButton, translateButton, clipboardButton, emojiButton, editButton, layoutButton, settingsButton, undoButton].forEach {
@@ -198,16 +204,20 @@ final class TopToolbarView: UIView {
         translateCommitBtn.actionHandler = { [weak self] in self?.onAction?(.commitTranslatedText) }
 
         styleBtn(translateSourceBtn, title: "原")
+        translateSourceBtn.accessibilityLabel = "上屏原文"
         translateSourceBtn.actionHandler = { [weak self] in self?.onAction?(.commitTranslateSource) }
 
         styleBtn(translateToneBtn, title: "口语", size: 11)
+        translateToneBtn.accessibilityHint = "点按切换口语或正式语气"
         translateToneBtn.actionHandler = { [weak self] in self?.onAction?(.toggleTranslateTone) }
 
         styleBtn(translateLangBtn, title: "英文")
+        translateLangBtn.accessibilityHint = "点按切换目标语言"
         translateLangBtn.actionHandler = { [weak self] in self?.onAction?(.cycleTranslateTarget) }
 
         let xCfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .bold)
         translateCloseBtn.setImage(UIImage(systemName: "xmark", withConfiguration: xCfg), for: .normal)
+        translateCloseBtn.accessibilityLabel = "关闭翻译栏"
         translateCloseBtn.layer.cornerRadius = 11
         translateCloseBtn.actionHandler = { [weak self] in self?.onAction?(.toggleTranslateMode) }
         translateBar.addSubview(translateCloseBtn)
@@ -402,8 +412,15 @@ final class TopToolbarView: UIView {
             } else {
                 translateResultLabel.text = tr.isTranslating ? "\(tr.translatedText) ▍" : tr.translatedText
             }
-            translateLangBtn.setTitle(tr.targetLanguage, for: .normal)
+            // 方向指示：输入中文时译向目标语言，输入外文时译回中文（双向互译）；
+            // 尚未输入时默认展示主用方向 中→目标语言
+            let hasForeign = tr.sourceText.range(of: "[A-Za-z]", options: .regularExpression) != nil
+            let hasChinese = tr.sourceText.range(of: "[\\u4e00-\\u9fff]", options: .regularExpression) != nil
+            let directionLabel = (hasForeign && !hasChinese) ? "英→中" : "中→\(tr.targetLanguage)"
+            translateLangBtn.setTitle(directionLabel, for: .normal)
+            translateLangBtn.accessibilityLabel = "翻译方向：\(directionLabel)"
             translateToneBtn.setTitle(tr.formalTone ? "正式" : "口语", for: .normal)
+            translateToneBtn.accessibilityLabel = "译文语气：\(tr.formalTone ? "正式" : "口语")"
             if let theme {
                 translateToneBtn.backgroundColor = tr.formalTone
                     ? theme.accentFill.withAlphaComponent(0.20)
@@ -611,6 +628,7 @@ final class TopToolbarView: UIView {
         let cfg = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
         btn.setImage(UIImage(systemName: "xmark", withConfiguration: cfg), for: .normal)
         btn.tintColor = tint
+        btn.accessibilityLabel = "关闭剪贴板提示"
         btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
         btn.actionHandler = { [weak self] in
             self?.onAction?(.dismissClipboardBanner)

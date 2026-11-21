@@ -414,6 +414,9 @@ final class QuickSettingsSheetView: UIView {
         btn.setTitleColor(on ? theme.candidateHighlight : theme.keyHintText, for: .normal)
         btn.layer.cornerRadius = 8
         btn.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        // VoiceOver：开关 chip 暴露纯净功能名与选中状态，避免读出标题中的对勾符号
+        btn.accessibilityLabel = title
+        btn.accessibilityTraits = on ? [.button, .selected] : [.button]
         btn.actionHandler = action
         return btn
     }

@@ -1943,6 +1943,12 @@ final class KeyboardViewController: UIInputViewController {
 
             self.textDocumentProxy.insertText(text)
         }
+        // 打字统计（WowType 借鉴）：仅统计真实上屏文本；密码/邮箱/网址等隐私框不统计
+        if self.settings.typingStatsEnabled,
+           self.shouldAllowPanguSpace,
+           !inserted.isEmpty {
+            TypingStatsStore.shared.recordCommit(text: inserted)
+        }
         return inserted
     }
 

@@ -8,7 +8,8 @@ final class CandidateBarView: UIView {
 
     private let scrollView = UIScrollView()
     private let stackView = UIStackView()
-    private let expandButton = UIButton(type: .system)
+    // 防闪烁：使用 .custom 而非 .system——system 按钮在重复 setImage/setTitle 时会做系统淡入淡出动画
+    private let expandButton = UIButton(type: .custom)
     private var buttonPool: [UIButton] = []
     private var longPressPool: [UILongPressGestureRecognizer] = []
     private var candidates: [PinyinCandidate] = []
@@ -35,6 +36,7 @@ final class CandidateBarView: UIView {
 
         let config = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         expandButton.setImage(UIImage(systemName: "chevron.down", withConfiguration: config), for: .normal)
+        expandButton.accessibilityLabel = "展开候选栏"
         expandButton.addTarget(self, action: #selector(handleExpandTap), for: .touchUpInside)
         addSubview(expandButton)
     }
@@ -71,6 +73,7 @@ final class CandidateBarView: UIView {
         let iconName = expanded ? "chevron.up" : "chevron.down"
         let config = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         expandButton.setImage(UIImage(systemName: iconName, withConfiguration: config), for: .normal)
+        expandButton.accessibilityLabel = expanded ? "收起候选栏" : "展开候选栏"
         expandButton.isHidden = newList.count <= 4
         scrollView.setContentOffset(.zero, animated: false)
         reloadButtons()
@@ -79,7 +82,8 @@ final class CandidateBarView: UIView {
 
     private func ensureButton(at idx: Int) -> (UIButton, UILongPressGestureRecognizer) {
         while buttonPool.count <= idx {
-            let btn = UIButton(type: .system)
+            // 防闪烁：使用 .custom 而非 .system——system 按钮在 setTitle/setAttributedTitle 时触发内置标题淡入淡出动画（UIView 层级，CATransaction 禁不掉），逐键刷新即闪烁；.custom 无此动画
+            let btn = UIButton(type: .custom)
             btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
             btn.layer.cornerRadius = 8
             btn.addTarget(self, action: #selector(handleCandidateTap(_:)), for: .touchUpInside)
@@ -300,7 +304,8 @@ final class ExpandedCandidatesView: UIView {
 
         for origIdx in visibleIndices {
             let cand = allCandidates[origIdx]
-            let btn = UIButton(type: .system)
+            // 防闪烁：使用 .custom 而非 .system——system 按钮在 setTitle/setAttributedTitle 时触发内置标题淡入淡出动画（UIView 层级，CATransaction 禁不掉），逐键刷新即闪烁；.custom 无此动画
+            let btn = UIButton(type: .custom)
             btn.tag = origIdx
             let mainFont = UIFont.systemFont(ofSize: 17, weight: origIdx == 0 ? .semibold : .regular)
             let mainColor = origIdx == 0 ? theme.candidateHighlight : theme.candidateText

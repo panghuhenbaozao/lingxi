@@ -114,6 +114,10 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(engine.query(raw: "meiyuo", settings: settings).candidates.first?.word, "没有")
         XCTAssertEqual(engine.query(raw: "shengme", settings: settings).candidates.first?.word, "什么")
         XCTAssertEqual(engine.query(raw: "penyou", settings: settings).candidates.first?.word, "朋友")
+        // 音节首字母邻键容错：mihao -> 你好（m/n 相邻误触），纠错候选显著提升时才前置
+        XCTAssertEqual(engine.query(raw: "mihao", settings: settings).candidates.first?.word, "你好")
+        // 高频精确词不被邻键纠错抢走（nihao 本身不受影响，仍为你好）
+        XCTAssertEqual(engine.query(raw: "nihao", settings: settings).candidates.first?.word, "你好")
         XCTAssertEqual(engine.query(raw: "yingai", settings: settings).candidates.first?.word, "应该")
         XCTAssertEqual(engine.query(raw: "zidao", settings: settings).candidates.first?.word, "知道")
         XCTAssertTrue(engine.query(raw: "tianqu", settings: settings).candidates.prefix(2).map(\.word).contains("天气"))
@@ -493,5 +497,35 @@ final class LingxiTests: XCTestCase {
         let formalPrompt = TranslateTargetLanguage.systemPrompt(for: "英文", formal: true)
         XCTAssertTrue(casualPrompt.contains("口语"))
         XCTAssertTrue(formalPrompt.contains("正式"))
+    }
+
+    // 打字统计（借鉴 WowType）：开关默认关闭 + 按天计数 + 活跃时长阈值 + 清除
+    func testTypingStatsStoreAndSettings() {
+        // 设置开关：默认关闭，且旧版 JSON（无该字段）解码后仍为关闭
+        let defaults = LingxiSettings()
+        XCTAssertFalse(defaults.typingStatsEnabled)
+        let legacyJSON = Data("{}".utf8)
+        let decoded = try? JSONDecoder().decode(LingxiSettings.self, from: legacyJSON)
+        XCTAssertNotNil(decoded)
+        XCTAssertFalse(decoded?.typingStatsEnabled ?? true)
+
+        // 统计逻辑：字数累加、活跃时长仅在间隔 ≤30s 时计入
+        let store = TypingStatsStore()
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        store.clearAll()
+        store.recordCommit(text: "你好", at: base)
+        store.recordCommit(text: "世界", at: base.addingTimeInterval(10))
+        // 间隔 120s > 30s 阈值，不计入活跃时长
+        store.recordCommit(text: "长间隔后", at: base.addingTimeInterval(130))
+        let summary = store.summary()
+        XCTAssertEqual(summary.todayChars, 2 + 2 + 4)
+        XCTAssertEqual(summary.totalActiveSeconds, 10, accuracy: 0.001)
+        XCTAssertEqual(summary.streakDays, 1)
+        // 清除后归零
+        store.clearAll()
+        let cleared = store.summary()
+        XCTAssertEqual(cleared.totalChars, 0)
+        XCTAssertEqual(cleared.todayChars, 0)
+        XCTAssertEqual(cleared.streakDays, 0)
     }
 }
