@@ -583,5 +583,11 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(roundTrip.candidateBarHeight, 58, accuracy: 0.001)
         XCTAssertEqual(roundTrip.candidateFontSize, 19.5, accuracy: 0.001)
         XCTAssertEqual(roundTrip.toolbarLayout.first?.buttonID, .settings)
+
+        // 另一端钳制：高度下限 44 / 字号上限 22
+        let clampLowJSON = "{\"candidateBarHeight\":10,\"candidateFontSize\":99}"
+        let clampedLow = try JSONDecoder().decode(LingxiSettings.self, from: Data(clampLowJSON.utf8))
+        XCTAssertEqual(clampedLow.candidateBarHeight, 44, accuracy: 0.001)
+        XCTAssertEqual(clampedLow.candidateFontSize, 22, accuracy: 0.001)
     }
 }

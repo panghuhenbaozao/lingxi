@@ -80,6 +80,7 @@ struct ToolbarSettingsView: View {
             }
 
             Section {
+                candidateBarPreview
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("候选栏高度")
@@ -88,6 +89,8 @@ struct ToolbarSettingsView: View {
                             .foregroundStyle(Color(Design.Palette.stone))
                     }
                     Slider(value: $appState.settings.candidateBarHeight, in: 44...64, step: 1)
+                        .accessibilityLabel("候选栏高度")
+                        .accessibilityValue("\(Int(appState.settings.candidateBarHeight)) pt")
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
@@ -97,6 +100,17 @@ struct ToolbarSettingsView: View {
                             .foregroundStyle(Color(Design.Palette.stone))
                     }
                     Slider(value: $appState.settings.candidateFontSize, in: 14...22, step: 0.5)
+                        .accessibilityLabel("候选词字号")
+                        .accessibilityValue(String(format: "%.1f", appState.settings.candidateFontSize))
+                }
+                if !isDefaultCandidateAppearance {
+                    Button("恢复默认（50 pt / 16.5）") {
+                        appState.settings.candidateBarHeight = LingxiSettings().candidateBarHeight
+                        appState.settings.candidateFontSize = LingxiSettings().candidateFontSize
+                    }
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .accessibilityHint("将候选栏高度恢复为 50 pt，字号恢复为 16.5")
                 }
             } header: {
                 Text("候选栏外观")
@@ -107,6 +121,52 @@ struct ToolbarSettingsView: View {
         .navigationTitle("键盘工具栏")
         .navigationBarTitleDisplayMode(.inline)
         .environment(\.editMode, .constant(.active))
+    }
+
+    /// 与默认外观一致时隐藏恢复按钮（默认：高度 50 pt，字号 16.5）
+    private var isDefaultCandidateAppearance: Bool {
+        let d = LingxiSettings()
+        return appState.settings.candidateBarHeight == d.candidateBarHeight
+            && appState.settings.candidateFontSize == d.candidateFontSize
+    }
+
+    /// 模拟候选栏预览：高度/字号随滑杆即时变化；观感对齐键盘（首选主题色淡底，次选 hairline 描边）
+    private var candidateBarPreview: some View {
+        let words = ["灵犀", "输入法", "候选栏"]
+        let fontSizeText = String(format: "%.1f", appState.settings.candidateFontSize)
+        return HStack(spacing: 6) {
+            ForEach(Array(words.enumerated()), id: \.offset) { idx, word in
+                Text(word)
+                    .lineLimit(1)
+                    .font(.system(
+                        size: CGFloat(appState.settings.candidateFontSize),
+                        weight: idx == 0 ? .semibold : .regular
+                    ))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        idx == 0 ? Color(Design.Palette.ink).opacity(0.08) : Color.clear
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(
+                                idx == 0 ? Color.clear : Color(Design.Palette.hairline),
+                                lineWidth: 0.5
+                            )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: CGFloat(appState.settings.candidateBarHeight))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(Design.Palette.canvas))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("候选栏预览")
+        .accessibilityValue("高度 \(Int(appState.settings.candidateBarHeight)) pt，字号 \(fontSizeText)")
     }
 
     private var presetBinding: Binding<ToolbarPreset> {

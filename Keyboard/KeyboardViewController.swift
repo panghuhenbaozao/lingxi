@@ -30,6 +30,8 @@ final class KeyboardViewController: UIInputViewController {
     private var themeCustomization = ThemeCustomization.load()
     private var resolvedTheme = ResolvedTheme.resolve(isDarkAppearance: false, targetSize: CGSize(width: 430, height: 280))
     private var heightConstraint: NSLayoutConstraint?
+    /// 顶部工具栏（候选栏）高度约束：设置页调整候选栏高度后需同步更新，否则键盘总高变了但候选栏区域不变
+    private var toolbarHeightConstraint: NSLayoutConstraint?
 
     // 视图层级
     private let rootContainer = LingxiInputRootView()
@@ -232,7 +234,7 @@ final class KeyboardViewController: UIInputViewController {
             toolbarView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
             toolbarView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
-            toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight),
+            { let c = toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight); self.toolbarHeightConstraint = c; return c }(),
 
             bodyContainer.topAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             bodyContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
@@ -318,6 +320,7 @@ final class KeyboardViewController: UIInputViewController {
             if schemeOrLayoutChanged {
                 clearAllComposing()
             }
+            toolbarHeightConstraint?.constant = effectiveToolbarHeight
             updatePreferredHeight()
             applyThemeAndSettings()
         }
