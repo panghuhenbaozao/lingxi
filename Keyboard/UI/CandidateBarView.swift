@@ -14,6 +14,8 @@ final class CandidateBarView: UIView {
     private var longPressPool: [UILongPressGestureRecognizer] = []
     private var candidates: [PinyinCandidate] = []
     private var theme: ResolvedTheme?
+    /// 候选词主字号（可由设置页调节，默认 16.5）
+    private var candidateFontSize: CGFloat = 16.5
     /// 防闪烁：上次应用的候选签名与展开状态，未变化时跳过整轮重建
     private var lastSignature = ""
     private var lastExpanded = false
@@ -61,6 +63,15 @@ final class CandidateBarView: UIView {
         // 主题变化后强制所有按钮重新应用配色
         for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
         reloadButtons()
+    }
+
+    /// 应用新的候选字号：清空按钮配置缓存并重建，保证立即生效
+    func applyCandidateFontSize(_ size: CGFloat) {
+        guard abs(size - candidateFontSize) > 0.05 else { return }
+        candidateFontSize = size
+        for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
+        reloadButtons()
+        setNeedsLayout()
     }
 
     func updateCandidates(_ newList: [PinyinCandidate], expanded: Bool) {
@@ -125,12 +136,12 @@ final class CandidateBarView: UIView {
             let needsBolt = (cand.source == .smartHelper) && !Self.isPureEmojiOrSymbol(cand.word)
             let displayWord = cand.word.replacingOccurrences(of: "\n", with: " ")
             let prefixMark = needsBolt ? "⚡ " : ""
-            let mainFont = UIFont.systemFont(ofSize: 16.5, weight: isPrimary ? .semibold : .regular)
+            let mainFont = UIFont.systemFont(ofSize: candidateFontSize, weight: isPrimary ? .semibold : .regular)
             // 轻盈中选态：首选 = 主题色文字 + 淡色底（iOS 原生候选栏观感），其余 = ink 文字
             let mainColor = isPrimary ? theme.candidateHighlight : theme.candidateText
 
             // 防闪烁：按钮配置未变化时跳过重设（重设标题/背景/边框会引起视觉抖动）
-            let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)"
+            let configKey = "\(isPrimary)|\(prefixMark)\(displayWord)|\(cand.codeHint)|\(candidateFontSize)"
             if buttonAppliedKeys[idx] == configKey {
                 lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
                 continue
@@ -218,6 +229,8 @@ final class ExpandedCandidatesView: UIView {
     private var visibleIndices: [Int] = []
     private var currentFilter: Filter = .all
     private var theme: ResolvedTheme?
+    /// 候选词主字号（与单行候选条联动，默认 16.5）
+    private var candidateFontSize: CGFloat = 16.5
     /// 防闪烁：上次应用的候选签名，未变化时跳过重置筛选与全量重建
     private var lastSignature = ""
 
@@ -285,6 +298,14 @@ final class ExpandedCandidatesView: UIView {
         scrollView.setContentOffset(.zero, animated: false)
     }
 
+    /// 应用新的候选字号：网格按钮与行高随字号派生，立即重建
+    func applyCandidateFontSize(_ size: CGFloat) {
+        guard abs(size - candidateFontSize) > 0.05 else { return }
+        candidateFontSize = size
+        rebuildButtons()
+        setNeedsLayout()
+    }
+
     private func rebuildButtons() {
         // 关闭隐式动画，避免按钮移除/重建过程在动画上下文中闪烁
         CATransaction.begin()
@@ -307,7 +328,7 @@ final class ExpandedCandidatesView: UIView {
             // 防闪烁：使用 .custom 而非 .system——system 按钮在 setTitle/setAttributedTitle 时触发内置标题淡入淡出动画（UIView 层级，CATransaction 禁不掉），逐键刷新即闪烁；.custom 无此动画
             let btn = UIButton(type: .custom)
             btn.tag = origIdx
-            let mainFont = UIFont.systemFont(ofSize: 17, weight: origIdx == 0 ? .semibold : .regular)
+            let mainFont = UIFont.systemFont(ofSize: candidateFontSize + 0.5, weight: origIdx == 0 ? .semibold : .regular)
             let mainColor = origIdx == 0 ? theme.candidateHighlight : theme.candidateText
             if !cand.codeHint.isEmpty {
                 let attr = NSMutableAttributedString(
@@ -347,7 +368,7 @@ final class ExpandedCandidatesView: UIView {
         let maxWidth = max(100, bounds.width - padding * 2)
         var x: CGFloat = padding
         var y: CGFloat = padding
-        let rowHeight: CGFloat = 38
+        let rowHeight: CGFloat = candidateFontSize + 21.5
 
         for sub in gridContainer.subviews {
             let intrinsic = sub.sizeThatFits(CGSize(width: maxWidth, height: rowHeight))

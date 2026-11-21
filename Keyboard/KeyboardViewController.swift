@@ -7,6 +7,8 @@ private final class LingxiInputRootView: UIView, UIInputViewAudioFeedback {
 
 final class KeyboardViewController: UIInputViewController {
     private static let toolbarHeight: CGFloat = 50
+    /// 顶部栏实际高度：默认 50，可由设置页候选栏高度调节（44-64）
+    private var effectiveToolbarHeight: CGFloat { CGFloat(settings.candidateBarHeight) }
 
     private enum ActivePanel {
         case letters
@@ -230,7 +232,7 @@ final class KeyboardViewController: UIInputViewController {
             toolbarView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
             toolbarView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
-            toolbarView.heightAnchor.constraint(equalToConstant: Self.toolbarHeight),
+            toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight),
 
             bodyContainer.topAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             bodyContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
@@ -279,7 +281,7 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
 
-        let totalH = Self.toolbarHeight + CGFloat(settings.heightPreset.bodyHeight)
+        let totalH = effectiveToolbarHeight + CGFloat(settings.heightPreset.bodyHeight)
         let hc = view.heightAnchor.constraint(equalToConstant: totalH)
         hc.priority = UILayoutPriority(999)
         hc.isActive = true
@@ -405,7 +407,7 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             bodyH = baseH
         }
-        heightConstraint?.constant = Self.toolbarHeight + bodyH
+        heightConstraint?.constant = effectiveToolbarHeight + bodyH
     }
 
     // MARK: - 事件绑定
@@ -2504,6 +2506,9 @@ final class KeyboardViewController: UIInputViewController {
         backdropView.apply(theme: resolvedTheme)
         toolbarView.apply(theme: resolvedTheme)
         expandedCandidates.apply(theme: resolvedTheme)
+        // 候选字号可调：单行候选条与展开网格联动应用
+        toolbarView.candidateBar.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
+        expandedCandidates.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
         let (retTitle, _) = returnKeyAppearance()
         numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
         symbolEmojiPanel.apply(theme: resolvedTheme)
@@ -2568,7 +2573,9 @@ final class KeyboardViewController: UIInputViewController {
             layoutMode: settings.layoutMode,
             aiPromptDraft: aiPromptDraft,
             translateState: translateState,
-            hasFullAccess: hasFullAccess
+            hasFullAccess: hasFullAccess,
+            toolbarLayout: settings.toolbarLayout,
+            showComposingStrip: settings.showComposingStrip
         )
     }
 

@@ -528,4 +528,60 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(cleared.todayChars, 0)
         XCTAssertEqual(cleared.streakDays, 0)
     }
+
+    func testToolbarLayoutSettings() throws {
+        // 旧版 JSON（无工具栏新字段）解码应回退默认值
+        let legacyJSON = "{\"layoutMode\":\"qwerty26\",\"inputScheme\":\"quanpin\"}"
+        let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data(legacyJSON.utf8))
+        XCTAssertEqual(legacy.toolbarLayout.count, ToolbarButtonID.allCases.count)
+        XCTAssertEqual(legacy.toolbarLayout.map({ $0.buttonID }), ToolbarButtonID.allCases)
+        XCTAssertTrue(legacy.toolbarLayout.allSatisfy({ $0.isVisible }))
+        XCTAssertTrue(legacy.showComposingStrip)
+        XCTAssertEqual(legacy.candidateBarHeight, 50, accuracy: 0.001)
+        XCTAssertEqual(legacy.candidateFontSize, 16.5, accuracy: 0.001)
+
+        // 归一化：乱序 + 缺项 + 显隐，应补全缺失按钮并按 order 重排
+        var custom: [ToolbarItemConfig] = [
+            ToolbarItemConfig(buttonID: .emoji, isVisible: false, order: 0),
+            ToolbarItemConfig(buttonID: .ai, isVisible: true, order: 1),
+        ]
+        custom = LingxiSettings.normalizedToolbarLayout(custom)
+        XCTAssertEqual(custom.count, ToolbarButtonID.allCases.count)
+        XCTAssertEqual(custom.first?.buttonID, .emoji)
+        XCTAssertEqual(custom[1].buttonID, .ai)
+        XCTAssertFalse(custom[0].isVisible)
+        // 缺失的按钮应被补全且默认可见
+        XCTAssertTrue(custom.contains(where: { $0.buttonID == .undo && $0.isVisible }))
+        // order 应被重排为 0..n-1
+        XCTAssertEqual(custom.map({ $0.order }), Array(0..<custom.count))
+        // 重复项去重：同一按钮出现两次只保留一个
+        let dup = LingxiSettings.normalizedToolbarLayout([
+            ToolbarItemConfig(buttonID: .ai, isVisible: true, order: 0),
+            ToolbarItemConfig(buttonID: .ai, isVisible: false, order: 1),
+        ])
+        XCTAssertEqual(dup.filter({ $0.buttonID == .ai }).count, 1)
+
+        // 高度/字号越界钳制
+        let clampJSON = "{\"candidateBarHeight\":100,\"candidateFontSize\":5}"
+        let clamped = try JSONDecoder().decode(LingxiSettings.self, from: Data(clampJSON.utf8))
+        XCTAssertEqual(clamped.candidateBarHeight, 64, accuracy: 0.001)
+        XCTAssertEqual(clamped.candidateFontSize, 14, accuracy: 0.001)
+
+        // 编码-解码往返保持完整字段
+        var full = LingxiSettings()
+        full.toolbarLayout = LingxiSettings.normalizedToolbarLayout([
+            ToolbarItemConfig(buttonID: .settings, isVisible: true, order: 0),
+            ToolbarItemConfig(buttonID: .undo, isVisible: false, order: 1),
+        ])
+        full.showComposingStrip = false
+        full.candidateBarHeight = 58
+        full.candidateFontSize = 19.5
+        let data = try JSONEncoder().encode(full)
+        let roundTrip = try JSONDecoder().decode(LingxiSettings.self, from: data)
+        XCTAssertEqual(roundTrip, full)
+        XCTAssertFalse(roundTrip.showComposingStrip)
+        XCTAssertEqual(roundTrip.candidateBarHeight, 58, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.candidateFontSize, 19.5, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.toolbarLayout.first?.buttonID, .settings)
+    }
 }

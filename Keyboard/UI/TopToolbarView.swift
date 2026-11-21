@@ -96,6 +96,12 @@ final class TopToolbarView: UIView {
     private var isTranslateBarActive = false
     private var hasFullAccess = false
     private var onCapturedPaste: ((String) -> Void)?
+    /// 工具栏布局配置（按钮排序 + 显隐），默认与原始固定顺序一致
+    private var toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout
+    /// 拼音/组合串预览条显隐开关
+    private var showComposingStrip = true
+    /// 撤销按钮是否被配置允许显示（与实际 showUndo 状态叠加）
+    private var undoConfiguredVisible = true
 
     init(onCapturedPaste: @escaping (String) -> Void) {
         self.onCapturedPaste = onCapturedPaste
@@ -246,6 +252,41 @@ final class TopToolbarView: UIView {
         aiPromptBar.addSubview(aiPromptCancelBtn)
     }
 
+    private func button(for id: ToolbarButtonID) -> UIButton {
+        switch id {
+        case .ai: return aiButton
+        case .translate: return translateButton
+        case .clipboard: return clipboardButton
+        case .emoji: return emojiButton
+        case .edit: return editButton
+        case .layout: return layoutButton
+        case .settings: return settingsButton
+        case .undo: return undoButton
+        }
+    }
+
+    /// 防抖动：上次应用的工具栏布局签名，未变化时跳过重排（update 在打字链路高频触发）
+    private var lastToolbarLayoutKey = ""
+
+    /// 按配置重排工具栏按钮顺序并应用显隐（undo 的实际显隐还与 showUndo 叠加）
+    private func applyToolbarConfiguration() {
+        let sorted = LingxiSettings.normalizedToolbarLayout(toolbarLayout)
+        let key = sorted.map { "\($0.buttonID.rawValue):\($0.isVisible ? 1 : 0)" }.joined(separator: ",")
+        guard key != lastToolbarLayoutKey else { return }
+        lastToolbarLayoutKey = key
+        for item in sorted {
+            let btn = button(for: item.buttonID)
+            buttonsStack.addArrangedSubview(btn)
+            if item.buttonID == .undo {
+                undoConfiguredVisible = item.isVisible
+                btn.isHidden = !item.isVisible || undoButton.isHidden
+            } else {
+                btn.isHidden = !item.isVisible
+            }
+        }
+        setNeedsLayout()
+    }
+
     private func configureToolButton(_ btn: UIButton, title: String?, symbol: String?, action: Selector) {
         if let symbol {
             let cfg = UIImage.SymbolConfiguration(pointSize: 13.5, weight: .medium)
@@ -380,8 +421,13 @@ final class TopToolbarView: UIView {
         layoutMode: KeyboardLayoutMode,
         aiPromptDraft: String?,
         translateState: TranslateBarState? = nil,
-        hasFullAccess: Bool
+        hasFullAccess: Bool,
+        toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
+        showComposingStrip: Bool = true
     ) {
+        self.toolbarLayout = toolbarLayout
+        self.showComposingStrip = showComposingStrip
+        applyToolbarConfiguration()
         self.hasCandidates = !candidates.isEmpty
         self.currentBannerState = bannerState
         self.hasFullAccess = hasFullAccess
@@ -437,10 +483,10 @@ final class TopToolbarView: UIView {
             translateBar.isHidden = true
         }
 
-        composingLabel.text = composingDisplay
+        composingLabel.text = showComposingStrip ? composingDisplay : ""
         candidateBar.isHidden = !hasCandidates
         idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
-        undoButton.isHidden = !showUndo
+        undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
         if let theme {
             aiButton.backgroundColor = aiPanelActive

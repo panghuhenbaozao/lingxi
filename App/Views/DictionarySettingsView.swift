@@ -19,6 +19,10 @@ struct DictionarySettingsView: View {
                                  subtitle: "震动 " + appState.settings.hapticStrength.displayName + (appState.settings.keySoundEnabled ? " · 音效开" : " · 音效关")) {
                         KeyboardFeelSettingsView()
                     }
+                    settingsLink(icon: "rectangle.3.offgrid", tint: Design.Palette.ink, title: "键盘工具栏",
+                                 subtitle: "按钮排序 · 候选栏高度与字号") {
+                        ToolbarSettingsView()
+                    }
                     settingsLink(icon: "wand.and.stars", tint: Design.Palette.ink, title: "智能输入",
                                  subtitle: "纠错 · 联想 · 剪贴板") {
                         SmartInputSettingsView()

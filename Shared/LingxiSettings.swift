@@ -1,5 +1,67 @@
 import Foundation
 
+/// Toolbar button stable identity for layout persistence.
+enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
+    case ai
+    case translate
+    case clipboard
+    case emoji
+    case edit
+    case layout
+    case settings
+    case undo
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .ai: return "AI"
+        case .translate: return "Translate"
+        case .clipboard: return "Clipboard"
+        case .emoji: return "Emoji"
+        case .edit: return "Edit"
+        case .layout: return "Layout"
+        case .settings: return "Settings"
+        case .undo: return "Undo"
+        }
+    }
+    var symbolName: String {
+        switch self {
+        case .ai: return "sparkles"
+        case .translate: return "character.bubble"
+        case .clipboard: return "doc.on.clipboard"
+        case .emoji: return "face.smiling"
+        case .edit: return "textformat"
+        case .layout: return "rectangle.grid.3x2"
+        case .settings: return "gearshape"
+        case .undo: return "arrow.uturn.left"
+        }
+    }
+}
+
+/// Layout config for a single toolbar button (visibility + order).
+struct ToolbarItemConfig: Codable, Equatable, Identifiable {
+    var buttonID: ToolbarButtonID
+    var isVisible: Bool
+    var order: Int
+    var id: String { buttonID.rawValue }
+    init(buttonID: ToolbarButtonID, isVisible: Bool = true, order: Int) {
+        self.buttonID = buttonID
+        self.isVisible = isVisible
+        self.order = order
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let bid = try c.decodeIfPresent(ToolbarButtonID.self, forKey: .buttonID) ?? .settings
+        buttonID = bid
+        isVisible = try c.decodeIfPresent(Bool.self, forKey: .isVisible) ?? true
+        order = try c.decodeIfPresent(Int.self, forKey: .order) ?? (ToolbarButtonID.allCases.firstIndex(of: bid) ?? 0)
+    }
+}
+
+/// Default toolbar layout matching the original fixed button order.
+let defaultToolbarLayout: [ToolbarItemConfig] = ToolbarButtonID.allCases.enumerated().map { idx, bid in
+    ToolbarItemConfig(buttonID: bid, isVisible: true, order: idx)
+}
+
 /// 键盘排布模式。
 enum KeyboardLayoutMode: String, Codable, CaseIterable, Identifiable {
     case qwerty26
@@ -230,6 +292,28 @@ struct LingxiSettings: Codable, Equatable {
     var translateTargetLang: String = "英文"
     var translateFormalTone: Bool = false
     var stylishFontID: String = StylishFontStyle.normal.rawValue
+    var toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout
+    var showComposingStrip: Bool = true
+    var candidateBarHeight: Double = 50
+    var candidateFontSize: Double = 16.5
+
+    /// Ensure every known toolbar button appears exactly once, preserving saved order.
+    static func normalizedToolbarLayout(_ layout: [ToolbarItemConfig]) -> [ToolbarItemConfig] {
+        var seen = Set<ToolbarButtonID>()
+        var result: [ToolbarItemConfig] = []
+        for item in layout.sorted(by: { $0.order < $1.order }) where !seen.contains(item.buttonID) {
+            seen.insert(item.buttonID)
+            result.append(item)
+        }
+        for bid in ToolbarButtonID.allCases where !seen.contains(bid) {
+            result.append(ToolbarItemConfig(buttonID: bid, isVisible: true, order: result.count))
+        }
+        return result.enumerated().map { idx, item in
+            var copy = item
+            copy.order = idx
+            return copy
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case layoutMode, inputScheme, fuzzy, heightPreset, handedness, hapticStrength
@@ -245,6 +329,7 @@ struct LingxiSettings: Codable, Equatable {
         case clipboardBannerEnabled, autoReadClipboardPreview, smartOTPExtraction
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled
         case translateTargetLang, translateFormalTone, stylishFontID
+        case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
     }
 
     init() {}
@@ -294,6 +379,13 @@ struct LingxiSettings: Codable, Equatable {
         translateTargetLang = try c.decodeIfPresent(String.self, forKey: .translateTargetLang) ?? d.translateTargetLang
         translateFormalTone = try c.decodeIfPresent(Bool.self, forKey: .translateFormalTone) ?? d.translateFormalTone
         stylishFontID = try c.decodeIfPresent(String.self, forKey: .stylishFontID) ?? d.stylishFontID
+        let rawToolbarLayout = try c.decodeIfPresent([ToolbarItemConfig].self, forKey: .toolbarLayout) ?? d.toolbarLayout
+        toolbarLayout = LingxiSettings.normalizedToolbarLayout(rawToolbarLayout)
+        showComposingStrip = try c.decodeIfPresent(Bool.self, forKey: .showComposingStrip) ?? d.showComposingStrip
+        let rawBarH = try c.decodeIfPresent(Double.self, forKey: .candidateBarHeight) ?? d.candidateBarHeight
+        candidateBarHeight = min(64, max(44, rawBarH))
+        let rawFont = try c.decodeIfPresent(Double.self, forKey: .candidateFontSize) ?? d.candidateFontSize
+        candidateFontSize = min(22, max(14, rawFont))
     }
 
     private static let fileName = "lingxi_settings.json"
