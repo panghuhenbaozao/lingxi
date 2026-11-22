@@ -6,7 +6,9 @@ import Security
 
 /// 云端服务与 API 接入配置（持久化于 App Group；敏感 Token 与 API Key 走 Keychain + 沙盒保护回退）。
 public struct CloudBackendConfig: Codable, Equatable {
-    public var serverBaseURL: String = "http://127.0.0.1:8787"
+    public static let defaultCloudServerURL = "https://lingxi-cloud.1455952.workers.dev"
+
+    public var serverBaseURL: String = CloudBackendConfig.defaultCloudServerURL
     public var userID: String = ""
     public var email: String = ""
     public var username: String = ""
@@ -27,7 +29,12 @@ public struct CloudBackendConfig: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        serverBaseURL = try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "http://127.0.0.1:8787"
+        let decodedURL = (try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if decodedURL.isEmpty || decodedURL == "http://127.0.0.1:8787" || decodedURL == "http://localhost:8787" {
+            serverBaseURL = Self.defaultCloudServerURL
+        } else {
+            serverBaseURL = decodedURL
+        }
         userID = try c.decodeIfPresent(String.self, forKey: .userID) ?? ""
         email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
         username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
@@ -55,7 +62,10 @@ public struct CloudBackendConfig: Codable, Equatable {
         while trimmed.hasSuffix("/") {
             trimmed.removeLast()
         }
-        return trimmed.isEmpty ? "http://127.0.0.1:8787" : trimmed
+        if trimmed.isEmpty || trimmed == "http://127.0.0.1:8787" || trimmed == "http://localhost:8787" {
+            return Self.defaultCloudServerURL
+        }
+        return trimmed
     }
 }
 

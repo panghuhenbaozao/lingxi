@@ -293,7 +293,7 @@ struct CloudAccountView: View {
                 }
 
                 DisclosureGroup("自托管服务器与 Web 控制台", isExpanded: $showServerDisclosure) {
-                    TextField("后端地址 (如 http://192.168.1.10:8787)", text: $appState.cloudConfig.serverBaseURL)
+                    TextField("云端地址 (默认 Cloudflare 全球云)", text: $appState.cloudConfig.serverBaseURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)

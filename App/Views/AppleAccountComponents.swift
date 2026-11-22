@@ -129,7 +129,7 @@ struct AppleStyleSignInSheet: View {
                             .font(.system(size: 26, weight: .bold))
                             .foregroundStyle(Color(Design.Palette.ink))
 
-                        Text("无需配置服务器即可直接在本机加密注册、设置头像与昵称；\n连上自建云端后自动升级 E2EE 跨设备同步。")
+                        Text("已直连灵犀 Cloudflare 全球云端（5G/Wi-Fi 均可真注册真登录）；\n端到端加密同步个人自学习词库、皮肤、打字习惯画像与跨屏剪贴板。")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -249,19 +249,28 @@ struct AppleStyleSignInSheet: View {
                     }
 
                     // 6. 高级自托管服务器地址默认折叠，保持登录屏极度纯净
-                    DisclosureGroup("自建云端服务器设置（可选）", isExpanded: $showServerConfig) {
+                    DisclosureGroup("云端服务器设置（已内置 Cloudflare 全球云）", isExpanded: $showServerConfig) {
                         VStack(alignment: .leading, spacing: 8) {
-                            TextField("如 http://192.168.1.10:8787", text: $appState.cloudConfig.serverBaseURL)
+                            TextField("https://lingxi-cloud.1455952.workers.dev", text: $appState.cloudConfig.serverBaseURL)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
-                                .font(.system(size: 13.5, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .padding(10)
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            Text("不填也能在本机直接注册登录；若在电脑/Docker 运行了灵犀云端，填写局域网 IP 即可注册并多端云同步。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text("默认直连您的 Cloudflare Workers + D1 云端，也可随时改为自有服务器地址。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if appState.cloudConfig.normalizedBaseURL != CloudBackendConfig.defaultCloudServerURL {
+                                    Button("恢复默认") {
+                                        appState.cloudConfig.serverBaseURL = CloudBackendConfig.defaultCloudServerURL
+                                    }
+                                    .font(.caption.bold())
+                                }
+                            }
                         }
                         .padding(.top, 8)
                     }

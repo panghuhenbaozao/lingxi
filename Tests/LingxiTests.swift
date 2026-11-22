@@ -1158,12 +1158,13 @@ final class LingxiTests: XCTestCase {
         }
         XCTAssertNil(ClipboardStore.pendingBannerItem(), "删除待展示条目后应自动清空 pendingBannerItem")
 
-        // CloudBackendConfig 向后兼容解码（缺少 avatarThemeIndex 时默认为 0）
-        let legacyCloudJSON = Data("{\"serverURL\":\"http://127.0.0.1:8787\",\"username\":\"测试用户\"}".utf8)
+        // CloudBackendConfig 向后兼容解码（缺少 avatarThemeIndex 时默认为 0，旧版 127.0.0.1:8787 自动迁移至 Cloudflare 全球云端）
+        let legacyCloudJSON = Data("{\"serverBaseURL\":\"http://127.0.0.1:8787\",\"username\":\"测试用户\"}".utf8)
         let cfg = try JSONDecoder().decode(CloudBackendConfig.self, from: legacyCloudJSON)
         XCTAssertEqual(cfg.username, "测试用户")
         XCTAssertEqual(cfg.avatarThemeIndex, 0)
         XCTAssertFalse(cfg.isLocalOnlyAccount)
+        XCTAssertEqual(cfg.normalizedBaseURL, CloudBackendConfig.defaultCloudServerURL)
     }
 
     func testOfflineLocalAccountRegisterLoginAndQuickSignIn() async throws {
