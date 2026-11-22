@@ -1535,7 +1535,8 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vdz", scheme: .quanpin))
         let vwzHits = SmartCandidateHelper.extraCandidates(forRawInput: "vwz", settings: settings, consumedLength: 3)
         XCTAssertTrue(vwzHits.contains(where: { $0.word == "山东省临沂市兰山区北京路" }))
-        XCTAssertTrue(vwzHits.contains(where: { $0.word == "临沂市" }))
+        XCTAssertTrue(vwzHits.contains(where: { $0.word == "山东省临沂市兰山区" }))
+        XCTAssertTrue(vwzHits.contains(where: { $0.word == "临沂" }))
 
         let renderedGeoTpl = DynamicTemplateEngine.render("我现在在{{当前城市}}{{当前区县}}：{{当前位置}}")
         XCTAssertEqual(renderedGeoTpl, "我现在在临沂兰山区：山东省临沂市兰山区北京路")
@@ -1560,7 +1561,9 @@ final class LingxiTests: XCTestCase {
                 ("linshu", "临沭"),
                 ("chongqing", "重庆"),
                 ("bengbu", "蚌埠"),
-                ("luan", "六安"),
+                ("lu'an", "六安"),
+                ("panyu", "番禺"),
+                ("xiamen", "厦门"),
             ]
             for (py, expected) in builtinChecks {
                 let res = engine.query(raw: py, settings: testSettings)
