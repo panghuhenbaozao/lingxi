@@ -229,10 +229,10 @@ final class PinyinEngine {
         )
 
         let hasInvalid = bestSeg.contains { $0.kind == .invalid }
-        let hasInitialCluster: Bool = {
+        let hasNonCompleteCluster: Bool = {
             var run = 0
             for t in bestSeg {
-                if t.kind == .initial || t.kind == .invalid || t.kind == .partial {
+                if t.kind != .complete {
                     run += 1
                     if run >= 2 { return true }
                 } else {
@@ -241,7 +241,7 @@ final class PinyinEngine {
             }
             return false
         }()
-        if effectiveScheme == .quanpin && (hasInvalid || hasInitialCluster) && lower.count >= 4,
+        if effectiveScheme == .quanpin && (hasInvalid || hasNonCompleteCluster) && lower.count >= 4,
            let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
             let mixedWords = Set(mixed.candidates.map(\.word))
             out = mixed.candidates + out.filter { !mixedWords.contains($0.word) }
