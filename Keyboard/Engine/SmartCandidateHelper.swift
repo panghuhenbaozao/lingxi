@@ -85,6 +85,22 @@ enum SmartCandidateHelper {
                 appendCandidate(calcOrNum, lp: 14.0 - Double(idx) * 0.15, isExact: idx == 0, source: .smartHelper)
             }
 
+            // 支持 vwz / vdz / vweizhi / vdizhi 快速插入当前实时定位地址
+            if settings.geoLocationBoostEnabled && ["wz", "dz", "weizhi", "dizhi", "cs", "chengshi"].contains(lowerBody) {
+                let geo = GeoLocationContext.load()
+                if geo.isPopulated {
+                    if !geo.fullDisplayAddress.isEmpty {
+                        appendCandidate(geo.fullDisplayAddress, lp: 14.8, isExact: true, source: .smartHelper)
+                    }
+                    if !geo.compactLocationLabel.isEmpty && geo.compactLocationLabel != geo.fullDisplayAddress {
+                        appendCandidate(geo.compactLocationLabel, lp: 14.4, isExact: true, source: .smartHelper)
+                    }
+                    if !geo.shortCityName.isEmpty {
+                        appendCandidate(geo.shortCityName, lp: 14.0, isExact: false, source: .smartHelper)
+                    }
+                }
+            }
+
             for (idx, dtWord) in DateTimeHelper.candidates(forNormalizedPinyin: lowerBody, allowShortTriggers: true).enumerated() {
                 appendCandidate(dtWord, lp: 13.0 - Double(idx) * 0.1, isExact: idx == 0, source: .smartHelper)
             }
@@ -93,6 +109,19 @@ enum SmartCandidateHelper {
         // 1. 常规日期 / 时间 / 星期快捷候选（仅完整拼音 riqi/date/shijian/time/xingqi 触发，不拦截 rq/sj 简拼）
         for (idx, dateStr) in DateTimeHelper.candidates(forNormalizedPinyin: lower, allowShortTriggers: false).enumerated() {
             appendCandidate(dateStr, lp: -2.0 - Double(idx) * 0.05, isExact: false, source: .smartHelper)
+        }
+
+        // 1.5 输入 weizhi / dizhi / dangqianweizhi 时补充当前实时定位地址
+        if settings.geoLocationBoostEnabled && ["weizhi", "dizhi", "dangqianweizhi", "wodeweizhi"].contains(lower) {
+            let geo = GeoLocationContext.load()
+            if geo.isPopulated {
+                if !geo.fullDisplayAddress.isEmpty {
+                    appendCandidate(geo.fullDisplayAddress, lp: -1.5, isExact: false, source: .smartHelper)
+                }
+                if !geo.compactLocationLabel.isEmpty {
+                    appendCandidate(geo.compactLocationLabel, lp: -1.8, isExact: false, source: .smartHelper)
+                }
+            }
         }
 
         // 2. 常规算式直出（如 `125*8=`）
@@ -154,6 +183,7 @@ enum SmartCandidateHelper {
         if InlineCalculator.evaluateIfExpression(body) != nil { return true }
         if !DateTimeHelper.candidates(forNormalizedPinyin: lowerBody).isEmpty { return true }
         if lowerBody.hasSuffix("rmb"), Double(String(lowerBody.dropLast(3))) != nil { return true }
+        if ["wz", "dz", "weizhi", "dizhi", "cs", "chengshi"].contains(lowerBody) { return true }
         // 输入计算式中间态（如 `v1+` 或 `V12*` 或 `v10%3`）同样保持工具模式
         if body.allSatisfy({ $0.isNumber || "+-*/%^().".contains($0) }) { return true }
         return false

@@ -445,6 +445,12 @@ final class AIClient {
         if !habitSuffix.isEmpty {
             result += "\n\(habitSuffix)"
         }
+        if LingxiSettings.load().aiGeoContextEnabled {
+            let geoSuffix = GeoLocationContext.load().aiTimeLocationPromptSuffix()
+            if !geoSuffix.isEmpty {
+                result += "\n\(geoSuffix)"
+            }
+        }
         return result
     }
 

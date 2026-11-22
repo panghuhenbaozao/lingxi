@@ -12,7 +12,9 @@ struct HomeTestView: View {
     @State private var showGuide = false
     @State private var showSignInSheet = false
     @State private var navigateToAccount = false
+    @State private var navigateToLocation = false
     @State private var tipsExpanded = false
+    @ObservedObject private var locationService = LiveLocationLexiconService.shared
     @FocusState private var isTestingFocused: Bool
 
     var body: some View {
@@ -50,6 +52,9 @@ struct HomeTestView: View {
             .navigationDestination(isPresented: $navigateToAccount) {
                 CloudAccountView()
             }
+            .navigationDestination(isPresented: $navigateToLocation) {
+                LocationLexiconView()
+            }
             .sheet(isPresented: $showGuide) {
                 OnboardingGuideView()
             }
@@ -76,7 +81,7 @@ struct HomeTestView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(appState.isKeyboardEnabled ? "灵犀 5.0 已就绪" : "尚未在系统设置中启用灵犀")
+                        Text(appState.isKeyboardEnabled ? "灵犀 5.1 已就绪" : "尚未在系统设置中启用灵犀")
                             .font(.system(size: 15.5, weight: .semibold))
                             .foregroundStyle(Color(Design.Palette.ink))
                         if appState.isKeyboardEnabled {
@@ -133,6 +138,37 @@ struct HomeTestView: View {
                         Text("点此通过 Apple 通行密钥 / 面容 ID 登录 Cloudflare 全球云")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(Color(Design.Palette.accent))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(Design.Palette.surface))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            // 实时地理位置与周边地标词库胶囊条
+            Button {
+                navigateToLocation = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: locationService.currentContext.isPopulated ? "location.fill" : "mappin.and.ellipse")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color(Design.Palette.accent))
+                    if locationService.currentContext.isPopulated {
+                        Text("实时位置：\(locationService.currentContext.compactLocationLabel) · 已学会 \(locationService.currentContext.pois.count) 个周边地标")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("开启实时位置词库：自动学习当前城市、路名与 5km 周边商圈")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Color(Design.Palette.ink))
                             .lineLimit(1)
                     }
                     Spacer()
@@ -284,7 +320,7 @@ struct HomeTestView: View {
                     }
 
                 if sandboxText.isEmpty {
-                    Text("点这里切出「灵犀输入法」，试打中数混输 mingtian3dianjian、长拼音单字音节回改，或点下方场景芯片测试。")
+                    Text("点这里切出「灵犀输入法」，试打 linyi（临沂）、vwz 发当前位置、@ai 写条朋友圈，或点下方场景芯片体验。")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                         .padding(.leading, 17)
@@ -299,6 +335,10 @@ struct HomeTestView: View {
                         let sample = "【灵犀测试】您的验证码是 849201，5分钟内有效。"
                         UIPasteboard.general.string = sample
                         appState.addClipboardEntry(sample)
+                    }
+                    compactChip("测试 @ai 随打指令", icon: "bolt.fill") {
+                        sandboxText = "@ai 写一条今天在临沂打卡美食的轻松朋友圈"
+                        isTestingFocused = true
                     }
                     compactChip("模拟框选即改", icon: "sparkles") {
                         sandboxText = "明天下午两点我实在赶不过去，能不能往后推一天再碰一下需求？"
@@ -415,7 +455,7 @@ struct HomeTestView: View {
     private var tipsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text("灵犀 5.0 进阶玩法")
+                Text("灵犀 5.1 进阶玩法")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Color(Design.Palette.ink))
                 Spacer()
@@ -551,9 +591,21 @@ private extension HomeTestView {
     static var allTips: [PlayTip] {
         [
             PlayTip(
+                icon: "bolt.circle.fill",
+                title: "随打 @ai / // 零切屏指令 + 🎲3选1气泡",
+                desc: "聊天时直接打「@ai 帮我委婉拒加班」顶栏立刻浮现一键执行；打开 AI 面板点「🎲3选1」一次出 3 种风格，支持版本回退与 ⭐存短语。",
+                isPopular: true
+            ),
+            PlayTip(
+                icon: "location.fill",
+                title: "全国 6,403 地名库 + 实时 GPS 5km 周边自学习",
+                desc: "全国省市区县（如临沂/兰山区/费县/菏泽）开箱首选；开启定位自动学会附近路名、商圈、小区与高铁站，打 vwz / vdz 一键发当前位置。",
+                isPopular: true
+            ),
+            PlayTip(
                 icon: "sparkles",
-                title: "框选即改 + 博弈军师三策略气泡",
-                desc: "在任意输入框选中一段字，顶栏立刻弹出「润色 / 更委婉 / 译英」；复制棘手消息点「博弈军师」一键出 3 套高情商回复。",
+                title: "框选即改 + 顺着续写 + 博弈军师",
+                desc: "选中任意段落即浮现「润色 / 更委婉 / 译英」；写到一半点「顺着续写」自然接续；复制棘手消息点「博弈军师」一键出 3 套高情商回复。",
                 isPopular: true
             ),
             PlayTip(
@@ -565,14 +617,12 @@ private extension HomeTestView {
             PlayTip(
                 icon: "textformat.123",
                 title: "中数英无缝混输（无需切换键盘）",
-                desc: "直接连打 mingtian3dianjian 出「明天3点见」，打 fayigepdfgeiwo 出「发一个PDF给我」。",
-                isPopular: true
+                desc: "直接连打 mingtian3dianjian 出「明天3点见」，打 fayigepdfgeiwo 出「发一个PDF给我」。"
             ),
             PlayTip(
                 icon: "arrow.up.and.down.and.arrow.left.and.right",
                 title: "专业文本编辑台 + 26 键自定义滑行映射",
-                desc: "从键盘快捷设置打开「📐 编辑台」精准移动光标、一键盘古空格/去空行；在效率中心自由定义任意键上下滑输出。",
-                isPopular: true
+                desc: "从键盘快捷设置打开「📐 编辑台」精准移动光标、一键盘古空格/去空行；在效率中心自由定义任意键上下滑输出。"
             ),
             PlayTip(
                 icon: "function",

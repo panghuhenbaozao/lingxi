@@ -58,6 +58,7 @@ final class KeyboardViewController: UIInputViewController {
     private var currentTokens: [PinyinToken] = []
     private var editingSyllableIndex: Int?
     private var savedSentenceCandidatesBeforeEdit: [PinyinCandidate] = []
+    private var lastAIInsertedText: String?
     private var currentCorrectedHint: String?
     private var currentCandidates: [PinyinCandidate] = []
     private var isCandidatesExpanded = false
@@ -467,6 +468,7 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             self.aiPromptDraft = nil
+            self.lastAIInsertedText = text
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
         }
@@ -474,6 +476,7 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             self.aiPromptDraft = nil
+            self.lastAIInsertedText = replacement
             self.performEdit {
                 for _ in 0..<deleteCount {
                     self.textDocumentProxy.deleteBackward()
@@ -954,6 +957,16 @@ final class KeyboardViewController: UIInputViewController {
                 theme: resolvedTheme,
                 hasFullAccess: hasFullAccess
             )
+        case .executeInlineAICommand(let command, let replaceCount):
+            switchToPanel(.ai)
+            aiPanel.runDirectInstruction(
+                title: "@ai 随打即唤",
+                instruction: "请严格按用户的直接指令完成写作或回答，只直接输出可直接发送的结果正文，不要多余解释与引号。",
+                sourceText: command,
+                replaceCount: replaceCount,
+                theme: resolvedTheme,
+                hasFullAccess: hasFullAccess
+            )
         case .tapComposingSyllable(let idx):
             enterRetroactiveSyllableEdit(at: idx)
         case .askAIForWord(let word):
@@ -1213,6 +1226,14 @@ final class KeyboardViewController: UIInputViewController {
             }
             return
         }
+        if let aiOrig = lastAIInsertedText,
+           let finalBefore = textDocumentProxy.documentContextBeforeInput?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !finalBefore.isEmpty, finalBefore != aiOrig, finalBefore.count <= 400 {
+            var cfg = AIConfig.load()
+            AIAutoInsightService.learnFromUserEditDiff(aiOriginal: aiOrig, userFinal: finalBefore, into: &cfg.styleDNA)
+            cfg.save()
+        }
+        lastAIInsertedText = nil
         englishComposing = ""
         insertFinalText("\n", checkPairing: false)
         lastCommittedWord = nil
@@ -2441,6 +2462,9 @@ final class KeyboardViewController: UIInputViewController {
             ? currentTokens.map(\.text)
             : []
         let activeSelectedText: String? = (settings.selectionMagicEnabled && !isSecureField) ? textDocumentProxy.selectedText : nil
+        let inlineAICmd: InlineAICommandMatch? = (!isSecureField && !isActivelyComposing && activePanel == .letters)
+            ? InlineAICommandDetector.detect(in: textDocumentProxy.documentContextBeforeInput ?? "")
+            : nil
 
         toolbarView.update(
             composingDisplay: composingDisplay,
@@ -2455,6 +2479,7 @@ final class KeyboardViewController: UIInputViewController {
             aiPromptDraft: aiPromptDraft,
             translateState: translateState,
             selectedHostText: activeSelectedText,
+            inlineAICommand: inlineAICmd,
             hasFullAccess: hasFullAccess,
             toolbarLayout: settings.toolbarLayout,
             showComposingStrip: settings.showComposingStrip

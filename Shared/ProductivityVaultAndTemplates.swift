@@ -8,6 +8,9 @@ enum DynamicTemplateEngine {
         ("{{时间}}", "当前时间"),
         ("{{星期}}", "星期几"),
         ("{{年月}}", "当前年月"),
+        ("{{当前城市}}", "实时城市"),
+        ("{{当前区县}}", "实时区县"),
+        ("{{当前位置}}", "实时地址"),
         ("{{剪贴板}}", "最新剪贴板"),
         ("{{选中文字}}", "选中内容"),
         ("{{随机问候}}", "时段问候"),
@@ -53,12 +56,17 @@ enum DynamicTemplateEngine {
 
         let clip = (clipboard ?? ClipboardStore.items().first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let sel = (selectedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let geo = GeoLocationContext.load()
 
         return template
             .replacingOccurrences(of: "{{日期}}", with: dateStr)
             .replacingOccurrences(of: "{{时间}}", with: timeStr)
             .replacingOccurrences(of: "{{星期}}", with: weekdayStr)
             .replacingOccurrences(of: "{{年月}}", with: ymStr)
+            .replacingOccurrences(of: "{{当前城市}}", with: geo.shortCityName)
+            .replacingOccurrences(of: "{{当前区县}}", with: geo.district.isEmpty ? geo.shortCityName : geo.district)
+            .replacingOccurrences(of: "{{当前街道}}", with: geo.street)
+            .replacingOccurrences(of: "{{当前位置}}", with: geo.fullDisplayAddress)
             .replacingOccurrences(of: "{{剪贴板}}", with: clip)
             .replacingOccurrences(of: "{{选中文字}}", with: sel)
             .replacingOccurrences(of: "{{随机问候}}", with: greeting)

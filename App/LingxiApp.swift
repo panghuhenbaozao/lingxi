@@ -21,6 +21,7 @@ struct LingxiApp: App {
                     if newPhase == .active {
                         appState.refreshAll()
                         appState.scheduleAutoSyncIfNeeded()
+                        LiveLocationLexiconService.shared.autoRefreshIfStale()
                         let relayCfg = ClipboardRelayConfig.load()
                         if relayCfg.autoRelayEnabled, !relayCfg.pairCode.isEmpty {
                             Task {

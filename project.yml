@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "5.0.0"
+    MARKETING_VERSION: "5.1.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
@@ -47,6 +47,7 @@ targets:
         NSFaceIDUsageDescription: 用于通过 Apple 面容 ID 安全登录灵犀账号及解锁本地敏感信息保险箱
         NSSpeechRecognitionUsageDescription: 用于语音输入并通过灵犀 AI 智能去除口水词与润色
         NSMicrophoneUsageDescription: 用于语音输入转写
+        NSLocationWhenInUseUsageDescription: 用于实时感知您当前所在城市、区县与周边地标（路名、商圈、车站、小区），自动提升本地地名打字命中率并辅助 AI 语境理解，位置数据 100% 留存本机绝不上云
         CFBundleURLTypes:
           - CFBundleURLName: com.lingxi.ime.auth
             CFBundleURLSchemes:

@@ -955,5 +955,70 @@ extension AIAutoInsightService {
             advice: advice
         )
     }
+
+    /// 一次生成 3 种不同风格的直接可发送气泡（🎲 3 选 1 极速体验，零二次等待）。
+    static func runThreeVariants(
+        sourceText: String,
+        actionTitle: String,
+        baseInstruction: String,
+        config: AIConfig = AIConfig.load(),
+        client: AIClient = AIClient(timeout: 38),
+        preferDeep: Bool = false
+    ) async throws -> NegotiationStrategistResult {
+        let sys = """
+        你是灵犀输入法多风格写作专家。请严格执行用户任务「\(actionTitle)」（要求：\(baseInstruction)），一次性输出一个合法 JSON 对象，给出 3 种截然不同但都可直接发送的方案：
+        {
+          "subtext": "一句话概括本轮改写要点（10-24字）",
+          "options": [
+            {"tag": "⚡ 简短自然", "toneLabel": "精炼直给像微信秒回", "reply": "直接可发送的正文"},
+            {"tag": "🌿 温暖高情商", "toneLabel": "得体有温度好接受", "reply": "直接可发送的正文"},
+            {"tag": "🎯 专业干练", "toneLabel": "条理清晰有分量", "reply": "直接可发送的正文"}
+          ]
+        }
+        严格要求：只输出合法 JSON，严禁多余说明；每条 reply 禁止官腔套话。
+        """
+        var collected = ""
+        for try await chunk in client.streamText(
+            prompt: sourceText,
+            systemInstruction: sys,
+            config: config,
+            featureTag: "ai_three_variants",
+            preferDeep: preferDeep
+        ) {
+            collected += chunk
+        }
+        return parseStrategistResult(collected, fallbackMessage: sourceText)
+    }
+}
+
+// MARK: - 键盘随打随唤内联 AI 指令识别器（@ai / /ai / // 零切面板直接执行）
+
+struct InlineAICommandMatch: Equatable {
+    let command: String
+    let fullMatchCount: Int
+    let triggerPrefix: String
+}
+
+enum InlineAICommandDetector {
+    /// 检测光标前文本末尾是否以 `@ai ...`、`/ai ...`、`@灵犀 ...` 或 `// ...` 结尾。
+    static func detect(in beforeCursor: String) -> InlineAICommandMatch? {
+        let tail = String(beforeCursor.suffix(180))
+        // 只检查最后一个换行符之后的内容，避免误抓前一段旧文本
+        let currentLine = tail.components(separatedBy: .newlines).last ?? tail
+        let prefixes = ["@ai ", "@AI ", "/ai ", "/AI ", "@灵犀 ", "@灵犀", "// "]
+        for prefix in prefixes {
+            if let range = currentLine.range(of: prefix, options: .backwards) {
+                let rawCmd = String(currentLine[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard rawCmd.count >= 2 else { continue }
+                let fullSub = String(currentLine[range.lowerBound...])
+                return InlineAICommandMatch(
+                    command: rawCmd,
+                    fullMatchCount: fullSub.count,
+                    triggerPrefix: prefix.trimmingCharacters(in: .whitespaces)
+                )
+            }
+        }
+        return nil
+    }
 }
 

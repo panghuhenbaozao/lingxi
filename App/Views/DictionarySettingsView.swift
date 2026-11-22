@@ -81,6 +81,19 @@ struct DictionarySettingsView: View {
                 }
 
                 Section("词库、数据与可持续生态") {
+                    settingsLink(
+                        icon: "location.fill",
+                        tint: Design.Palette.accent,
+                        title: "实时地理位置与周边地标词库",
+                        subtitle: {
+                            let geo = GeoLocationContext.load()
+                            return geo.isPopulated
+                                ? "\(geo.compactLocationLabel) · 已学 \(geo.pois.count) 个周边地标"
+                                : "全国 6,403 地名已内置 · 点击开启 GPS 周边地标学习"
+                        }()
+                    ) {
+                        LocationLexiconView()
+                    }
                     settingsLink(icon: "book.closed", tint: Design.Palette.ink, title: "词库管理与社区词包",
                                  subtitle: "自定义短语 \(appState.customWords.count) · 个人词库 \(appState.userWords.count)") {
                         LexiconSettingsView()

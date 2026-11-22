@@ -313,6 +313,8 @@ struct LingxiSettings: Codable, Equatable {
     var candidateFontSize: Double = 16.5
     var selectionMagicEnabled: Bool = true
     var autoFuzzyPromptEnabled: Bool = true
+    var geoLocationBoostEnabled: Bool = true
+    var aiGeoContextEnabled: Bool = true
     var customSwipeUpMap: [String: String] = [:]
     var customSwipeDownMap: [String: String] = [:]
 
@@ -349,7 +351,7 @@ struct LingxiSettings: Codable, Equatable {
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
-        case selectionMagicEnabled, autoFuzzyPromptEnabled, customSwipeUpMap, customSwipeDownMap
+        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, customSwipeUpMap, customSwipeDownMap
     }
 
     init() {}
@@ -415,6 +417,8 @@ struct LingxiSettings: Codable, Equatable {
         candidateFontSize = min(22, max(14, rawFont))
         selectionMagicEnabled = try c.decodeIfPresent(Bool.self, forKey: .selectionMagicEnabled) ?? d.selectionMagicEnabled
         autoFuzzyPromptEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoFuzzyPromptEnabled) ?? d.autoFuzzyPromptEnabled
+        geoLocationBoostEnabled = try c.decodeIfPresent(Bool.self, forKey: .geoLocationBoostEnabled) ?? d.geoLocationBoostEnabled
+        aiGeoContextEnabled = try c.decodeIfPresent(Bool.self, forKey: .aiGeoContextEnabled) ?? d.aiGeoContextEnabled
         customSwipeUpMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeUpMap) ?? d.customSwipeUpMap
         customSwipeDownMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeDownMap) ?? d.customSwipeDownMap
     }

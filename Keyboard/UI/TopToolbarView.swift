@@ -36,6 +36,7 @@ final class TopToolbarView: UIView {
         case askAIForClipboard(String)
         case clipboardIntentAI(ClipboardIntentAction, String)
         case selectionQuickAI(title: String, instruction: String)
+        case executeInlineAICommand(command: String, replaceCount: Int)
         case tapComposingSyllable(Int)
         case askAIForWord(String)
         case saveWordAsPhrase(String)
@@ -78,6 +79,11 @@ final class TopToolbarView: UIView {
     private let selectionMagicScroll = ToolbarHorizontalScrollView()
     private let selectionMagicStack = UIStackView()
     private var isSelectionMagicActive = false
+
+    // 随打随唤内联 AI 指令条（检测到输入框以 @ai / /ai / // 结尾时零切换一键执行）
+    private let inlineAICommandBar = UIView()
+    private let inlineAICommandBtn = ActionClosureButton(type: .system)
+    private var activeInlineCommand: InlineAICommandMatch?
 
     // 剪贴板 / 短信验证码全栏独占接管胶囊（Full-Bar Takeover）
     private let bannerContainer = UIView()
@@ -255,6 +261,20 @@ final class TopToolbarView: UIView {
         selectionMagicStack.spacing = 6
         selectionMagicScroll.addSubview(selectionMagicStack)
         setupSelectionMagicPills()
+
+        // 随打随唤内联 @ai 指令执行条
+        inlineAICommandBar.isHidden = true
+        idleContainer.addSubview(inlineAICommandBar)
+        inlineAICommandBtn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .bold)
+        inlineAICommandBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+        inlineAICommandBtn.layer.cornerRadius = 15
+        inlineAICommandBtn.layer.cornerCurve = .continuous
+        inlineAICommandBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 12, bottom: 5, right: 12)
+        inlineAICommandBtn.actionHandler = { [weak self] in
+            guard let self, let match = self.activeInlineCommand else { return }
+            self.onAction?(.executeInlineAICommand(command: match.command, replaceCount: match.fullMatchCount))
+        }
+        inlineAICommandBar.addSubview(inlineAICommandBtn)
 
         // 全栏接管胶囊容器（复制内容 / 短信验证码到来时整栏替换显示）
         bannerContainer.isHidden = true
@@ -497,6 +517,11 @@ final class TopToolbarView: UIView {
             selectionMagicScroll.contentSize = CGSize(width: sw + 16, height: bounds.height)
         }
 
+        if !inlineAICommandBar.isHidden {
+            inlineAICommandBar.frame = bounds
+            inlineAICommandBtn.frame = CGRect(x: 12, y: pillY, width: max(80, bounds.width - 24), height: pillH)
+        }
+
         // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
         let bannerH: CGFloat = min(36, bounds.height - 10)
         bannerContainer.frame = CGRect(
@@ -567,6 +592,8 @@ final class TopToolbarView: UIView {
 
         aiPromptBar.backgroundColor = theme.accentFill.withAlphaComponent(0.10)
         aiPromptLabel.textColor = theme.keyText
+        inlineAICommandBtn.backgroundColor = theme.accentFill
+        inlineAICommandBtn.setTitleColor(theme.accentText, for: .normal)
         aiPromptSendBtn.backgroundColor = theme.accentFill
         aiPromptSendBtn.setTitleColor(theme.accentText, for: .normal)
         aiPromptCancelBtn.backgroundColor = theme.specialKeyFill
@@ -629,6 +656,7 @@ final class TopToolbarView: UIView {
         aiPromptDraft: String?,
         translateState: TranslateBarState? = nil,
         selectedHostText: String? = nil,
+        inlineAICommand: InlineAICommandMatch? = nil,
         hasFullAccess: Bool,
         toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
         showComposingStrip: Bool = true
@@ -643,6 +671,7 @@ final class TopToolbarView: UIView {
         self.isAIPromptMode = (aiPromptDraft != nil)
         self.isTranslateBarActive = (translateState != nil)
         self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
+        self.activeInlineCommand = (!hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && hasFullAccess) ? inlineAICommand : nil
 
         layoutButton.setTitle(layoutMode == .qwerty26 ? "九键" : "26键", for: .normal)
 
@@ -705,12 +734,17 @@ final class TopToolbarView: UIView {
         idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
-        // 当剪贴板新内容或短信验证码胶囊激活，或者宿主输入框存在选中文字触发「框选即改」时，切换顶栏展示
+        // 当剪贴板新内容或短信验证码胶囊激活，或者宿主输入框存在选中文字触发「框选即改」/ `@ai` 指令时，切换顶栏展示
         let isBannerTakeoverActive = (currentBannerState != .hidden)
+        let isInlineAIActive = (activeInlineCommand != nil)
+        if let cmd = activeInlineCommand {
+            inlineAICommandBtn.setTitle("✨ 点此执行 AI：\(cmd.command)", for: .normal)
+        }
+        inlineAICommandBar.isHidden = !isInlineAIActive
         selectionMagicScroll.isHidden = !isSelectionMagicActive
-        leftClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive
-        rightClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive
-        idleScrollView.isHidden = isBannerTakeoverActive || isSelectionMagicActive
+        leftClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
+        rightClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
+        idleScrollView.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
 
         if let theme {
             stylePrimaryButtons(theme: theme, aiActive: aiPanelActive, translateActive: isTranslateBarActive)

@@ -299,11 +299,43 @@ enum AIUsageLedgerStore {
     }
 }
 
+/// 最近在键盘内由 AI 生成的精彩文案缓存（仅存本机，支持误关面板一键找回与收藏）。
+struct AIRecentResultItem: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String
+    var output: String
+    var createdAt: Date = Date()
+}
+
+enum AIRecentHistoryStore {
+    private static let fileName = "lingxi_ai_recent_history.json"
+
+    static func load() -> [AIRecentResultItem] {
+        AppGroup.readJSON([AIRecentResultItem].self, from: fileName) ?? []
+    }
+
+    static func record(title: String, output: String) {
+        let clean = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.count >= 2 else { return }
+        var list = load()
+        list.removeAll { $0.output == clean }
+        list.insert(AIRecentResultItem(title: title, output: clean), at: 0)
+        if list.count > 12 { list = Array(list.prefix(12)) }
+        _ = AppGroup.writeJSON(list, to: fileName, protected: true)
+    }
+
+    static func clear() {
+        _ = AppGroup.writeJSON([AIRecentResultItem](), to: fileName, protected: true)
+    }
+}
+
 /// 键盘内嵌 AI 快捷指令。
 enum AIPresetAction: String, CaseIterable, Identifiable {
     case polish
+    case smartContinue
     case eqReply
     case strategist
+    case proofread
     case organizeVoice
     case translateEn
     case translateZh
@@ -319,8 +351,10 @@ enum AIPresetAction: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .polish: return "润色优化"
+        case .smartContinue: return "顺着续写"
         case .eqReply: return "高情商回复"
         case .strategist: return "博弈军师"
+        case .proofread: return "纠错查病句"
         case .organizeVoice: return "智能整理"
         case .translateEn: return "译为英文"
         case .translateZh: return "译为中文"
@@ -336,8 +370,10 @@ enum AIPresetAction: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .polish: return "wand.and.stars"
+        case .smartContinue: return "text.append"
         case .eqReply: return "sparkles"
         case .strategist: return "brain.head.profile"
+        case .proofread: return "checkmark.bubble"
         case .organizeVoice: return "text.alignleft"
         case .translateEn: return "globe"
         case .translateZh: return "character.book.closed"
@@ -358,11 +394,20 @@ enum AIPresetAction: String, CaseIterable, Identifiable {
         self == .strategist || self == .structureList || self == .classical
     }
 
+    /// 续写模式下默认以追加方式插入，而非替换原文
+    var prefersAppendInsert: Bool {
+        self == .smartContinue
+    }
+
     var systemPrompt: String {
         let commonRule = "只直接输出最终可直接发送的文本，不要解释过程，不要加多余引号或Markdown标题。"
         switch self {
         case .polish:
             return "你是专业中文文字润色助手。保持原意与语气，修正语病与生硬表达，使语句自然流畅得体。\(commonRule)"
+        case .smartContinue:
+            return "你是中文无缝续写助手。紧接着用户已经打出的半句话，自然流畅地顺着原语气与上下文续写完剩下的 1-2 句。不要重复用户已写的开头，只输出紧接在后面的续写内容。\(commonRule)"
+        case .proofread:
+            return "你是极简中文校对编辑。仅修正文本中的错别字、漏字、病句和错误标点，尽可能完整保留用户原本的用词与口吻，不要过度改写。\(commonRule)"
         case .eqReply:
             return "你是高情商沟通专家。把用户的输入或对方消息改写/回复得体、有分寸、温暖且不卑不亢。\(commonRule)"
         case .strategist:
@@ -480,6 +525,52 @@ struct CustomAIPromptTemplate: Codable, Identifiable, Equatable {
             useDeepModel: true
         ),
     ]
+}
+
+/// 主 App 内置「AI 场景指令市场」精选 20 条开箱即用高质量键盘技能模板（支持一键装入键盘 AI 栏）。
+enum AIPromptMarketplaceCatalog {
+    static let allTemplates: [CustomAIPromptTemplate] = [
+        // 💬 微信高情商
+        CustomAIPromptTemplate(id: "mkt_nudge_progress", title: "礼貌催进度", icon: "clock.badge.checkmark", instruction: "帮我把这段催促改写得既不显得咄咄逼人、又能清晰锁定对方答复时间节点的礼貌微信消息。", category: "微信高情商"),
+        CustomAIPromptTemplate(id: "mkt_decline_borrow", title: "委婉拒借钱", icon: "hand.raised.fill", instruction: "用真诚、有边界感又不伤感情的口吻委婉拒绝对方借钱或额外帮忙请求，给出体面理由。", category: "微信高情商"),
+        CustomAIPromptTemplate(id: "mkt_warm_comfort", title: "暖心安慰", icon: "heart.fill", instruction: "针对对方遇到烦心事或疲惫倾诉，写一句真诚共情、不讲大道理、让人瞬间松一口气的温暖回复。", category: "微信高情商"),
+        CustomAIPromptTemplate(id: "mkt_flirt_banter", title: "拉近距离", icon: "sparkles", instruction: "把回复改得轻松自然、略带一点机智和好感，不油腻不刻意，像聊得很投机的朋友。", category: "微信高情商"),
+
+        // 💼 职场办公
+        CustomAIPromptTemplate(id: "mkt_weekly_report", title: "一键周报", icon: "doc.text.fill", instruction: "将零散工作记录整理为「本周核心进展 / 风险与阻塞 / 下周计划」三段简洁周报，突出量化结果。", category: "职场办公", useDeepModel: true),
+        CustomAIPromptTemplate(id: "mkt_meeting_minutes", title: "会议纪要", icon: "list.bullet.clipboard", instruction: "把杂乱会议记录提炼为：核心结论、待办事项（负责人+截止时间）、待确认问题，格式清爽。", category: "职场办公", useDeepModel: true),
+        CustomAIPromptTemplate(id: "mkt_client_followup", title: "客户报价跟进", icon: "briefcase.fill", instruction: "写一条专业得体、不卑不亢的客户报价/合作跟进消息，自然提醒下一步推进节点。", category: "职场办公"),
+        CustomAIPromptTemplate(id: "mkt_blame_shield", title: "专业甩锅防护", icon: "shield.lefthalf.filled", instruction: "在群聊中冷静、客观、基于事实澄清责任边界与时间线，既不情绪化又能保护自己团队利益。", category: "职场办公", useDeepModel: true),
+
+        // 🔥 社交种草
+        CustomAIPromptTemplate(id: "mkt_moments_caption", title: "高级朋友圈", icon: "camera.filters", instruction: "把这段随想改写成松弛、有画面感、不矫情的朋友圈配文，1-3句恰到好处，严禁鸡汤。", category: "社交种草"),
+        CustomAIPromptTemplate(id: "mkt_food_review", title: "探店美食评", icon: "fork.knife", instruction: "结合当前所在城市风味，把这几句评价扩写为真实走心、有细节感的探店点评（适合大众点评/小红书）。", category: "社交种草"),
+        CustomAIPromptTemplate(id: "mkt_short_video_hook", title: "爆款开头钩子", icon: "flame.fill", instruction: "把这段主题改写成 3 秒抓眼球的短视频开场白与核心口播金句，短句有力。", category: "社交种草"),
+
+        // 📍 本地出行与生活
+        CustomAIPromptTemplate(id: "mkt_local_invite", title: "本地约饭局", icon: "mappin.and.ellipse", instruction: "结合当前所在地区与时间，把这段话润色成轻松热情、时间地点清晰的约饭/碰面邀请。", category: "本地生活"),
+        CustomAIPromptTemplate(id: "mkt_route_guide", title: "清晰指路", icon: "map.fill", instruction: "把零散的地址和路线提示整理为一眼看懂的到达指引（含地标、入口与停车/打车提示）。", category: "本地生活"),
+        CustomAIPromptTemplate(id: "mkt_buyer_bargain", title: "闲鱼神砍价", icon: "tag.fill", instruction: "写一句有礼貌、有诚意、让卖家容易松口的闲鱼/二手交易咨询与议价消息。", category: "本地生活"),
+
+        // 🌍 跨境与多语
+        CustomAIPromptTemplate(id: "mkt_en_email", title: "地道英文邮件", icon: "envelope.fill", instruction: "将这段中文改写为地道、专业、简洁的商务英文邮件正文（Native English tone，无中式英语）。", category: "跨境多语"),
+        CustomAIPromptTemplate(id: "mkt_jp_polite", title: "日语敬语回复", icon: "globe.asia.australia", instruction: "将内容译为自然得体的日语礼貌体（です・ます/敬语），适合商务或日常礼貌交流。", category: "跨境多语"),
+        CustomAIPromptTemplate(id: "mkt_en_grammar_fix", title: "英文语法精修", icon: "textformat.abc", instruction: "Fix grammar, word choice, and natural flow of this English text while keeping the original intent. Output only the improved English.", category: "跨境多语"),
+
+        // 💻 极客与效率
+        CustomAIPromptTemplate(id: "mkt_bug_report", title: "规范提 Bug", icon: "ladybug.fill", instruction: "将这段问题描述整理为标准研发 Bug 单格式：现象、复现步骤、预期结果与影响范围。", category: "极客效率"),
+        CustomAIPromptTemplate(id: "mkt_pr_review", title: "温和代码评审", icon: "chevron.left.forwardslash.chevron.right", instruction: "把这段技术挑刺改写为建设性、尊重同事且直指根因的 Code Review 评审意见。", category: "极客效率"),
+        CustomAIPromptTemplate(id: "mkt_prompt_upgrade", title: "口语转专业Prompt", icon: "cpu.fill", instruction: "把用户的简短大白话需求改写为结构清晰、角色明确、约束完整的高质量 AI 提示词。", category: "极客效率", useDeepModel: true),
+    ]
+
+    static var categories: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for t in allTemplates where seen.insert(t.category).inserted {
+            out.append(t.category)
+        }
+        return out
+    }
 }
 
 /// 仅含提示词、人设与知识卡的无密钥同步载荷（绝不把明文 API Key 放入云端同步快照）。

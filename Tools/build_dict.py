@@ -85,17 +85,19 @@ def load_rime_chinese() -> dict[tuple[str, str], float]:
         key = (word, sy[0])
         entries[key] = max(entries[key], float(max(wt, 1)))
 
-    # 2. 雾凇现代基础词库（按词频截取高频核心词，控制包体积与查询速度）
+    # 2. 雾凇现代基础词库（按词频截取高频核心词；地理行政与交通地标后缀词豁免门槛，防止中小城市/区县缺失）
+    geo_suffixes = ("省", "市", "区", "县", "镇", "乡", "州", "盟", "旗", "站", "港", "湾", "湖", "山", "岛", "大学", "机场", "广场")
     for word, py_raw, wt in iter_rime_yaml(RIME_ICE / "base.dict.yaml"):
         sy = [s for s in py_raw.split(" ") if s]
         if not (2 <= len(sy) <= MAX_PHRASE_LEN):
             continue
-        if wt < BASE_MIN_WEIGHT:
+        is_geo_like = word.endswith(geo_suffixes)
+        if wt < BASE_MIN_WEIGHT and not is_geo_like:
             continue
         if any(not s.isalpha() for s in sy):
             continue
         key = (word, "'".join(sy))
-        entries[key] = max(entries[key], float(wt))
+        entries[key] = max(entries[key], float(max(wt, 220 if is_geo_like else wt)))
 
     # 3. 扩展词库中完整收录全部 3 字现代词汇（避免字母序截断导致 P-Z 现代词缺失，如「前后端」）
     for word, py_raw, wt in iter_rime_yaml(RIME_ICE / "ext.dict.yaml"):
@@ -219,6 +221,24 @@ def apply_wowtype_curations(merged: dict[tuple[str, str], float]) -> None:
             if not word or not py_parts or len(py_parts) > MAX_PHRASE_LEN or any(not s.isalpha() for s in py_parts):
                 continue
             wt = float(int(parts[2].strip())) if len(parts) >= 3 and parts[2].strip().isdigit() else default_wt
+            key = (word, "'".join(py_parts))
+            merged[key] = max(merged.get(key, 0.0), wt)
+
+    # 4. 全国完整省/市/区/县 + 口语简称 + 交通/商圈/高校地标权威词表 (china_geo.tsv)
+    china_geo_path = DATA / "china_geo.tsv"
+    if china_geo_path.exists():
+        for line in china_geo_path.open(encoding="utf-8"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            word = parts[0].strip()
+            py_parts = [s.strip().lower().replace("ü", "v") for s in parts[1].strip().split("'") if s.strip()]
+            if not word or not py_parts or len(py_parts) > MAX_PHRASE_LEN or any(not s.isalpha() for s in py_parts):
+                continue
+            wt = float(int(parts[2].strip())) if len(parts) >= 3 and parts[2].strip().isdigit() else 120000.0
             key = (word, "'".join(py_parts))
             merged[key] = max(merged.get(key, 0.0), wt)
 

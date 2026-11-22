@@ -346,6 +346,42 @@ final class PinyinEngine {
             out.insert(enCand, at: min(5, out.count))
         }
 
+        // 5. 实时地理位置与周边 POI 动态提权（当前所在城市/区县/街道/商圈/车站一键命中）
+        if settings.geoLocationBoostEnabled && effectiveScheme == .quanpin && !lower.hasPrefix("v") {
+            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: lower, isT9: false, limit: 4)
+            if !geoHits.isEmpty {
+                let cleanLower = lower.replacingOccurrences(of: "'", with: "")
+                var promotedTop: [PinyinCandidate] = []
+                var promotedSecondary: [PinyinCandidate] = []
+                for entry in geoHits {
+                    let flatPy = entry.pinyin.replacingOccurrences(of: "'", with: "")
+                    let isFullExact = (flatPy == cleanLower)
+                    let cand = PinyinCandidate(
+                        word: entry.word,
+                        py: entry.pinyin,
+                        lp: entry.boostScore,
+                        consumed: trimmed.count,
+                        isExact: isFullExact,
+                        source: .userLexicon
+                    )
+                    if isFullExact || (entry.abbr == cleanLower && cleanLower.count >= 3) {
+                        promotedTop.append(cand)
+                    } else {
+                        promotedSecondary.append(cand)
+                    }
+                }
+                let injectedSet = Set((promotedTop + promotedSecondary).map(\.word))
+                out = out.filter { !injectedSet.contains($0.word) }
+                if !promotedTop.isEmpty {
+                    out = promotedTop + out
+                }
+                if !promotedSecondary.isEmpty {
+                    let insertIdx = min(promotedTop.count + 1, out.count)
+                    out.insert(contentsOf: promotedSecondary, at: insertIdx)
+                }
+            }
+        }
+
         return (bestSeg, Array(out.prefix(limit)), correctedHint)
     }
 
@@ -794,7 +830,7 @@ final class PinyinEngine {
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
         let segs = segmenter.t9Segmentations(digits: digits, lockedPrefixes: lockedSyllables)
-        let (bestSeg, out) = evaluateSegmentations(
+        let (bestSeg, rawOut) = evaluateSegmentations(
             segs,
             isT9: true,
             settings: settings,
@@ -802,8 +838,26 @@ final class PinyinEngine {
             rawContext: contextBeforeCursor,
             limit: limit
         )
+        var out = rawOut
+        if settings.geoLocationBoostEnabled && digits.count >= 3 {
+            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: digits, isT9: true, limit: 3)
+            if !geoHits.isEmpty {
+                let geoCands = geoHits.map { entry in
+                    PinyinCandidate(
+                        word: entry.word,
+                        py: entry.pinyin,
+                        lp: entry.boostScore,
+                        consumed: digits.count,
+                        isExact: true,
+                        source: .userLexicon
+                    )
+                }
+                let set = Set(geoCands.map(\.word))
+                out = geoCands + out.filter { !set.contains($0.word) }
+            }
+        }
         let leftSyls = segmenter.candidateSyllablesForT9Prefix(digits, lockedCount: lockedSyllables.count, tokens: bestSeg)
-        return (bestSeg, out, leftSyls)
+        return (bestSeg, Array(out.prefix(limit)), leftSyls)
     }
 
     // MARK: - 英文词表精确与前缀联想 (melt_eng)

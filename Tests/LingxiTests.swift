@@ -1496,4 +1496,117 @@ final class LingxiTests: XCTestCase {
         // 清理测试会话避免污染后续测试
         CloudCredentialStore.clearAll()
     }
+
+    func testV51GeoLocationLexiconAndAICoPilotUpgrades() throws {
+        // 1. 地名多音字清洗与拼音转换器
+        XCTAssertEqual(GeoPinyinConverter.cleanPOIName("临沂万象汇(兰山店)"), "临沂万象汇")
+        let mallEntry = try XCTUnwrap(GeoPinyinConverter.makeEntry(word: "临沂万象汇(兰山店)", category: "商圈", boostScore: 12.0))
+        XCTAssertEqual(mallEntry.pinyin, "lin'yi'wan'xiang'hui")
+        XCTAssertEqual(mallEntry.abbr, "lywxh")
+        let cqEntry = try XCTUnwrap(GeoPinyinConverter.makeEntry(word: "重庆北站", category: "交通", boostScore: 12.0))
+        XCTAssertEqual(cqEntry.pinyin, "chong'qing'bei'zhan")
+
+        // 2. 实时 GPS / 周边 POI 上下文、vwz/vdz 快捷地址、动态模板与 AI 地域上下文
+        let prevGeo = GeoLocationContext.load(force: true)
+        defer {
+            if prevGeo.isPopulated {
+                prevGeo.save()
+            } else {
+                GeoLocationContext.clear()
+            }
+        }
+        var geo = GeoLocationContext()
+        geo.province = "山东省"
+        geo.city = "临沂市"
+        geo.district = "兰山区"
+        geo.street = "北京路"
+        geo.formattedAddress = "山东省临沂市兰山区北京路"
+        geo.updatedAt = Date()
+        geo.pois = [
+            GeoPinyinConverter.makeEntry(word: "临沂", category: "城市", boostScore: 15.0),
+            GeoPinyinConverter.makeEntry(word: "兰山", category: "区县", boostScore: 13.8),
+            GeoPinyinConverter.makeEntry(word: "泰盛广场", category: "商圈", boostScore: 11.5),
+            GeoPinyinConverter.makeEntry(word: "临沂北站", category: "交通", boostScore: 11.8),
+        ].compactMap { $0 }
+        geo.save()
+
+        let settings = LingxiSettings()
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vwz"))
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vdz"))
+        let vwzHits = SmartCandidateHelper.extraCandidates(forRawInput: "vwz", settings: settings, consumedLength: 3)
+        XCTAssertTrue(vwzHits.contains(where: { $0.word == "山东省临沂市兰山区北京路" }))
+        XCTAssertTrue(vwzHits.contains(where: { $0.word == "临沂市" }))
+
+        let renderedGeoTpl = DynamicTemplateEngine.render("我现在在{{当前城市}}{{当前区县}}：{{当前位置}}")
+        XCTAssertEqual(renderedGeoTpl, "我现在在临沂兰山区：山东省临沂市兰山区北京路")
+
+        let aiGeoPrompt = geo.aiTimeLocationPromptSuffix()
+        XCTAssertTrue(aiGeoPrompt.contains("山东省临沂市兰山区"))
+        XCTAssertTrue(aiGeoPrompt.contains("泰盛广场"))
+
+        // 3. 全国 6,403 地名内置词库 + 实时周边地标动态提权
+        if let dbURL = findTestDBURL() {
+            let engine = PinyinEngine(databaseURL: dbURL)
+            var testSettings = LingxiSettings()
+            testSettings.userLearningEnabled = false
+            testSettings.geoLocationBoostEnabled = false
+
+            // 即使关闭 GPS 实时提权，全国重点省市区县也必须直接首选出词
+            let builtinChecks: [(String, String)] = [
+                ("linyi", "临沂"),
+                ("heze", "菏泽"),
+                ("lanshanqu", "兰山区"),
+                ("feixian", "费县"),
+                ("linshu", "临沭"),
+                ("chongqing", "重庆"),
+                ("bengbu", "蚌埠"),
+                ("luan", "六安"),
+            ]
+            for (py, expected) in builtinChecks {
+                let res = engine.query(raw: py, settings: testSettings)
+                XCTAssertEqual(res.candidates.first?.word, expected, "内置地名库 \(py) 应首选 \(expected)")
+            }
+
+            // 开启实时 GPS 位置提权后，当前城市周边特有商圈/缩写应立刻跃升首位
+            testSettings.geoLocationBoostEnabled = true
+            let localMall = engine.query(raw: "taishengguangchang", settings: testSettings)
+            XCTAssertEqual(localMall.candidates.first?.word, "泰盛广场")
+            let localMallAbbr = engine.query(raw: "tsgc", settings: testSettings)
+            XCTAssertEqual(localMallAbbr.candidates.first?.word, "泰盛广场")
+            let localDistrict = engine.query(raw: "lanshan", settings: testSettings)
+            XCTAssertEqual(localDistrict.candidates.first?.word, "兰山")
+        }
+
+        // 4. @ai / /ai / // 随打随唤内联指令检测器
+        let inlineInput = "@ai 帮我委婉拒绝周末加班"
+        let inlineMatch = try XCTUnwrap(InlineAICommandDetector.detect(in: inlineInput))
+        XCTAssertEqual(inlineMatch.command, "帮我委婉拒绝周末加班")
+        XCTAssertEqual(inlineMatch.fullMatchCount, inlineInput.count)
+
+        let slashMatch = try XCTUnwrap(InlineAICommandDetector.detect(in: "前一段话\n// 写一条临沂美食朋友圈"))
+        XCTAssertEqual(slashMatch.command, "写一条临沂美食朋友圈")
+        XCTAssertNil(InlineAICommandDetector.detect(in: "普通日常聊天内容不包含命令"))
+
+        // 5. AI 最近生成历史缓存 + 20 条场景指令市场 + 顺着续写/纠错技能
+        let prevHistory = AIRecentHistoryStore.load()
+        defer {
+            AIRecentHistoryStore.clear()
+            for item in prevHistory.reversed() {
+                AIRecentHistoryStore.record(title: item.title, output: item.output)
+            }
+        }
+        AIRecentHistoryStore.clear()
+        AIRecentHistoryStore.record(title: "润色", output: "第一条测试输出")
+        AIRecentHistoryStore.record(title: "续写", output: "第二条测试输出")
+        AIRecentHistoryStore.record(title: "润色重用", output: "第一条测试输出")
+        let loadedHistory = AIRecentHistoryStore.load()
+        XCTAssertEqual(loadedHistory.count, 2)
+        XCTAssertEqual(loadedHistory.first?.output, "第一条测试输出")
+
+        XCTAssertGreaterThanOrEqual(AIPromptMarketplaceCatalog.allTemplates.count, 20)
+        XCTAssertGreaterThanOrEqual(AIPromptMarketplaceCatalog.categories.count, 5)
+        XCTAssertTrue(AIPresetAction.smartContinue.prefersAppendInsert)
+        XCTAssertFalse(AIPresetAction.polish.prefersAppendInsert)
+        XCTAssertTrue(AIPresetAction.allCases.contains(.proofread))
+    }
 }

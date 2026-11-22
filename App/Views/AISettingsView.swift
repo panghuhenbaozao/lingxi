@@ -20,6 +20,8 @@ struct AISettingsView: View {
 
     @State private var editingPrompt: CustomAIPromptTemplate?
     @State private var showNewPromptSheet = false
+    @State private var showPromptMarketplace = false
+    @State private var recentAIHistory: [AIRecentResultItem] = []
     @State private var editingContextCard: PersonalContextCard?
     @State private var showNewContextCardSheet = false
     @State private var newBannedCliche = ""
@@ -49,8 +51,12 @@ struct AISettingsView: View {
                 styleDNAAndContextCardsSection
                 autoInsightSection
                 customPromptsStudioSection
+                recentAIHistorySection
                 usageLedgerSection
                 builtInSkillsSection
+            }
+            .onAppear {
+                recentAIHistory = AIRecentHistoryStore.load()
             }
             .navigationTitle("AI 灵犀智脑")
             .toolbar {
@@ -100,6 +106,19 @@ struct AISettingsView: View {
                     appState.addOrUpdateCustomPrompt(created)
                     showFeedback("已新建「\(created.title)」并同步至键盘 AI 栏")
                 }
+            }
+            .sheet(isPresented: $showPromptMarketplace) {
+                AIPromptMarketplaceSheet(
+                    existingTitles: Set(appState.aiConfig.customPrompts.map(\.title)),
+                    onInstall: { templates in
+                        let added = appState.importSuggestedPrompts(templates)
+                        if added > 0 {
+                            showFeedback("已从指令市场装入 \(added) 条技能到键盘 AI 栏")
+                        } else {
+                            showFeedback("所选技能均已在你的键盘 AI 栏中")
+                        }
+                    }
+                )
             }
             .sheet(item: $editingPrompt) { item in
                 CustomPromptEditorSheet(initial: item) { updated in
@@ -484,11 +503,25 @@ struct AISettingsView: View {
             }
 
             Toggle("键盘内自动识别语境并置顶推荐提示词", isOn: $appState.aiConfig.smartContextRecommendEnabled)
+            Toggle("AI 写作自动融合当前所在城市与时段", isOn: $appState.settings.aiGeoContextEnabled)
+            NavigationLink {
+                LocationLexiconView()
+            } label: {
+                let ctx = GeoLocationContext.load()
+                HStack {
+                    Label("实时地理位置与周边地标感知", systemImage: "location.circle.fill")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(ctx.isPopulated ? "\(ctx.shortCityName) · \(ctx.pois.count)地标" : "去开启")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Toggle("测试连通成功后自动分析并生成提示词", isOn: $appState.aiConfig.autoAnalyzeOnConnect)
         } header: {
             Text("🧠 思考模式与推理参数（Gemini / DeepSeek-R1 / Qwen3 / OpenAI 全适配）")
         } footer: {
-            Text("系统自动分离 <think> 思考链与正文输出：点击上屏时绝不会把思考过程误插入聊天框。")
+            Text("系统自动分离 <think> 思考链与正文输出：点击上屏时绝不会把思考过程误插入聊天框。位置感知仅在本地注入城市/时段，不上传精确坐标。")
         }
     }
 
@@ -997,6 +1030,33 @@ struct AISettingsView: View {
             }
 
             Button {
+                showPromptMarketplace = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.white)
+                        .frame(width: 28, height: 28)
+                        .background(Color(Design.Palette.accent))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("✨ AI 场景指令市场（\(AIPromptMarketplaceCatalog.allTemplates.count) 条精选一键装入）")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(Color(Design.Palette.ink))
+                        Text("微信高情商 · 职场办公 · 社交种草 · 本地生活 · 跨境多语 · 极客效率")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 2)
+            }
+            .buttonStyle(.plain)
+
+            Button {
                 showNewPromptSheet = true
             } label: {
                 Label("新建专属键盘提示词 / 链式流水线", systemImage: "plus.circle.fill")
@@ -1004,6 +1064,77 @@ struct AISettingsView: View {
             }
         } header: {
             Text("✨ 我的键盘自定义提示词库（实时同步至键盘 AI 栏）")
+        }
+    }
+
+    // MARK: - 6.5 最近键盘 AI 生成历史（防误关找回 · 一键收藏短语）
+
+    private var recentAIHistorySection: some View {
+        Section {
+            if recentAIHistory.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("暂无最近生成记录")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("在任意 App 键盘中输入「@ai 你的指令」或使用键盘 AI 面板后，最近 12 条精彩文案会自动留存在本机，防误关丢失。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            } else {
+                ForEach(recentAIHistory.prefix(6)) { item in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(item.title)
+                                .font(.caption.bold())
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color(Design.Palette.accentSoft))
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .clipShape(Capsule())
+                            Spacer()
+                            Text(item.createdAt, style: .time)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(item.output)
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(3)
+                        HStack(spacing: 12) {
+                            Button {
+                                UIPasteboard.general.string = item.output
+                                showFeedback("已复制「\(item.title)」生成内容")
+                            } label: {
+                                Label("复制", systemImage: "doc.on.doc")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                let title = String(item.title.prefix(8))
+                                appState.addQuickPhrase(title: title, content: item.output, category: "AI收藏")
+                                showFeedback("已收藏至快捷短语库「AI收藏」")
+                            } label: {
+                                Label("存为快捷短语", systemImage: "star.fill")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+
+                Button("清空最近 AI 生成历史", role: .destructive) {
+                    AIRecentHistoryStore.clear()
+                    recentAIHistory = []
+                }
+                .font(.caption.bold())
+            }
+        } header: {
+            Text("🕒 最近键盘 AI 生成历史（仅存本机）")
         }
     }
 
@@ -1808,6 +1939,145 @@ private struct CustomPromptEditorSheet: View {
                         title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                         instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - AI 场景指令市场 Sheet（20 条精选模板按场景筛选一键装入键盘）
+
+private struct AIPromptMarketplaceSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let existingTitles: Set<String>
+    let onInstall: ([CustomAIPromptTemplate]) -> Void
+
+    @State private var selectedCategory: String = "全部"
+    @State private var searchText: String = ""
+    @State private var localAddedTitles: Set<String> = []
+
+    private var allCategories: [String] {
+        ["全部"] + AIPromptMarketplaceCatalog.categories
+    }
+
+    private var filteredTemplates: [CustomAIPromptTemplate] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return AIPromptMarketplaceCatalog.allTemplates.filter { tpl in
+            if selectedCategory != "全部" && tpl.category != selectedCategory { return false }
+            if q.isEmpty { return true }
+            return tpl.title.lowercased().contains(q)
+                || tpl.instruction.lowercased().contains(q)
+                || tpl.category.lowercased().contains(q)
+        }
+    }
+
+    private func isInstalled(_ tpl: CustomAIPromptTemplate) -> Bool {
+        existingTitles.contains(tpl.title) || localAddedTitles.contains(tpl.title)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    TextField("搜索场景或技能（如：催进度 / 周报 / 砍价 / 朋友圈）", text: $searchText)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(allCategories, id: \.self) { cat in
+                                let active = selectedCategory == cat
+                                Button {
+                                    selectedCategory = cat
+                                } label: {
+                                    Text(cat)
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
+                                        .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
+                Section {
+                    ForEach(filteredTemplates) { tpl in
+                        let added = isInstalled(tpl)
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: tpl.icon)
+                                .font(.subheadline)
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .frame(width: 28, height: 28)
+                                .background(Color(Design.Palette.accentSoft))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(tpl.title)
+                                        .font(.subheadline.bold())
+                                        .foregroundStyle(.primary)
+                                    Text(tpl.category)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    if tpl.useDeepModel {
+                                        Text("深度")
+                                            .font(.caption2.bold())
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color(Design.Palette.accentSoft))
+                                            .foregroundStyle(Color(Design.Palette.accent))
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                                Text(tpl.instruction)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            Spacer(minLength: 6)
+
+                            Button(added ? "已装入" : "装入") {
+                                onInstall([tpl])
+                                localAddedTitles.insert(tpl.title)
+                            }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(added ? Color(Design.Palette.surface) : Color(Design.Palette.accent))
+                            .foregroundStyle(added ? Color.secondary : Color.white)
+                            .clipShape(Capsule())
+                            .buttonStyle(.plain)
+                            .disabled(added)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    HStack {
+                        Text("\(selectedCategory)（\(filteredTemplates.count) 条）")
+                        Spacer()
+                        let pending = filteredTemplates.filter { !isInstalled($0) }
+                        if !pending.isEmpty {
+                            Button("一键装入本组 (\(pending.count))") {
+                                onInstall(pending)
+                                for item in pending { localAddedTitles.insert(item.title) }
+                            }
+                            .font(.caption.bold())
+                            .foregroundStyle(Color(Design.Palette.accent))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("AI 场景指令市场")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
                 }
             }
         }
