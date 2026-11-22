@@ -10,15 +10,18 @@ import Foundation
 ///   M3 换云实现时引擎零改动；
 /// - 本地账本（上次推/拉过的全部记录）持久化于 App Group，是 merge 的 local 侧真相；
 /// - SnapshotSyncSource 以文件字节为同步单元（settings/theme 整文件一条记录），
-///   SHA256 哈希去重——内容没变不重复推送；
+///   字节级比对去重——内容没变不重复推送；
 /// - 词库/短语条目级同步在 M3 落地时扩展新的 SyncDataSource 实现，引擎不变。
 
 /// 本地同步状态：账本 + 每命名空间拉取游标
+/// （public：出现在 public 协议 SyncDataSource 方法签名与 SyncLedgerStore 公开方法中）
 public struct SyncLedger: Codable, Equatable {
     /// 全部已见记录（命名空间/键 → 完整记录；含墓碑）
-    var records: [String: SyncChange] = [:]
+    public var records: [String: SyncChange] = [:]
     /// 每命名空间的拉取游标（服务端 nextCursor）
-    var cursors: [String: UInt64] = [:]
+    public var cursors: [String: UInt64] = [:]
+
+    public init() {}
 }
 
 /// 账本持久化（文件名注入：生产 lingxi_sync_ledger.json，测试用独立文件避免污染）
@@ -160,7 +163,7 @@ public final class SyncEngine {
     public func syncNow() async throws -> SyncRunReport {
         var ledger = ledgerStore.load()
 
-        // 1. 采集本地变更（哈希去重后逐条 tick）
+        // 1. 采集本地变更（字节级比对去重后逐条 tick）
         let localChanges = source.collectChanges(deviceID: deviceID, clock: clock, ledger: &ledger)
 
         // 2. 推送；服务端 LWW 胜出的冲突记录视为远端最新，并入本轮拉取结果
