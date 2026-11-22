@@ -251,9 +251,13 @@ struct FuzzyPinyinOptions: Codable, Equatable {
     var engOng: Bool = false
 
     var isAnyEnabled: Bool {
-        zhZ || chC || shS || nl || rl || fh || huangWang ||
-        anAng || enEng || inIng || ianIang || uanUang ||
-        unOng || anAi || unIong || engOng
+        enabledCount > 0
+    }
+
+    var enabledCount: Int {
+        [zhZ, chC, shS, nl, rl, fh, huangWang,
+         anAng, enEng, inIng, ianIang, uanUang,
+         unOng, anAi, unIong, engOng].filter { $0 }.count
     }
 }
 

@@ -12,13 +12,14 @@ final class NumberPadView: UIView {
 
     var onEvent: ((Event) -> Void)?
 
-    private let leftSymbolScroll = UIScrollView()
+    private let leftSymbolScroll = LingxiScrollView()
     private let leftSymbolStack = UIStackView()
     private let gridContainer = UIView()
     private var theme: ResolvedTheme?
     private var isChineseMode = true
     private var returnTitle = "换行"
     private var repeatTimer: Timer?
+    private var repeatDeleteCount = 0
 
     private let chineseSideSymbols = ["，", "。", "？", "！", "：", "；", "、", "（", "）", "「", "」", "…", "—", "￥", "@", "#"]
     private let englishSideSymbols = [",", ".", "?", "!", ":", ";", "(", ")", "[", "]", "_", "$", "@", "#", "%", "&"]
@@ -73,6 +74,7 @@ final class NumberPadView: UIView {
             btn.setTitleColor(theme.keyText, for: .normal)
             btn.backgroundColor = theme.specialKeyFill
             btn.layer.cornerRadius = theme.keyCornerRadius
+            btn.layer.cornerCurve = .continuous
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
             btn.actionHandler = { [weak self] in
@@ -102,6 +104,7 @@ final class NumberPadView: UIView {
                 btn.setTitleColor(item.isAccent ? theme.accentText : theme.keyText, for: .normal)
                 btn.backgroundColor = item.isAccent ? theme.accentFill : (item.isSpecial ? theme.specialKeyFill : theme.keyFill)
                 btn.layer.cornerRadius = theme.keyCornerRadius
+                btn.layer.cornerCurve = .continuous
                 btn.layer.shadowColor = theme.keyShadowColor.cgColor
                 btn.layer.shadowOpacity = theme.keyShadowOpacity
                 btn.layer.shadowOffset = CGSize(width: 0, height: 1)
@@ -123,13 +126,27 @@ final class NumberPadView: UIView {
         switch gesture.state {
         case .began:
             repeatTimer?.invalidate()
+            repeatDeleteCount = 0
             onEvent?(.backspace)
-            repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.085, repeats: true) { [weak self] _ in
-                self?.onEvent?(.backspace)
+            let timer = Timer(timeInterval: 0.085, repeats: true) { [weak self] t in
+                guard let self else { return }
+                self.repeatDeleteCount += 1
+                self.onEvent?(.backspace)
+                if self.repeatDeleteCount == 12 {
+                    t.invalidate()
+                    let fast = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                        self?.onEvent?(.backspace)
+                    }
+                    RunLoop.main.add(fast, forMode: .common)
+                    self.repeatTimer = fast
+                }
             }
+            RunLoop.main.add(timer, forMode: .common)
+            repeatTimer = timer
         case .ended, .cancelled, .failed:
             repeatTimer?.invalidate()
             repeatTimer = nil
+            repeatDeleteCount = 0
         default:
             break
         }

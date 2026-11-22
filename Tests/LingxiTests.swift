@@ -1092,4 +1092,76 @@ final class LingxiTests: XCTestCase {
         let tokens = BigBangTokenizer.tokenize("灵犀输入法支持跨设备实时剪贴板接力与零知识同步")
         XCTAssertFalse(tokens.isEmpty, "BigBang 炸词分词结果不得为空")
     }
+
+    func testThemeCustomizationColorPaletteAndPresetSwitching() throws {
+        // 1. HexColor 亮度与 WCAG 对比度算法校验
+        let pureWhite = HexColor("#FFFFFF")
+        let pureBlack = HexColor("#000000")
+        XCTAssertFalse(pureWhite.isDarkColor)
+        XCTAssertTrue(pureBlack.isDarkColor)
+        XCTAssertEqual(pureWhite.contrastRatio(with: pureBlack), 21.0, accuracy: 0.05)
+        XCTAssertEqual(pureWhite.contrastRatio(with: pureWhite), 1.0, accuracy: 0.01)
+
+        // 2. 默认纯白圆角按键与跟随系统模式
+        var theme = ThemeCustomization()
+        let lightDefault = theme.activePreset(isSystemDark: false)
+        XCTAssertEqual(lightDefault.id, "lingxi_pure")
+        XCTAssertEqual(lightDefault.keyFill.rawValue.uppercased(), "#FFFFFF")
+        XCTAssertFalse(lightDefault.isDark)
+        let darkDefault = theme.activePreset(isSystemDark: true)
+        XCTAssertTrue(darkDefault.isDark)
+
+        // 3. 预设切换：在浅色系统下点深色预设必须立即切换生效并清除自定义色覆盖
+        theme.customKeyFillHex = "#FFE4E1"
+        XCTAssertTrue(theme.hasCustomColorOverrides)
+        let cyber = KeyboardThemePreset.find(id: "cyber_neon")
+        theme.applyPresetSelection(cyber, isSystemDark: false)
+        XCTAssertFalse(theme.hasCustomColorOverrides)
+        XCTAssertEqual(theme.appearanceMode, .alwaysDark)
+        XCTAssertEqual(theme.activePreset(isSystemDark: false).id, "cyber_neon")
+
+        // 4. 自由调色板：自定义深色画布 + 亮色强调色应自动推导 isDark / accentText / 按下态色值
+        theme.customCanvasHex = "#121826"
+        theme.customKeyFillHex = "#1E293B"
+        theme.customKeyTextHex = "#F8FAFC"
+        theme.customAccentHex = "#FACC15"
+        let customActive = theme.activePreset(isSystemDark: false)
+        XCTAssertTrue(customActive.isDark, "深色自定义底色应自动推导为深色模式")
+        XCTAssertEqual(customActive.keyFill.rawValue.uppercased(), "#1E293B")
+        XCTAssertEqual(customActive.keyText.rawValue.uppercased(), "#F8FAFC")
+        XCTAssertEqual(customActive.accentText.rawValue.uppercased(), "#0A0A0A", "亮黄色强调色应自动配深色文字")
+        XCTAssertNotEqual(customActive.keyPressedFill, customActive.keyFill, "按键按下态色值应自动推导且与默认态有区分")
+
+        // 4b. 从深色自定义调色一键切回浅色模式，应自动清除冲突暗色并恢复纯白键帽
+        theme.applyAppearanceMode(.alwaysLight)
+        XCTAssertFalse(theme.hasCustomColorOverrides)
+        XCTAssertEqual(theme.activePreset(isSystemDark: true).keyFill.rawValue.uppercased(), "#FFFFFF")
+        XCTAssertFalse(theme.activePreset(isSystemDark: true).isDark)
+
+        // 5. 旧版 JSON 兼容解码
+        let legacyJSON = Data("{\"selectedThemeID\":\"sakura_blossom\",\"adaptiveDarkMode\":false}".utf8)
+        let decoded = try JSONDecoder().decode(ThemeCustomization.self, from: legacyJSON)
+        XCTAssertEqual(decoded.lightThemeID, "sakura_blossom")
+        XCTAssertEqual(decoded.appearanceMode, .alwaysLight)
+    }
+
+    func testClipboardPendingBannerLifecycleAndAccountConfigDecode() throws {
+        // 剪贴板顶栏接管条目生命周期：record -> pendingBannerItem -> delete/clear
+        ClipboardStore.clearPendingBanner()
+        let recorded = ClipboardStore.record("【灵犀】验证码 609321，支持左右滑动预览测试")
+        XCTAssertNotNil(recorded)
+        XCTAssertEqual(recorded?.extractedCode, "609321")
+        XCTAssertEqual(ClipboardStore.pendingBannerItem()?.id, recorded?.id)
+
+        if let id = recorded?.id {
+            ClipboardStore.delete(id: id)
+        }
+        XCTAssertNil(ClipboardStore.pendingBannerItem(), "删除待展示条目后应自动清空 pendingBannerItem")
+
+        // CloudBackendConfig 向后兼容解码（缺少 avatarThemeIndex 时默认为 0）
+        let legacyCloudJSON = Data("{\"serverURL\":\"http://127.0.0.1:8787\",\"username\":\"测试用户\"}".utf8)
+        let cfg = try JSONDecoder().decode(CloudBackendConfig.self, from: legacyCloudJSON)
+        XCTAssertEqual(cfg.username, "测试用户")
+        XCTAssertEqual(cfg.avatarThemeIndex, 0)
+    }
 }

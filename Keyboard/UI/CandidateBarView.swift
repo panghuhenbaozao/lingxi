@@ -1,12 +1,29 @@
 import UIKit
 
+/// 允许手指落在按钮/胶囊上时依然可以顺滑拖拽滚动的通用 ScrollView（解决 iOS 默认 UIControl 拦截滚动的痛点）。
+final class LingxiScrollView: UIScrollView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        delaysContentTouches = false
+        canCancelContentTouches = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+        return true
+    }
+}
+
 /// 横向高速候选词滚动栏（支持长按词条进行置顶/忘词操作）。
 final class CandidateBarView: UIView {
     var onSelectCandidate: ((Int) -> Void)?
     var onLongPressCandidate: ((Int, UIView) -> Void)?
     var onToggleExpand: (() -> Void)?
 
-    private let scrollView = UIScrollView()
+    private let scrollView = LingxiScrollView()
     private let stackView = UIStackView()
     // 防闪烁：使用 .custom 而非 .system——system 按钮在重复 setImage/setTitle 时会做系统淡入淡出动画
     private let expandButton = UIButton(type: .custom)
@@ -33,6 +50,7 @@ final class CandidateBarView: UIView {
         scrollView.showsVerticalScrollIndicator = false
         scrollView.alwaysBounceHorizontal = true
         scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
         addSubview(scrollView)
 
         stackView.axis = .horizontal
@@ -253,7 +271,7 @@ final class ExpandedCandidatesView: UIView {
 
     private let filterControl = UISegmentedControl(items: Filter.allCases.map(\.title))
     private let closeButton = ActionClosureButton(type: .system)
-    private let scrollView = UIScrollView()
+    private let scrollView = LingxiScrollView()
     private let gridContainer = UIView()
     private var allCandidates: [PinyinCandidate] = []
     private var visibleIndices: [Int] = []

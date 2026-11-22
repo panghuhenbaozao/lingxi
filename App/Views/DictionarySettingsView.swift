@@ -69,7 +69,9 @@ struct DictionarySettingsView: View {
                         SmartInputSettingsView()
                     }
                     settingsLink(icon: "waveform", tint: Design.Palette.ink, title: "模糊音",
-                                 subtitle: "16 组全覆盖") {
+                                 subtitle: appState.settings.fuzzy.enabledCount > 0
+                                    ? "已开启 \(appState.settings.fuzzy.enabledCount) 组"
+                                    : "未开启 · 16 组可选") {
                         FuzzyPinyinSettingsView()
                     }
                     settingsLink(icon: "textformat.abc", tint: Design.Palette.ink, title: "趣味字体",

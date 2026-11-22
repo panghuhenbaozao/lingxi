@@ -32,6 +32,39 @@ struct HexColor: Codable, Equatable, Hashable {
             return (0.5, 0.5, 0.5, 1.0)
         }
     }
+
+    /// 感知亮度 (0.0 黑 ~ 1.0 白)
+    var luminance: Double {
+        let c = rgba
+        return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b
+    }
+
+    var isDarkColor: Bool {
+        luminance < 0.48
+    }
+
+    /// 按比例调亮/调暗生成按压态、功能键或次级辅助色
+    func adjustedBrightness(by delta: Double) -> HexColor {
+        let c = rgba
+        let nr = max(0.0, min(1.0, c.r + delta))
+        let ng = max(0.0, min(1.0, c.g + delta))
+        let nb = max(0.0, min(1.0, c.b + delta))
+        return HexColor(
+            String(
+                format: "#%02X%02X%02X",
+                Int((nr * 255.0).rounded()),
+                Int((ng * 255.0).rounded()),
+                Int((nb * 255.0).rounded())
+            )
+        )
+    }
+
+    /// 简化 WCAG 相对对比度（用于自由调色板自动提示可读性）
+    func contrastRatio(with other: HexColor) -> Double {
+        let l1 = max(luminance, other.luminance)
+        let l2 = min(luminance, other.luminance)
+        return (l1 + 0.05) / (l2 + 0.05)
+    }
 }
 
 /// 一套完整的键盘配色与外观规范。
@@ -63,13 +96,13 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
             name: "极简纯白",
             subtitle: "苹果质感 · 纯白圆角键帽",
             isDark: false,
-            canvasTop: HexColor("#E8EAEF"),
-            canvasBottom: HexColor("#DFE2E8"),
-            toolbarBackground: HexColor("#F4F5F8"),
+            canvasTop: HexColor("#EAECEF"),
+            canvasBottom: HexColor("#E2E5EA"),
+            toolbarBackground: HexColor("#F7F8FA"),
             keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#D6DBE4"),
-            specialKeyFill: HexColor("#CFD4DD"),
-            specialKeyPressedFill: HexColor("#B9C0CC"),
+            keyPressedFill: HexColor("#DCE0E8"),
+            specialKeyFill: HexColor("#D6DBE3"),
+            specialKeyPressedFill: HexColor("#C1C8D3"),
             accentFill: HexColor("#0A0A0A"),
             accentPressedFill: HexColor("#222222"),
             keyText: HexColor("#0A0A0A"),
@@ -77,8 +110,30 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
             accentText: HexColor("#FFFFFF"),
             candidateText: HexColor("#0A0A0A"),
             candidateHighlight: HexColor("#0A0A0A"),
-            keyShadowHex: HexColor("#898A8D"),
-            keyShadowOpacity: 0.34
+            keyShadowHex: HexColor("#8C929C"),
+            keyShadowOpacity: 0.30
+        ),
+        KeyboardThemePreset(
+            id: "cloud_snow",
+            name: "雪域全白",
+            subtitle: "通体雪白 · 苹果蓝点缀",
+            isDark: false,
+            canvasTop: HexColor("#F4F5F7"),
+            canvasBottom: HexColor("#ECEEF2"),
+            toolbarBackground: HexColor("#FFFFFF"),
+            keyFill: HexColor("#FFFFFF"),
+            keyPressedFill: HexColor("#E6EAF0"),
+            specialKeyFill: HexColor("#E5E8EE"),
+            specialKeyPressedFill: HexColor("#D3D8E2"),
+            accentFill: HexColor("#007AFF"),
+            accentPressedFill: HexColor("#0062CC"),
+            keyText: HexColor("#111111"),
+            keyHintText: HexColor("#787C84"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#111111"),
+            candidateHighlight: HexColor("#007AFF"),
+            keyShadowHex: HexColor("#949BA6"),
+            keyShadowOpacity: 0.26
         ),
         KeyboardThemePreset(
             id: "lingxi_light",
@@ -299,6 +354,51 @@ struct ThemeCustomization: Codable, Equatable {
         customAccentHex = nil
     }
 
+    /// 统一的外观模式切换逻辑：切回跟随系统或切换深/浅模式时，自动清理冲突的自定义色覆盖，确保切换 100% 立即生效。
+    mutating func applyAppearanceMode(_ mode: KeyboardAppearanceMode) {
+        appearanceMode = mode
+        adaptiveDarkMode = (mode == .followSystem)
+        switch mode {
+        case .followSystem:
+            if hasCustomColorOverrides {
+                clearCustomColors()
+            }
+        case .alwaysLight:
+            if let canvasHex = customCanvasHex, HexColor(canvasHex).isDarkColor {
+                clearCustomColors()
+            }
+            if KeyboardThemePreset.find(id: selectedThemeID).isDark {
+                selectedThemeID = lightThemeID
+            }
+        case .alwaysDark:
+            if let canvasHex = customCanvasHex, !HexColor(canvasHex).isDarkColor {
+                clearCustomColors()
+            }
+            if !KeyboardThemePreset.find(id: selectedThemeID).isDark {
+                selectedThemeID = darkThemeID
+            }
+        }
+    }
+
+    /// 统一的预设选择逻辑（App 外观页与键盘内快捷设置共用，保证点任意预设 100% 立即生效）
+    mutating func applyPresetSelection(_ preset: KeyboardThemePreset, isSystemDark: Bool) {
+        selectedThemeID = preset.id
+        clearCustomColors()
+        if preset.isDark {
+            darkThemeID = preset.id
+            if appearanceMode == .alwaysLight || (appearanceMode == .followSystem && !isSystemDark) {
+                appearanceMode = .alwaysDark
+                adaptiveDarkMode = false
+            }
+        } else {
+            lightThemeID = preset.id
+            if appearanceMode == .alwaysDark || (appearanceMode == .followSystem && isSystemDark) {
+                appearanceMode = .alwaysLight
+                adaptiveDarkMode = false
+            }
+        }
+    }
+
     static func load(force: Bool = false) -> ThemeCustomization {
         let mtime = AppGroup.modificationDate(of: fileName)
         if !force, let cached, cachedMTime == mtime {
@@ -338,31 +438,60 @@ struct ThemeCustomization: Codable, Equatable {
         }
 
         guard hasCustomColorOverrides else { return base }
-        let canvas = customCanvasHex.map { HexColor($0) }
-        let keyFill = customKeyFillHex.map { HexColor($0) }
-        let keyText = customKeyTextHex.map { HexColor($0) }
-        let accent = customAccentHex.map { HexColor($0) }
+        let canvasTop = customCanvasHex.map { HexColor($0) } ?? base.canvasTop
+        let effectiveDark = customCanvasHex != nil ? canvasTop.isDarkColor : base.isDark
+        let canvasBottom = customCanvasHex != nil
+            ? canvasTop.adjustedBrightness(by: effectiveDark ? -0.04 : -0.03)
+            : base.canvasBottom
+        let toolbarBg = customCanvasHex != nil
+            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.04 : 0.04)
+            : base.toolbarBackground
+
+        let keyFill = customKeyFillHex.map { HexColor($0) } ?? base.keyFill
+        let keyPressed = customKeyFillHex != nil
+            ? keyFill.adjustedBrightness(by: keyFill.isDarkColor ? 0.12 : -0.11)
+            : base.keyPressedFill
+        let specialKey = customCanvasHex != nil
+            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.06 : -0.08)
+            : base.specialKeyFill
+        let specialPressed = customCanvasHex != nil
+            ? specialKey.adjustedBrightness(by: effectiveDark ? 0.10 : -0.09)
+            : base.specialKeyPressedFill
+
+        let keyText = customKeyTextHex.map { HexColor($0) } ?? base.keyText
+        let keyHint = customKeyTextHex != nil
+            ? keyText.adjustedBrightness(by: keyText.isDarkColor ? 0.32 : -0.28)
+            : base.keyHintText
+
+        let accent = customAccentHex.map { HexColor($0) } ?? base.accentFill
+        let accentPressed = customAccentHex != nil
+            ? accent.adjustedBrightness(by: accent.isDarkColor ? 0.12 : -0.12)
+            : base.accentPressedFill
+        let accentText = customAccentHex != nil
+            ? (accent.isDarkColor ? HexColor("#FFFFFF") : HexColor("#0A0A0A"))
+            : base.accentText
+
         return KeyboardThemePreset(
             id: base.id,
             name: base.name,
             subtitle: base.subtitle,
-            isDark: base.isDark,
-            canvasTop: canvas ?? base.canvasTop,
-            canvasBottom: canvas ?? base.canvasBottom,
-            toolbarBackground: canvas ?? base.toolbarBackground,
-            keyFill: keyFill ?? base.keyFill,
-            keyPressedFill: base.keyPressedFill,
-            specialKeyFill: base.specialKeyFill,
-            specialKeyPressedFill: base.specialKeyPressedFill,
-            accentFill: accent ?? base.accentFill,
-            accentPressedFill: accent ?? base.accentPressedFill,
-            keyText: keyText ?? base.keyText,
-            keyHintText: base.keyHintText,
-            accentText: base.accentText,
-            candidateText: keyText ?? base.candidateText,
-            candidateHighlight: accent ?? base.candidateHighlight,
-            keyShadowHex: base.keyShadowHex,
-            keyShadowOpacity: base.keyShadowOpacity
+            isDark: effectiveDark,
+            canvasTop: canvasTop,
+            canvasBottom: canvasBottom,
+            toolbarBackground: toolbarBg,
+            keyFill: keyFill,
+            keyPressedFill: keyPressed,
+            specialKeyFill: specialKey,
+            specialKeyPressedFill: specialPressed,
+            accentFill: accent,
+            accentPressedFill: accentPressed,
+            keyText: keyText,
+            keyHintText: keyHint,
+            accentText: accentText,
+            candidateText: keyText,
+            candidateHighlight: accent,
+            keyShadowHex: effectiveDark ? HexColor("#000000") : HexColor("#898A8D"),
+            keyShadowOpacity: effectiveDark ? 0.42 : 0.32
         )
     }
 

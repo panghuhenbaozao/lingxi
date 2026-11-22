@@ -20,8 +20,9 @@ final class KeyPopupView: UIView {
         isHidden = true
 
         bubbleLayer.shadowOffset = CGSize(width: 0, height: 3)
-        bubbleLayer.shadowRadius = 7
-        bubbleLayer.shadowOpacity = 0.25
+        bubbleLayer.shadowRadius = 8
+        bubbleLayer.shadowOpacity = 0.22
+        bubbleLayer.lineWidth = 0.5
         layer.addSublayer(bubbleLayer)
 
         singleLabel.textAlignment = .center
@@ -42,7 +43,8 @@ final class KeyPopupView: UIView {
 
     func apply(theme: ResolvedTheme) {
         self.theme = theme
-        bubbleLayer.fillColor = theme.keyFill.withAlphaComponent(0.98).cgColor
+        bubbleLayer.fillColor = theme.keyFill.withAlphaComponent(0.99).cgColor
+        bubbleLayer.strokeColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.28 : 0.26).cgColor
         bubbleLayer.shadowColor = theme.keyShadowColor.cgColor
         singleLabel.textColor = theme.keyText
         refreshAlternativeHighlights()
@@ -94,6 +96,7 @@ final class KeyPopupView: UIView {
             lbl.textAlignment = .center
             lbl.font = .systemFont(ofSize: 19, weight: .medium)
             lbl.layer.cornerRadius = 7
+            lbl.layer.cornerCurve = .continuous
             lbl.layer.masksToBounds = true
             alternativesStack.addArrangedSubview(lbl)
             alternativeLabels.append(lbl)
@@ -164,6 +167,7 @@ final class KeyPopupView: UIView {
         bubbleLayer.frame = rect
         let path = UIBezierPath(roundedRect: rect, cornerRadius: 11)
         bubbleLayer.path = path.cgPath
+        bubbleLayer.shadowPath = path.cgPath
     }
 
     private func refreshAlternativeHighlights() {

@@ -58,7 +58,7 @@ final class T9KeyboardCanvasView: UIView {
     private var lockedSyllables: [String] = []
 
     private let gridHost = UIView()
-    private let leftScroll = UIScrollView()
+    private let leftScroll = LingxiScrollView()
     private let leftStack = UIStackView()
     private let sideRailStack = UIStackView()
     private let popupView = KeyPopupView()

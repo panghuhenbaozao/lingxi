@@ -218,8 +218,8 @@ struct HomeTestView: View {
                     UIPasteboard.general.string = sample
                     appState.addClipboardEntry(sample)
                 }
-                compactChip("模拟复制文本", icon: "doc.on.doc") {
-                    let sample = "灵犀输入法 · 极简纯白圆角按键"
+                compactChip("模拟长文本滑动", icon: "doc.on.doc") {
+                    let sample = "灵犀输入法 · 纯白圆角按键，支持顶栏复制内容与短信验证码左右滑动查看完整全文并一键填入"
                     UIPasteboard.general.string = sample
                     appState.addClipboardEntry(sample)
                 }
@@ -251,8 +251,10 @@ struct HomeTestView: View {
             } label: {
                 bentoTile(
                     icon: "paintpalette.fill",
-                    title: "纯白圆角外观",
-                    subtitle: "\(appState.theme.appearanceMode.displayName) · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                    title: "外观与自由调色",
+                    subtitle: appState.theme.hasCustomColorOverrides
+                        ? "自定义调色中 · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                        : "\(appState.theme.appearanceMode.displayName) · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
                 )
             }
             .buttonStyle(PressableStyle())

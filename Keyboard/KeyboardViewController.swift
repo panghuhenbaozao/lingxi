@@ -13,7 +13,6 @@ final class KeyboardViewController: UIInputViewController {
     private enum ActivePanel {
         case letters
         case numbers
-        case symbolsEmoji
         case clipboard
         case ai
         case quickSettings
@@ -43,7 +42,6 @@ final class KeyboardViewController: UIInputViewController {
     private let t9Canvas = T9KeyboardCanvasView()
     private let numberPad = NumberPadView()
     private let expandedCandidates = ExpandedCandidatesView()
-    private let symbolEmojiPanel = SymbolEmojiPanelView()
     private let clipboardPanel = ClipboardPanelView()
     private let aiPanel = AIAssistantPanelView()
     private let quickSettingsPanel = QuickSettingsSheetView()
@@ -61,13 +59,8 @@ final class KeyboardViewController: UIInputViewController {
     private var isCandidatesExpanded = false
     private var pendingPhraseSegments: [(word: String, py: String)] = []
     private var lastCommittedWord: String?
-
-    // 表情拼音搜索态（紧凑结果条 + 字母键盘组合）
-    private var isEmojiSearchMode = false
-    private var emojiSearchQuery = ""
-    private var lettersTopConstraint: NSLayoutConstraint?
-    private var symbolFullBottomConstraint: NSLayoutConstraint?
-    private var symbolCompactHeightConstraint: NSLayoutConstraint?
+    /// 精确追踪当前宿主输入框是否存在未上屏的 markedText，避免空设引起 XPC 抖动或残留幽灵拼音。
+    private var hasActiveMarkedText = false
 
     // 边打边译状态（译：中文边打边流式译为目标语种）
     private var isTranslateMode = false
@@ -201,6 +194,7 @@ final class KeyboardViewController: UIInputViewController {
         let isExternalChange = (CACurrentMediaTime() - lastInternalEditTime) >= 0.22
         if isExternalChange && aiPromptDraft == nil {
             lastSelectionUndo = nil
+            hasActiveMarkedText = false
             openDoubleQuote = false
             openSingleQuote = false
             adaptToHostTraits()
@@ -260,7 +254,6 @@ final class KeyboardViewController: UIInputViewController {
             t9Canvas,
             numberPad,
             expandedCandidates,
-            symbolEmojiPanel,
             clipboardPanel,
             aiPanel,
             quickSettingsPanel,
@@ -271,28 +264,9 @@ final class KeyboardViewController: UIInputViewController {
             NSLayoutConstraint.activate([
                 panel.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
                 panel.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
+                panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
+                panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
             ])
-            if panel === lettersCanvas {
-                let top = panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor)
-                self.lettersTopConstraint = top
-                NSLayoutConstraint.activate([
-                    top,
-                    panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
-                ])
-            } else if panel === symbolEmojiPanel {
-                let fullBottom = panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor)
-                self.symbolFullBottomConstraint = fullBottom
-                self.symbolCompactHeightConstraint = panel.heightAnchor.constraint(equalToConstant: 80)
-                NSLayoutConstraint.activate([
-                    panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-                    fullBottom,
-                ])
-            } else {
-                NSLayoutConstraint.activate([
-                    panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-                    panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
-                ])
-            }
         }
 
         let totalH = effectiveToolbarHeight + CGFloat(settings.heightPreset.bodyHeight)
@@ -318,8 +292,8 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func reloadConfigurationIfNeeded() {
-        let newSettings = LingxiSettings.load()
-        let newTheme = ThemeCustomization.load()
+        let newSettings = LingxiSettings.load(force: true)
+        let newTheme = ThemeCustomization.load(force: true)
         if newSettings != settings || newTheme != themeCustomization {
             let schemeOrLayoutChanged = newSettings.inputScheme != settings.inputScheme || newSettings.layoutMode != settings.layoutMode
             settings = newSettings
@@ -348,15 +322,6 @@ final class KeyboardViewController: UIInputViewController {
 
     private var activeContextBeforeCursor: String? {
         aiPromptDraft ?? (isTranslateMode ? translateSourceBuffer : textDocumentProxy.documentContextBeforeInput)
-    }
-
-    private func resolveEmojiSearchWords(for query: String) -> [String] {
-        guard !query.isEmpty, let engine else { return [] }
-        var searchSettings = settings
-        searchSettings.inputScheme = .quanpin
-        searchSettings.smartEnglishCandidate = false
-        let res = engine.query(raw: query, settings: searchSettings, contextBeforeCursor: nil, limit: 8)
-        return res.candidates.map(\.word)
     }
 
     private var isSecureField: Bool {
@@ -417,7 +382,7 @@ final class KeyboardViewController: UIInputViewController {
             baseH += 26
         }
         let bodyH: CGFloat
-        if activePanel == .ai || activePanel == .clipboard || isEmojiSearchMode {
+        if activePanel == .ai || activePanel == .clipboard {
             bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 252)
         } else {
             bodyH = baseH
@@ -468,39 +433,6 @@ final class KeyboardViewController: UIInputViewController {
 
         numberPad.onEvent = { [weak self] event in
             self?.handleNumberPadEvent(event)
-        }
-
-        symbolEmojiPanel.onInsert = { [weak self] text in
-            guard let self else { return }
-            self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.insertFinalText(text, checkPairing: true)
-        }
-        symbolEmojiPanel.onBackspace = { [weak self] in
-            guard let self else { return }
-            self.feedback.triggerKeyFeedback(tone: .delete, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.performBackspace(isRepeat: false)
-        }
-        symbolEmojiPanel.onClose = { [weak self] in
-            self?.switchToPanel(.letters)
-        }
-        symbolEmojiPanel.onRequestSearchMode = { [weak self] in
-            guard let self else { return }
-            self.clearAllComposing()
-            self.isEmojiSearchMode = true
-            self.emojiSearchQuery = ""
-            self.activePanel = .letters
-            self.symbolEmojiPanel.setSearchMode(true, query: "")
-            self.updatePreferredHeight()
-            self.updateVisiblePanel()
-            self.refreshUI()
-        }
-        symbolEmojiPanel.onExitSearchMode = { [weak self] in
-            guard let self else { return }
-            self.isEmojiSearchMode = false
-            self.emojiSearchQuery = ""
-            self.symbolEmojiPanel.setSearchMode(false, query: "")
-            self.updatePreferredHeight()
-            self.switchToPanel(.symbolsEmoji)
         }
 
         clipboardPanel.onInsertText = { [weak self] text in
@@ -701,8 +633,6 @@ final class KeyboardViewController: UIInputViewController {
     ) {
         guard let engine else { return }
         clearUndoBuffer()
-
-        if isEmojiSearchMode { return }
 
         // 若上一段滑行或拼音尚未上屏，先自动上屏首候选，实现连续滑行成句
         if !isEnglishMode && !rawComposing.isEmpty {
@@ -1018,18 +948,6 @@ final class KeyboardViewController: UIInputViewController {
         clearUndoBuffer()
         lastSelectionUndo = nil
 
-        if isEmojiSearchMode {
-            if ch.count == 1, let scalar = ch.unicodeScalars.first, scalar.isASCII,
-               CharacterSet.alphanumerics.contains(scalar) {
-                emojiSearchQuery.append(ch.lowercased())
-                symbolEmojiPanel.updateSearchQuery(
-                    emojiSearchQuery,
-                    resolvedChineseWords: resolveEmojiSearchWords(for: emojiSearchQuery)
-                )
-            }
-            return
-        }
-
         if isEnglishMode {
             let styled = applyActiveStylishFont(ch)
             insertFinalText(styled, checkPairing: true)
@@ -1146,19 +1064,6 @@ final class KeyboardViewController: UIInputViewController {
     private func handleSpaceTap() {
         lastSelectionUndo = nil
 
-        if isEmojiSearchMode {
-            if !emojiSearchQuery.isEmpty,
-               let top = EmojiCatalog.search(
-                   emojiSearchQuery,
-                   resolvedChineseWords: resolveEmojiSearchWords(for: emojiSearchQuery),
-                   limit: 1
-               ).first {
-                insertFinalText(top.symbol, checkPairing: false)
-            }
-            exitEmojiSearchMode(openLetters: true)
-            return
-        }
-
         if !isEnglishMode && !rawComposing.isEmpty {
             let isBareVTool = (rawComposing.lowercased() == "v" && settings.inputScheme == .quanpin)
                 || (rawComposing == "V" && settings.inputScheme != .quanpin)
@@ -1221,19 +1126,6 @@ final class KeyboardViewController: UIInputViewController {
     private func handleReturnTap() {
         lastSelectionUndo = nil
 
-        if isEmojiSearchMode {
-            if !emojiSearchQuery.isEmpty,
-               let top = EmojiCatalog.search(
-                   emojiSearchQuery,
-                   resolvedChineseWords: resolveEmojiSearchWords(for: emojiSearchQuery),
-                   limit: 1
-               ).first {
-                insertFinalText(top.symbol, checkPairing: false)
-            }
-            exitEmojiSearchMode(openLetters: true)
-            return
-        }
-
         if aiPromptDraft != nil && rawComposing.isEmpty {
             handleToolbarAction(.sendAIPrompt)
             return
@@ -1256,19 +1148,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func performBackspace(isRepeat: Bool = false) {
-        if isEmojiSearchMode {
-            if !emojiSearchQuery.isEmpty {
-                emojiSearchQuery.removeLast()
-                symbolEmojiPanel.updateSearchQuery(
-                    emojiSearchQuery,
-                    resolvedChineseWords: resolveEmojiSearchWords(for: emojiSearchQuery)
-                )
-            } else {
-                exitEmojiSearchMode(openLetters: false)
-            }
-            return
-        }
-
         if !rawComposing.isEmpty {
             lastSelectionUndo = nil
             // 若刚刚是滑行输入生成的整词，按一次退格直接清空整段滑行拼音（Gboard / 微信输入法同款手感）
@@ -1337,6 +1216,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         pendingPhraseSegments.removeAll()
         lastCommittedWord = nil
+        clearMarkedTextIfNeeded()
         sessionDeleteCount += 1
         performEdit {
             // 成对括号智能退格连删：光标位于空括号中间（如 `（|）`、`(|)`）按 ⌫ 一次删掉整对
@@ -1370,12 +1250,6 @@ final class KeyboardViewController: UIInputViewController {
 
     private func performSwipeDelete() {
         lastSelectionUndo = nil
-
-        if isEmojiSearchMode {
-            emojiSearchQuery = ""
-            symbolEmojiPanel.updateSearchQuery("")
-            return
-        }
 
         if !rawComposing.isEmpty {
             let cleared = rawComposing
@@ -1437,11 +1311,15 @@ final class KeyboardViewController: UIInputViewController {
         isCandidatesExpanded = false
         pendingPhraseSegments.removeAll()
         englishComposing = ""
-        if settings.inlineComposingEnabled && aiPromptDraft == nil {
-            performEdit {
-                self.textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-                self.textDocumentProxy.unmarkText()
-            }
+        clearMarkedTextIfNeeded()
+    }
+
+    private func clearMarkedTextIfNeeded() {
+        guard hasActiveMarkedText else { return }
+        hasActiveMarkedText = false
+        performEdit {
+            self.textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            self.textDocumentProxy.unmarkText()
         }
     }
 
@@ -1648,8 +1526,16 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func syncInlineMarkedTextIfEnabled() {
-        guard settings.inlineComposingEnabled, aiPromptDraft == nil, !isEnglishMode else { return }
+        guard settings.inlineComposingEnabled, aiPromptDraft == nil, !isTranslateMode, !isEnglishMode else {
+            clearMarkedTextIfNeeded()
+            return
+        }
         let marked = currentCorrectedHint ?? (currentTokens.isEmpty ? rawComposing : PinyinSegmenter.displayPinyin(for: currentTokens))
+        guard !marked.isEmpty else {
+            clearMarkedTextIfNeeded()
+            return
+        }
+        hasActiveMarkedText = true
         performEdit {
             self.textDocumentProxy.setMarkedText(marked, selectedRange: NSRange(location: marked.utf16.count, length: 0))
         }
@@ -1732,12 +1618,7 @@ final class KeyboardViewController: UIInputViewController {
         let outputWord = (settings.traditionalChineseEnabled && cand.source != .englishDirect)
             ? ChineseScriptConverter.toTraditional(cand.word)
             : cand.word
-        if settings.inlineComposingEnabled && aiPromptDraft == nil {
-            performEdit {
-                self.textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-                self.textDocumentProxy.unmarkText()
-            }
-        }
+        clearMarkedTextIfNeeded()
         if isLastInputFromGlide {
             sessionGlideWords += 1
         }
@@ -2021,13 +1902,6 @@ final class KeyboardViewController: UIInputViewController {
         refreshUI()
     }
 
-    private func exitEmojiSearchMode(openLetters: Bool) {
-        isEmojiSearchMode = false
-        emojiSearchQuery = ""
-        symbolEmojiPanel.setSearchMode(false, query: "")
-        switchToPanel(openLetters ? .letters : .symbolsEmoji)
-    }
-
     private func toggleTranslateMode() {
         if isTranslateMode {
             cancelLiveTranslation()
@@ -2038,11 +1912,6 @@ final class KeyboardViewController: UIInputViewController {
             translateErrorText = nil
             refreshUI()
         } else {
-            if isEmojiSearchMode {
-                isEmojiSearchMode = false
-                emojiSearchQuery = ""
-                symbolEmojiPanel.setSearchMode(false, query: "")
-            }
             aiPromptDraft = nil
             clearAllComposing()
             isTranslateMode = true
@@ -2364,11 +2233,6 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: - 面板切换与主题刷新
 
     private func switchToPanel(_ target: ActivePanel) {
-        if isEmojiSearchMode {
-            isEmojiSearchMode = false
-            emojiSearchQuery = ""
-            symbolEmojiPanel.setSearchMode(false, query: "")
-        }
         activePanel = target
         isCandidatesExpanded = false
         updatePreferredHeight()
@@ -2382,8 +2246,6 @@ final class KeyboardViewController: UIInputViewController {
             )
         case .quickSettings:
             quickSettingsPanel.configure(theme: resolvedTheme, settings: settings, customization: themeCustomization)
-        case .symbolsEmoji:
-            symbolEmojiPanel.apply(theme: resolvedTheme)
         case .numbers:
             let (retTitle, _) = returnKeyAppearance()
             numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
@@ -2394,31 +2256,11 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateVisiblePanel() {
-        if isEmojiSearchMode {
-            symbolFullBottomConstraint?.isActive = false
-            symbolCompactHeightConstraint?.isActive = true
-            lettersTopConstraint?.constant = 80
-            lettersCanvas.isHidden = false
-            t9Canvas.isHidden = true
-            expandedCandidates.isHidden = true
-            numberPad.isHidden = true
-            symbolEmojiPanel.isHidden = false
-            clipboardPanel.isHidden = true
-            aiPanel.isHidden = true
-            quickSettingsPanel.isHidden = true
-            return
-        }
-
-        symbolCompactHeightConstraint?.isActive = false
-        symbolFullBottomConstraint?.isActive = true
-        lettersTopConstraint?.constant = 0
-
         let showMainLetters = (activePanel == .letters) && !isCandidatesExpanded
         lettersCanvas.isHidden = !showMainLetters || isUsingT9Layout
         t9Canvas.isHidden = !showMainLetters || !isUsingT9Layout
         expandedCandidates.isHidden = !isCandidatesExpanded
         numberPad.isHidden = (activePanel != .numbers)
-        symbolEmojiPanel.isHidden = (activePanel != .symbolsEmoji)
         clipboardPanel.isHidden = (activePanel != .clipboard)
         aiPanel.isHidden = (activePanel != .ai)
         quickSettingsPanel.isHidden = (activePanel != .quickSettings)
@@ -2433,7 +2275,6 @@ final class KeyboardViewController: UIInputViewController {
         expandedCandidates.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
         let (retTitle, _) = returnKeyAppearance()
         numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
-        symbolEmojiPanel.apply(theme: resolvedTheme)
         if activePanel == .quickSettings {
             quickSettingsPanel.updateTheme(resolvedTheme)
         }
@@ -2540,9 +2381,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func returnKeyAppearance() -> (title: String, highlighted: Bool) {
-        if isEmojiSearchMode {
-            return ("搜表情", true)
-        }
         if aiPromptDraft != nil && rawComposing.isEmpty {
             return ("问 AI", true)
         }

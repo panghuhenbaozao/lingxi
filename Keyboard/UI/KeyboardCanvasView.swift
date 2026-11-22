@@ -611,7 +611,9 @@ final class KeyboardCanvasView: UIView {
             case .character(_, let secondary, let downPunct, _):
                 if track.longPressTriggered && popupView.isShowingAlternatives {
                     let hostPt = touch.location(in: self)
-                    popupView.updateSelection(atHostPoint: hostPt)
+                    if popupView.updateSelection(atHostPoint: hostPt) {
+                        KeyboardVibrator.shared.softTap()
+                    }
                     break
                 }
 
@@ -679,7 +681,9 @@ final class KeyboardCanvasView: UIView {
             case .punctuation:
                 if track.longPressTriggered && popupView.isShowingAlternatives {
                     let hostPt = touch.location(in: self)
-                    popupView.updateSelection(atHostPoint: hostPt)
+                    if popupView.updateSelection(atHostPoint: hostPt) {
+                        KeyboardVibrator.shared.softTap()
+                    }
                 }
 
             default:
@@ -1095,7 +1099,7 @@ private final class KeyCapView: UIView {
         bgView.layer.shadowOpacity = theme.keyShadowOpacity
         bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
         bgView.layer.borderWidth = 0.5
-        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.24 : 0.32).cgColor
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.22 : 0.18).cgColor
         if bgView.bounds.width > 0 {
             bgView.layer.shadowPath = UIBezierPath(
                 roundedRect: bgView.bounds,
@@ -1210,7 +1214,7 @@ private final class KeyCapView: UIView {
         bgView.layer.cornerCurve = .continuous
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.borderWidth = 0.5
-        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.24 : 0.32).cgColor
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.22 : 0.18).cgColor
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = pressed ? 0 : theme.keyShadowOpacity
         bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
@@ -1223,7 +1227,7 @@ private final class KeyCapView: UIView {
             bgView.backgroundColor = pressed ? theme.keyPressedFill : theme.keyFill
         }
 
-        // 空格键：边缘微淡，给空格一点节奏感
+        // 空格键：严格对齐连续圆角边界，避免渐变层溢出键帽圆角外沿
         if case .space = model.kind, spaceGradLayer == nil {
             let grad = CAGradientLayer()
             grad.startPoint = CGPoint(x: 0, y: 0.5)
@@ -1234,12 +1238,14 @@ private final class KeyCapView: UIView {
         if let grad = spaceGradLayer {
             grad.colors = [
                 theme.keyFill.withAlphaComponent(0.0).cgColor,
-                theme.keyFill.withAlphaComponent(0.5).cgColor,
-                theme.keyFill.withAlphaComponent(0.5).cgColor,
+                theme.keyFill.withAlphaComponent(0.45).cgColor,
+                theme.keyFill.withAlphaComponent(0.45).cgColor,
                 theme.keyFill.withAlphaComponent(0.0).cgColor
             ]
             grad.locations = [0, 0.08, 0.92, 1]
-            grad.frame = bgView.bounds.insetBy(dx: -2, dy: -2)
+            grad.frame = bgView.bounds
+            grad.cornerRadius = theme.keyCornerRadius
+            grad.cornerCurve = .continuous
         }
     }
 }

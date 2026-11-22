@@ -9,6 +9,7 @@ public struct CloudBackendConfig: Codable, Equatable {
     public var userID: String = ""
     public var email: String = ""
     public var username: String = ""
+    public var avatarThemeIndex: Int = 0
     public var apiKeyPrefix: String = ""
     public var e2eeSalt: String = ""
     /// 第六部分合规铁律：分析功能默认关闭（零收集），由用户显式授权开启并与登录解耦
@@ -20,6 +21,21 @@ public struct CloudBackendConfig: Codable, Equatable {
     private static let fileName = "lingxi_cloud_config.json"
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        serverBaseURL = try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "http://127.0.0.1:8787"
+        userID = try c.decodeIfPresent(String.self, forKey: .userID) ?? ""
+        email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        avatarThemeIndex = try c.decodeIfPresent(Int.self, forKey: .avatarThemeIndex) ?? 0
+        apiKeyPrefix = try c.decodeIfPresent(String.self, forKey: .apiKeyPrefix) ?? ""
+        e2eeSalt = try c.decodeIfPresent(String.self, forKey: .e2eeSalt) ?? ""
+        habitAnalysisEnabled = try c.decodeIfPresent(Bool.self, forKey: .habitAnalysisEnabled) ?? false
+        autoSyncEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoSyncEnabled) ?? true
+        lastSyncedAt = try c.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
+        lastSyncSummary = try c.decodeIfPresent(String.self, forKey: .lastSyncSummary) ?? ""
+    }
 
     public static func load() -> CloudBackendConfig {
         AppGroup.readJSON(CloudBackendConfig.self, from: fileName) ?? CloudBackendConfig()

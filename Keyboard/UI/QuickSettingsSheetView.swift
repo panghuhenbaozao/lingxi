@@ -6,7 +6,7 @@ final class QuickSettingsSheetView: UIView {
     var onThemeChanged: ((ThemeCustomization) -> Void)?
     var onClose: (() -> Void)?
 
-    private let scrollView = UIScrollView()
+    private let scrollView = LingxiScrollView()
     private let stackView = UIStackView()
     private var theme: ResolvedTheme?
     private var settings = LingxiSettings.load()
@@ -102,7 +102,7 @@ final class QuickSettingsSheetView: UIView {
         schemeLabel.textColor = theme.keyHintText
         stackView.addArrangedSubview(schemeLabel)
 
-        let schemeScroll = UIScrollView()
+        let schemeScroll = LingxiScrollView()
         schemeScroll.showsHorizontalScrollIndicator = false
         schemeScroll.translatesAutoresizingMaskIntoConstraints = false
         schemeScroll.heightAnchor.constraint(equalToConstant: 34).isActive = true
@@ -168,14 +168,28 @@ final class QuickSettingsSheetView: UIView {
             self.onSettingsChanged?(self.settings)
         })
 
-        // 4. 快速皮肤切换
+        // 4. 外观模式（跟随系统 / 浅色 / 深色）与快速皮肤切换
+        stackView.addArrangedSubview(makeSegmentedRow(
+            label: "外观模式",
+            options: KeyboardAppearanceMode.allCases.map(\.displayName),
+            selectedIndex: KeyboardAppearanceMode.allCases.firstIndex(of: customization.appearanceMode) ?? 0,
+            theme: theme
+        ) { [weak self] idx in
+            guard let self else { return }
+            let mode = KeyboardAppearanceMode.allCases[idx]
+            self.customization.applyAppearanceMode(mode)
+            self.customization.save()
+            self.onThemeChanged?(self.customization)
+            self.rebuild()
+        })
+
         let skinLabel = UILabel()
         skinLabel.text = "主题皮肤"
         skinLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
         skinLabel.textColor = theme.keyHintText
         stackView.addArrangedSubview(skinLabel)
 
-        let skinScroll = UIScrollView()
+        let skinScroll = LingxiScrollView()
         skinScroll.showsHorizontalScrollIndicator = false
         skinScroll.translatesAutoresizingMaskIntoConstraints = false
         skinScroll.heightAnchor.constraint(equalToConstant: 34).isActive = true
@@ -183,8 +197,9 @@ final class QuickSettingsSheetView: UIView {
         let skinRow = UIStackView()
         skinRow.axis = .horizontal
         skinRow.spacing = 6
+        let activePresetID = customization.activePreset(isSystemDark: traitCollection.userInterfaceStyle == .dark).id
         for preset in KeyboardThemePreset.presets {
-            let active = (preset.id == customization.selectedThemeID)
+            let active = (preset.id == activePresetID && !customization.hasCustomColorOverrides)
             let btn = ActionClosureButton(type: .system)
             btn.setTitle(preset.name, for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
@@ -194,8 +209,8 @@ final class QuickSettingsSheetView: UIView {
             btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
             btn.actionHandler = { [weak self] in
                 guard let self else { return }
-                self.customization.selectedThemeID = preset.id
-                self.customization.adaptiveDarkMode = false
+                let isSysDark = (self.traitCollection.userInterfaceStyle == .dark)
+                self.customization.applyPresetSelection(preset, isSystemDark: isSysDark)
                 self.customization.save()
                 self.onThemeChanged?(self.customization)
                 self.rebuild()

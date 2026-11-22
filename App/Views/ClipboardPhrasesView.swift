@@ -9,6 +9,7 @@ struct ClipboardPhrasesView: View {
     @State private var newPhraseContent = ""
     @State private var newPhraseCategory = "常用"
     @State private var emojiQuery = ""
+    @State private var historySearchQuery = ""
     @State private var emojiCategoryFilter = 0 // 0=全部, 1=Emoji, 2=颜文字, 3=特殊符号
     @State private var copiedSymbolToast: String?
 
@@ -179,8 +180,15 @@ struct ClipboardPhrasesView: View {
                         .padding(.vertical, 8)
                 }
             } else {
-                Section("本机剪贴板历史 (\(appState.clipboardItems.count))") {
-                    ForEach(appState.clipboardItems) { item in
+                let q = historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let filtered = q.isEmpty ? appState.clipboardItems : appState.clipboardItems.filter {
+                    $0.text.lowercased().contains(q) || ($0.extractedCode?.contains(q) ?? false)
+                }
+                Section("本机剪贴板历史 (\(filtered.count))") {
+                    TextField("搜索剪贴板历史或验证码…", text: $historySearchQuery)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    ForEach(filtered) { item in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(item.text)
                                 .font(.body)
@@ -333,10 +341,36 @@ struct ClipboardPhrasesView: View {
                 Text("表情与颜文字面板已从键盘顶栏移至此处统一管理。点按任意条目即复制到剪贴板，切回键盘时顶栏会自动全栏接管显示为您复制的内容供一键粘贴。")
             }
 
+            let recentSymbols = RecentEmojiStore.load()
+            if !recentSymbols.isEmpty {
+                Section("最近常用（点按即复制）") {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(recentSymbols.prefix(16), id: \.self) { sym in
+                                Button {
+                                    UIPasteboard.general.string = sym
+                                    appState.addClipboardEntry(sym)
+                                    copiedSymbolToast = "✓ 已复制「\(sym)」，切出键盘即可一键粘贴"
+                                } label: {
+                                    Text(sym)
+                                        .font(.system(size: 22))
+                                        .frame(width: 38, height: 38)
+                                        .background(Color(Design.Palette.surface))
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+
             Section("精选表情、颜文字与特殊符号 (\(hits.count))") {
                 ForEach(hits, id: \.symbol) { entry in
                     Button {
                         UIPasteboard.general.string = entry.symbol
+                        RecentEmojiStore.record(entry.symbol)
                         appState.addClipboardEntry(entry.symbol)
                         copiedSymbolToast = "✓ 已复制「\(entry.symbol)」，切出键盘即可在顶栏一键粘贴"
                     } label: {

@@ -273,6 +273,9 @@ final class ClipboardStore {
     static func delete(id: UUID) {
         var st = storage
         st.items.removeAll { $0.id == id }
+        if st.pendingBannerItemID == id {
+            st.pendingBannerItemID = nil
+        }
         storage = st
     }
 

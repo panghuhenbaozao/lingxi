@@ -48,11 +48,13 @@ final class TopToolbarView: UIView {
     var onToggleExpandCandidates: (() -> Void)?
 
     private let bottomHairline = UIView()
+    private let composingScrollView = UIScrollView()
     private let composingLabel = UILabel()
     let candidateBar = CandidateBarView()
 
-    // 空闲功能区：左主胶囊簇 + 右工具簇
+    // 空闲功能区：可横向平滑滚动的双簇容器（宽屏自然左右分列，窄屏/多按钮自动可滑不遮挡）
     private let idleContainer = UIView()
+    private let idleScrollView = ToolbarHorizontalScrollView()
     private let leftClusterStack = UIStackView()
     private let rightClusterStack = UIStackView()
     private let aiButton = UIButton(type: .system)
@@ -120,9 +122,15 @@ final class TopToolbarView: UIView {
         bottomHairline.isUserInteractionEnabled = false
         addSubview(bottomHairline)
 
+        composingScrollView.showsHorizontalScrollIndicator = false
+        composingScrollView.showsVerticalScrollIndicator = false
+        composingScrollView.alwaysBounceHorizontal = true
+        composingScrollView.isHidden = true
+        addSubview(composingScrollView)
+
         composingLabel.font = .systemFont(ofSize: 13.5, weight: .semibold)
-        composingLabel.isHidden = true
-        addSubview(composingLabel)
+        composingLabel.lineBreakMode = .byClipping
+        composingScrollView.addSubview(composingLabel)
 
         candidateBar.isHidden = true
         candidateBar.onSelectCandidate = { [weak self] idx in
@@ -138,15 +146,21 @@ final class TopToolbarView: UIView {
 
         addSubview(idleContainer)
 
+        idleScrollView.showsHorizontalScrollIndicator = false
+        idleScrollView.showsVerticalScrollIndicator = false
+        idleScrollView.alwaysBounceHorizontal = true
+        idleScrollView.delaysContentTouches = false
+        idleContainer.addSubview(idleScrollView)
+
         leftClusterStack.axis = .horizontal
         leftClusterStack.alignment = .center
         leftClusterStack.spacing = 8
-        idleContainer.addSubview(leftClusterStack)
+        idleScrollView.addSubview(leftClusterStack)
 
         rightClusterStack.axis = .horizontal
         rightClusterStack.alignment = .center
         rightClusterStack.spacing = 6
-        idleContainer.addSubview(rightClusterStack)
+        idleScrollView.addSubview(rightClusterStack)
 
         // 左侧核心胶囊：灵犀 AI + 译
         configurePrimaryPillButton(
@@ -374,18 +388,28 @@ final class TopToolbarView: UIView {
 
         if hasCandidates {
             let showComposing = !(composingLabel.text ?? "").isEmpty
-            composingLabel.isHidden = !showComposing
+            composingScrollView.isHidden = !showComposing
             if showComposing {
-                composingLabel.frame = CGRect(x: 12, y: 2, width: bounds.width - 24, height: 15)
+                composingScrollView.frame = CGRect(x: 12, y: 2, width: max(0, bounds.width - 24), height: 16)
+                let fitW = ceil(composingLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 16)).width) + 6
+                let contentW = max(composingScrollView.bounds.width, fitW)
+                composingLabel.frame = CGRect(x: 0, y: 0, width: contentW, height: 16)
+                composingScrollView.contentSize = CGSize(width: contentW, height: 16)
+                if contentW > composingScrollView.bounds.width {
+                    composingScrollView.contentOffset = CGPoint(x: contentW - composingScrollView.bounds.width, y: 0)
+                } else {
+                    composingScrollView.contentOffset = .zero
+                }
                 candidateBar.frame = CGRect(x: 0, y: 16, width: bounds.width, height: max(28, bounds.height - 16))
             } else {
                 candidateBar.frame = bounds
             }
         } else {
-            composingLabel.isHidden = true
+            composingScrollView.isHidden = true
         }
 
         idleContainer.frame = bounds
+        idleScrollView.frame = bounds
         let pillH: CGFloat = 30
         let pillY = (bounds.height - pillH) / 2
 
@@ -393,8 +417,11 @@ final class TopToolbarView: UIView {
         leftClusterStack.frame = CGRect(x: 12, y: pillY, width: leftSize.width, height: pillH)
 
         let rightSize = rightClusterStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-        let rightX = max(leftClusterStack.frame.maxX + 8, bounds.width - 12 - rightSize.width)
+        let rightX = max(leftClusterStack.frame.maxX + 10, bounds.width - 12 - rightSize.width)
         rightClusterStack.frame = CGRect(x: rightX, y: pillY, width: rightSize.width, height: pillH)
+        let idleContentW = max(bounds.width, rightClusterStack.frame.maxX + 12)
+        idleScrollView.contentSize = CGSize(width: idleContentW, height: bounds.height)
+        idleScrollView.isScrollEnabled = idleContentW > bounds.width + 1
 
         // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
         let bannerH: CGFloat = min(36, bounds.height - 10)
@@ -891,36 +918,74 @@ final class ActionClosureButton: UIButton {
     }
 }
 
-/// 顶栏可左右横向滑动的复制文本 / 短信预览组件：长文本不再截断，支持手指左右顺滑滚动查看全文并点按粘贴。
-private final class ScrollableBannerTextView: UIView {
-    private let scrollView = UIScrollView()
-    private let textButton = ActionClosureButton(type: .system)
-
-    init(text: String, font: UIFont, textColor: UIColor, accessibilityLabel: String, onTap: @escaping () -> Void) {
-        super.init(frame: .zero)
-        setContentHuggingPriority(.defaultLow, for: .horizontal)
-        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.alwaysBounceHorizontal = true
-        scrollView.delaysContentTouches = false
-        scrollView.canCancelContentTouches = true
-        addSubview(scrollView)
-
-        textButton.setTitle(text, for: .normal)
-        textButton.titleLabel?.font = font
-        textButton.titleLabel?.lineBreakMode = .byClipping
-        textButton.setTitleColor(textColor, for: .normal)
-        textButton.contentHorizontalAlignment = .leading
-        textButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 8)
-        textButton.accessibilityLabel = accessibilityLabel
-        textButton.actionHandler = onTap
-        scrollView.addSubview(textButton)
+/// 允许在 UIButton/UIControl 上直接横滑触发滚动的专用横向 ScrollView（解决 iOS 默认 UIControl 拦截横向拖拽的问题）。
+private final class ToolbarHorizontalScrollView: UIScrollView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        alwaysBounceHorizontal = true
+        delaysContentTouches = false
+        canCancelContentTouches = true
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+        return true
+    }
+}
+
+/// 顶栏可左右横向滑动的复制文本 / 短信预览组件：长文本不再截断，支持手指左右顺滑滚动查看全文并点按粘贴。
+private final class ScrollableBannerTextView: UIView, UIScrollViewDelegate {
+    private let scrollView = ToolbarHorizontalScrollView()
+    private let textLabel = UILabel()
+    private let fadeMaskLayer = CAGradientLayer()
+    private let onTapHandler: () -> Void
+
+    init(text: String, font: UIFont, textColor: UIColor, accessibilityLabel: String, onTap: @escaping () -> Void) {
+        self.onTapHandler = onTap
+        super.init(frame: .zero)
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        scrollView.delegate = self
+        addSubview(scrollView)
+
+        fadeMaskLayer.startPoint = CGPoint(x: 0.0, y: 0.5)
+        fadeMaskLayer.endPoint = CGPoint(x: 1.0, y: 0.5)
+
+        textLabel.text = text
+        textLabel.font = font
+        textLabel.textColor = textColor
+        textLabel.lineBreakMode = .byClipping
+        textLabel.numberOfLines = 1
+        textLabel.isUserInteractionEnabled = true
+        textLabel.isAccessibilityElement = true
+        textLabel.accessibilityLabel = accessibilityLabel
+        textLabel.accessibilityTraits = .button
+        scrollView.addSubview(textLabel)
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        tap.cancelsTouchesInView = false
+        scrollView.addGestureRecognizer(tap)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func handleTap() {
+        UIView.animate(withDuration: 0.08, animations: {
+            self.textLabel.alpha = 0.55
+        }) { _ in
+            UIView.animate(withDuration: 0.14) {
+                self.textLabel.alpha = 1.0
+            }
+        }
+        onTapHandler()
     }
 
     override var intrinsicContentSize: CGSize {
@@ -930,9 +995,40 @@ private final class ScrollableBannerTextView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         scrollView.frame = bounds
-        let fit = textButton.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: max(28, bounds.height)))
-        let contentW = max(bounds.width, ceil(fit.width) + 4)
-        textButton.frame = CGRect(x: 0, y: 0, width: contentW, height: bounds.height)
+        let fit = textLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: max(28, bounds.height)))
+        let textW = ceil(fit.width)
+        let contentW = max(bounds.width, textW + 20)
+        textLabel.frame = CGRect(x: 2, y: 0, width: max(bounds.width - 4, textW + 16), height: bounds.height)
         scrollView.contentSize = CGSize(width: contentW, height: bounds.height)
+        updateEdgeFadeMask()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateEdgeFadeMask()
+    }
+
+    private func updateEdgeFadeMask() {
+        let maxOffset = scrollView.contentSize.width - scrollView.bounds.width
+        guard maxOffset > 4 else {
+            layer.mask = nil
+            return
+        }
+        let showLeftFade = scrollView.contentOffset.x > 4
+        let showRightFade = scrollView.contentOffset.x < maxOffset - 4
+        guard showLeftFade || showRightFade else {
+            layer.mask = nil
+            return
+        }
+        let opaque = UIColor.black.cgColor
+        let clear = UIColor.clear.cgColor
+        fadeMaskLayer.frame = bounds
+        fadeMaskLayer.colors = [
+            showLeftFade ? clear : opaque,
+            opaque,
+            opaque,
+            showRightFade ? clear : opaque
+        ]
+        fadeMaskLayer.locations = [0.0, 0.08, 0.90, 1.0]
+        layer.mask = fadeMaskLayer
     }
 }

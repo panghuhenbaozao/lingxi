@@ -36,13 +36,36 @@ struct CloudAccountView: View {
                     .buttonStyle(.plain)
 
                     if appState.isCloudAuthenticated {
-                        VStack(spacing: 4) {
-                            Text(appState.cloudConfig.username.isEmpty ? "灵犀云端用户" : appState.cloudConfig.username)
+                        VStack(spacing: 6) {
+                            TextField("输入个人昵称", text: $appState.cloudConfig.username)
+                                .multilineTextAlignment(.center)
                                 .font(.title2.bold())
                                 .foregroundStyle(Color(Design.Palette.ink))
                             Text(appState.cloudConfig.email.isEmpty ? "API Key 已连接 · 零知识同步就绪" : appState.cloudConfig.email)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
+
+                            // 6 组苹果风格字母头像色盘快速切换
+                            if appState.userAvatarImage == nil {
+                                HStack(spacing: 10) {
+                                    ForEach(Array(UserAvatarView.avatarGradients.enumerated()), id: \.offset) { idx, item in
+                                        Button {
+                                            appState.cloudConfig.avatarThemeIndex = idx
+                                        } label: {
+                                            Circle()
+                                                .fill(Color(hexColor: HexColor(item.top)))
+                                                .frame(width: 20, height: 20)
+                                                .overlay(
+                                                    Circle()
+                                                        .stroke(Color(Design.Palette.ink), lineWidth: appState.cloudConfig.avatarThemeIndex == idx ? 2 : 0)
+                                                        .padding(-2)
+                                                )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
                         }
                     } else {
                         VStack(spacing: 6) {

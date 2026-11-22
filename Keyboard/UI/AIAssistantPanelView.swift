@@ -30,11 +30,12 @@ final class AIAssistantPanelView: UIView {
     private let askFreeButton = ActionClosureButton(type: .system)
     private let closeButton = ActionClosureButton(type: .system)
 
+    private let sourceScroll = LingxiScrollView()
     private let sourceLabel = UILabel()
-    private let actionsScroll = UIScrollView()
+    private let actionsScroll = LingxiScrollView()
     private let actionsStack = UIStackView()
     private let outputTextView = UITextView()
-    private let refineScroll = UIScrollView()
+    private let refineScroll = LingxiScrollView()
     private let refineStack = UIStackView()
     private let bottomBar = UIStackView()
     private let stopOrRetryButton = ActionClosureButton(type: .system)
@@ -68,6 +69,7 @@ final class AIAssistantPanelView: UIView {
         askFreeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
         askFreeButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
         askFreeButton.layer.cornerRadius = 8
+        askFreeButton.layer.cornerCurve = .continuous
         askFreeButton.actionHandler = { [weak self] in
             self?.streamTask?.cancel()
             self?.onRequestPromptInput?()
@@ -78,16 +80,22 @@ final class AIAssistantPanelView: UIView {
         closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
         closeButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
         closeButton.layer.cornerRadius = 8
+        closeButton.layer.cornerCurve = .continuous
         closeButton.actionHandler = { [weak self] in
             self?.streamTask?.cancel()
             self?.onClose?()
         }
         topBar.addArrangedSubview(closeButton)
 
+        sourceScroll.showsHorizontalScrollIndicator = false
+        sourceScroll.showsVerticalScrollIndicator = false
+        sourceScroll.alwaysBounceHorizontal = true
+        addSubview(sourceScroll)
+
         sourceLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
         sourceLabel.numberOfLines = 1
-        sourceLabel.lineBreakMode = .byTruncatingTail
-        addSubview(sourceLabel)
+        sourceLabel.lineBreakMode = .byClipping
+        sourceScroll.addSubview(sourceLabel)
 
         actionsScroll.showsHorizontalScrollIndicator = false
         addSubview(actionsScroll)
@@ -99,6 +107,7 @@ final class AIAssistantPanelView: UIView {
         outputTextView.isEditable = false
         outputTextView.font = .systemFont(ofSize: 14, weight: .regular)
         outputTextView.layer.cornerRadius = 10
+        outputTextView.layer.cornerCurve = .continuous
         outputTextView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         addSubview(outputTextView)
 
@@ -146,6 +155,7 @@ final class AIAssistantPanelView: UIView {
         for btn in [stopOrRetryButton, replaceButton, insertButton] {
             btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
             btn.layer.cornerRadius = 8
+            btn.layer.cornerCurve = .continuous
             bottomBar.addArrangedSubview(btn)
         }
     }
@@ -154,9 +164,14 @@ final class AIAssistantPanelView: UIView {
         super.layoutSubviews()
         let pad: CGFloat = 8
         topBar.frame = CGRect(x: pad, y: 6, width: bounds.width - pad * 2, height: 28)
-        sourceLabel.frame = CGRect(x: pad + 2, y: topBar.frame.maxY + 4, width: bounds.width - pad * 2 - 4, height: 15)
+        let sourceRect = CGRect(x: pad + 2, y: topBar.frame.maxY + 4, width: bounds.width - pad * 2 - 4, height: 16)
+        sourceScroll.frame = sourceRect
+        let fitSource = sourceLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: sourceRect.height))
+        let sourceW = max(sourceRect.width, ceil(fitSource.width) + 8)
+        sourceLabel.frame = CGRect(x: 0, y: 0, width: sourceW, height: sourceRect.height)
+        sourceScroll.contentSize = CGSize(width: sourceW, height: sourceRect.height)
 
-        let actY = sourceLabel.frame.maxY + 5
+        let actY = sourceScroll.frame.maxY + 5
         actionsScroll.frame = CGRect(x: 0, y: actY, width: bounds.width, height: 32)
         let stackW = max(bounds.width - pad * 2, actionsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
         actionsStack.frame = CGRect(x: pad, y: 0, width: stackW, height: 32)
@@ -255,11 +270,13 @@ final class AIAssistantPanelView: UIView {
         }
         for action in AIPresetAction.allCases {
             let btn = ActionClosureButton(type: .system)
+            let isSelected = (action == lastAction && lastCustomPrompt == nil)
             btn.setTitle(action.title, for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-            btn.backgroundColor = theme.accentFill.withAlphaComponent(0.15)
-            btn.setTitleColor(theme.candidateHighlight, for: .normal)
+            btn.backgroundColor = isSelected ? theme.accentFill : theme.accentFill.withAlphaComponent(0.14)
+            btn.setTitleColor(isSelected ? theme.accentText : theme.candidateHighlight, for: .normal)
             btn.layer.cornerRadius = 14
+            btn.layer.cornerCurve = .continuous
             btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 11, bottom: 5, right: 11)
             btn.actionHandler = { [weak self] in
                 self?.runAction(action)
@@ -291,6 +308,7 @@ final class AIAssistantPanelView: UIView {
             let compact = text.replacingOccurrences(of: "\n", with: " ")
             sourceLabel.text = "语境：\(compact)"
         }
+        setNeedsLayout()
     }
 
     private func showIdleGuidance() {
@@ -333,6 +351,9 @@ final class AIAssistantPanelView: UIView {
     private func runAction(_ action: AIPresetAction) {
         lastAction = action
         lastCustomPrompt = nil
+        if let theme {
+            rebuildActionButtons(theme: theme)
+        }
         let source = activeSourceText(for: action)
         guard !source.isEmpty else {
             outputTextView.text = "请先在输入框中写几句话，或先复制一段内容，再点上方 AI 技能。"

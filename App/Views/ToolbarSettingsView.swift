@@ -4,6 +4,11 @@ import UIKit
 /// 键盘工具栏自定义：按钮显隐/排序、拼音预览条、候选栏高度与字号。
 struct ToolbarSettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var previewPreset: KeyboardThemePreset {
+        appState.theme.activePreset(isSystemDark: colorScheme == .dark)
+    }
 
     /// 预设方案
     private enum ToolbarPreset: String, CaseIterable, Identifiable {
@@ -133,85 +138,94 @@ struct ToolbarSettingsView: View {
             && appState.settings.candidateFontSize == d.candidateFontSize
     }
 
-    /// 模拟键盘顶部栏的两种核心形态：
+    /// 模拟键盘顶部栏的两种核心形态（实时同步用户当前键盘皮肤/调色，且支持长文本左右滑动）：
     /// 1) 常规空闲态（左置灵犀 AI + 译，右置剪贴板与设置）
     /// 2) 收到短信验证码或新复制内容时的「全栏独占接管胶囊」
     private var toolbarLivePreview: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let p = previewPreset
+        let barBg = Color(uiColor: HexColor.color(p.toolbarBackground))
+        let keyFill = Color(uiColor: HexColor.color(p.keyFill))
+        let ink = Color(uiColor: HexColor.color(p.keyText))
+        let accent = Color(uiColor: HexColor.color(p.accentFill))
+        let accentText = Color(uiColor: HexColor.color(p.accentText))
+        let hint = Color(uiColor: HexColor.color(p.keyHintText))
+
+        return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("常规空闲态")
+                Text("常规空闲态（跟随当前外观与调色）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(Design.Palette.stone))
-                HStack(spacing: 8) {
-                    if isButtonVisible(.ai) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text("灵犀 AI")
-                                .font(.system(size: 12, weight: .semibold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        if isButtonVisible(.ai) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("灵犀 AI")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundStyle(accent)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(accent.opacity(0.12))
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(accent.opacity(0.28), lineWidth: 0.5))
                         }
-                        .foregroundStyle(Color(Design.Palette.ink))
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
-                        .background(Color(Design.Palette.ink).opacity(0.08))
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(Color(Design.Palette.ink).opacity(0.24), lineWidth: 0.5))
-                    }
-                    if isButtonVisible(.translate) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "character.bubble")
-                                .font(.system(size: 11, weight: .medium))
-                            Text("译")
-                                .font(.system(size: 12, weight: .semibold))
+                        if isButtonVisible(.translate) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "character.bubble")
+                                    .font(.system(size: 11, weight: .medium))
+                                Text("译")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundStyle(ink)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(keyFill)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
                         }
-                        .foregroundStyle(Color(Design.Palette.ink))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color(Design.Palette.surface))
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                        if isButtonVisible(.layout) {
+                            Text("九键")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(ink)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(keyFill)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+                        }
+                        if isButtonVisible(.clipboard) {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(ink)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(keyFill)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+                        }
+                        if isButtonVisible(.settings) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(ink)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(keyFill)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+                        }
                     }
-                    Spacer(minLength: 4)
-                    if isButtonVisible(.layout) {
-                        Text("九键")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 6)
-                            .background(Color(Design.Palette.surface))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
-                    }
-                    if isButtonVisible(.clipboard) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 6)
-                            .background(Color(Design.Palette.surface))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
-                    }
-                    if isButtonVisible(.settings) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 6)
-                            .background(Color(Design.Palette.surface))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
-                    }
+                    .padding(.horizontal, 10)
                 }
-                .padding(.horizontal, 10)
                 .frame(height: 44)
-                .background(Color(Design.Palette.canvas))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                .background(barBg)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("复制文本 / 收到短信验证码时（自动隐藏按钮，整栏接管显示）")
+                Text("复制文本 / 收到短信验证码时（文本区支持左右滑动查看完整内容）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(Design.Palette.stone))
                 HStack(spacing: 6) {
@@ -221,37 +235,39 @@ struct ToolbarSettingsView: View {
                         Text("验证码")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .foregroundStyle(Color(Design.Palette.ink))
+                    .foregroundStyle(accent)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color(Design.Palette.ink).opacity(0.10))
+                    .background(accent.opacity(0.12))
                     .clipShape(Capsule())
 
-                    Text("849201 · 【灵犀】您的登录验证码…")
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        .foregroundStyle(Color(Design.Palette.ink))
-                        .lineLimit(1)
-
-                    Spacer(minLength: 2)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text("849201 · 【灵犀】您的登录验证码为 849201，5分钟内有效，请勿泄露给他人")
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .foregroundStyle(ink)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     Text("填入 849201")
                         .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .foregroundStyle(accentText)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
-                        .background(Color(Design.Palette.ink))
+                        .background(accent)
                         .clipShape(Capsule())
 
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color(Design.Palette.stone))
+                        .foregroundStyle(hint)
                         .padding(4)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 40)
-                .background(Color(Design.Palette.surface))
+                .background(keyFill)
                 .clipShape(Capsule())
-                .overlay(Capsule().stroke(Color(Design.Palette.ink).opacity(0.22), lineWidth: 0.5))
+                .overlay(Capsule().stroke(accent.opacity(0.24), lineWidth: 0.5))
             }
         }
         .padding(.vertical, 4)
@@ -261,39 +277,44 @@ struct ToolbarSettingsView: View {
         sortedItems.first(where: { $0.buttonID == id })?.isVisible ?? true
     }
 
-    /// 模拟候选栏预览：高度/字号随滑杆即时变化；观感对齐键盘（首选主题色淡底，次选 hairline 描边）
+    /// 模拟候选栏预览：高度/字号/配色随设置与调色即时变化；支持左右滑动浏览更多候选
     private var candidateBarPreview: some View {
-        let words = ["灵犀", "输入法", "候选栏"]
+        let p = previewPreset
+        let barBg = Color(uiColor: HexColor.color(p.toolbarBackground))
+        let ink = Color(uiColor: HexColor.color(p.keyText))
+        let accent = Color(uiColor: HexColor.color(p.accentFill))
+        let words = ["灵犀", "输入法", "纯白圆角", "候选栏", "左右滑动"]
         let fontSizeText = String(format: "%.1f", appState.settings.candidateFontSize)
-        return HStack(spacing: 6) {
-            ForEach(Array(words.enumerated()), id: \.offset) { idx, word in
-                Text(word)
-                    .lineLimit(1)
-                    .font(.system(
-                        size: CGFloat(appState.settings.candidateFontSize),
-                        weight: idx == 0 ? .semibold : .regular
-                    ))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        idx == 0 ? Color(Design.Palette.ink).opacity(0.08) : Color.clear
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(
-                                idx == 0 ? Color.clear : Color(Design.Palette.hairline),
-                                lineWidth: 0.5
-                            )
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(words.enumerated()), id: \.offset) { idx, word in
+                    Text(word)
+                        .lineLimit(1)
+                        .font(.system(
+                            size: CGFloat(appState.settings.candidateFontSize),
+                            weight: idx == 0 ? .semibold : .regular
+                        ))
+                        .foregroundStyle(idx == 0 ? accent : ink)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            idx == 0 ? accent.opacity(0.12) : Color.clear
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(
+                                    idx == 0 ? Color.clear : ink.opacity(0.14),
+                                    lineWidth: 0.5
+                                )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 6)
         }
-        .padding(.horizontal, 6)
         .frame(height: CGFloat(appState.settings.candidateBarHeight))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(Design.Palette.canvas))
+        .background(barBg)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("候选栏预览")

@@ -2,11 +2,29 @@ import SwiftUI
 import UIKit
 
 struct OnboardingGuideView: View {
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: appState.isKeyboardEnabled ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(appState.isKeyboardEnabled ? Color(Design.Palette.success) : Color.orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(appState.isKeyboardEnabled ? "灵犀输入法已在系统启用" : "尚未检测到灵犀键盘启用")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Text(appState.isKeyboardEnabled ? "可以关闭本页，直接回到首页试打体验纯白圆角键盘。" : "按下方 3 步开启后回到本 App，状态会自动变绿。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Section {
                     guideRow(step: "1", title: "前往系统设置", detail: "点击下方「打开系统设置」，进入「灵犀输入法 -> 键盘」。")
                     guideRow(step: "2", title: "开启灵犀键盘", detail: "打开「灵犀输入法」开关；如果列表里没有，请在 系统设置 -> 通用 -> 键盘 -> 键盘 -> 添加新键盘 中选择「灵犀输入法」。")

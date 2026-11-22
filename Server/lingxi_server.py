@@ -21,6 +21,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -44,6 +45,27 @@ PBKDF2_ITERATIONS = 100_000
 ACCESS_TOKEN_TTL_SECONDS = 3600 * 24
 REFRESH_TOKEN_TTL_SECONDS = 3600 * 24 * 30
 REPLAY_WINDOW_SECONDS = 300  # L3: 5 分钟防重放时间窗
+
+
+def detect_lan_ip() -> str:
+    """自动探测当前主机的局域网 IPv4 地址（仅通过 UDP 路由表探测，不发送外网流量）。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    try:
+        hostname_ip = socket.gethostbyname(socket.gethostname())
+        if hostname_ip and not hostname_ip.startswith("127."):
+            return hostname_ip
+    except OSError:
+        pass
+    return "127.0.0.1"
 
 
 # =============================================================================
@@ -1910,7 +1932,12 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/dashboard/overview":
-                self._send_json(HTTPStatus.OK, self.db.dashboard_overview())
+                overview = self.db.dashboard_overview()
+                port = self.server.server_address[1]
+                lan_ip = detect_lan_ip()
+                overview["lanURL"] = f"http://{lan_ip}:{port}"
+                overview["dashboardURL"] = f"http://{lan_ip}:{port}/dashboard"
+                self._send_json(HTTPStatus.OK, overview)
                 return
 
             if path == "/api/v1/health":
@@ -2519,7 +2546,12 @@ def main() -> None:
         return
 
     httpd = create_server(args.host, args.port, Path(args.db))
-    print(f"灵犀输入法云端服务与 Web 控制台已启动: http://{args.host}:{args.port}/dashboard (DB: {args.db})")
+    lan_ip = detect_lan_ip()
+    print(f"灵犀输入法云端服务与 Web 控制台已启动 (DB: {args.db})")
+    print(f"  - 本机 Web 控制台: http://127.0.0.1:{args.port}/dashboard")
+    print(f"  - iPhone 局域网接入地址: http://{lan_ip}:{args.port}")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("  提示: 如需同一 Wi-Fi 下的 iPhone 直连，请使用 --host 0.0.0.0 启动。")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

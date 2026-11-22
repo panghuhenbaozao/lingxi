@@ -28,7 +28,7 @@ final class ClipboardPanelView: UIView {
     private let clearUnpinnedButton = ActionClosureButton(type: .system)
     private let backButton = ActionClosureButton(type: .system)
 
-    private let scrollView = UIScrollView()
+    private let scrollView = LingxiScrollView()
     private let listStack = UIStackView()
 
     private var currentTab: Tab = .history
@@ -120,10 +120,12 @@ final class ClipboardPanelView: UIView {
         backButton.backgroundColor = theme.specialKeyFill
         backButton.setTitleColor(theme.keyText, for: .normal)
         backButton.layer.cornerRadius = 8
+        backButton.layer.cornerCurve = .continuous
 
         clearUnpinnedButton.backgroundColor = theme.specialKeyFill
         clearUnpinnedButton.setTitleColor(theme.keyHintText, for: .normal)
         clearUnpinnedButton.layer.cornerRadius = 8
+        clearUnpinnedButton.layer.cornerCurve = .continuous
 
         rebuildPasteControl(theme: theme)
         rebuildHeader()
@@ -157,6 +159,7 @@ final class ClipboardPanelView: UIView {
             btn.backgroundColor = active ? theme.accentFill : theme.specialKeyFill
             btn.setTitleColor(active ? theme.accentText : theme.keyText, for: .normal)
             btn.layer.cornerRadius = 8
+            btn.layer.cornerCurve = .continuous
             btn.actionHandler = { [weak self] in
                 self?.currentTab = tab
                 self?.rebuildHeader()
@@ -203,8 +206,9 @@ final class ClipboardPanelView: UIView {
 
     private func makeClipboardRow(item: ClipboardItem, theme: ResolvedTheme) -> UIView {
         let card = UIView()
-        card.backgroundColor = theme.keyFill.withAlphaComponent(0.88)
+        card.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
         card.layer.cornerRadius = 10
+        card.layer.cornerCurve = .continuous
 
         let rowStack = UIStackView()
         rowStack.axis = .vertical

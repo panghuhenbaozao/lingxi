@@ -34,9 +34,30 @@ struct TypingStatsView: View {
                 dangerSection
             } else {
                 Section {
-                    Toggle("打字统计（仅本机按天计数）", isOn: $appState.settings.typingStatsEnabled)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("零原文 · 纯本机打字习惯诊断", systemImage: "lock.shield.fill")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(Color(Design.Palette.ink))
+                        Text("开启后仅在本机 App Group 统计每日字数趋势、24 小时昼夜节律与 16 组拼音易混音（如 zh/z、an/ang），自动反哺引擎调优建议。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            ForEach(["30天趋势", "24h 节律", "易混音诊断"], id: \.self) { tag in
+                                Text(tag)
+                                    .font(.caption2.bold())
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color(Design.Palette.surface))
+                                    .foregroundStyle(Color(Design.Palette.ink))
+                                    .clipShape(Capsule())
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+
+                    Toggle("开启本机打字统计与画像", isOn: $appState.settings.typingStatsEnabled)
                 } footer: {
-                    Text("开启后，键盘在本机按天记录字数、活跃时段与易混音统计；密码、邮箱、网址输入框自动跳过，数据可随时一键清除。")
+                    Text("密码、邮箱、网址输入框自动跳过；统计数据永不记录任何原文，可随时一键清空。")
                 }
             }
         }

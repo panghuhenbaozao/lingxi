@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct AISettingsView: View {
     @EnvironmentObject private var appState: AppState
@@ -19,29 +20,44 @@ struct AISettingsView: View {
                         }
                     }
 
-                    // 一键主流服务商模板预设
+                    // 一键主流服务商模板预设（自动高亮当前选中模型）
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            providerQuickPreset("Gemini 3.8 Flash") {
+                            providerQuickPreset(
+                                "Gemini 3.8 Flash",
+                                isActive: appState.aiConfig.provider == .gemini && appState.aiConfig.geminiModel == GeminiModelOption.flash38.rawValue
+                            ) {
                                 appState.aiConfig.provider = .gemini
                                 appState.aiConfig.geminiModel = GeminiModelOption.flash38.rawValue
                             }
-                            providerQuickPreset("DeepSeek V3") {
+                            providerQuickPreset(
+                                "DeepSeek V3",
+                                isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("deepseek.com")
+                            ) {
                                 appState.aiConfig.provider = .openAICompatible
                                 appState.aiConfig.openAIBaseURL = "https://api.deepseek.com/v1"
                                 appState.aiConfig.openAIModel = "deepseek-chat"
                             }
-                            providerQuickPreset("通义千问 Qwen") {
+                            providerQuickPreset(
+                                "通义千问 Qwen",
+                                isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("dashscope.aliyuncs.com")
+                            ) {
                                 appState.aiConfig.provider = .openAICompatible
                                 appState.aiConfig.openAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
                                 appState.aiConfig.openAIModel = "qwen-plus"
                             }
-                            providerQuickPreset("SiliconFlow") {
+                            providerQuickPreset(
+                                "SiliconFlow",
+                                isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("siliconflow.cn")
+                            ) {
                                 appState.aiConfig.provider = .openAICompatible
                                 appState.aiConfig.openAIBaseURL = "https://api.siliconflow.cn/v1"
                                 appState.aiConfig.openAIModel = "deepseek-ai/DeepSeek-V3"
                             }
-                            providerQuickPreset("本地 Ollama") {
+                            providerQuickPreset(
+                                "本地 Ollama",
+                                isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("11434")
+                            ) {
                                 appState.aiConfig.provider = .openAICompatible
                                 appState.aiConfig.openAIBaseURL = "http://127.0.0.1:11434/v1"
                                 appState.aiConfig.openAIModel = "qwen2.5:7b"
@@ -182,17 +198,17 @@ struct AISettingsView: View {
         }
     }
 
-    private func providerQuickPreset(_ title: String, action: @escaping () -> Void) -> some View {
+    private func providerQuickPreset(_ title: String, isActive: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .font(.caption.bold())
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 11)
                 .padding(.vertical, 6)
-                .background(Color(Design.Palette.surface))
-                .foregroundStyle(Color(Design.Palette.ink))
+                .background(isActive ? Color(Design.Palette.ink) : Color(Design.Palette.surface))
+                .foregroundStyle(isActive ? Color(Design.Palette.canvas) : Color(Design.Palette.ink))
                 .clipShape(Capsule())
                 .overlay(
-                    Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 1)
+                    Capsule().stroke(isActive ? Color.clear : Color(Design.Palette.hairline), lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)
@@ -200,7 +216,7 @@ struct AISettingsView: View {
 
     @ViewBuilder
     private func apiKeyField(title: String, placeholder: String, text: Binding<String>) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             if revealKey {
                 TextField(placeholder, text: text)
                     .textInputAutocapitalization(.never)
@@ -209,6 +225,17 @@ struct AISettingsView: View {
                 SecureField(placeholder, text: text)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+            }
+            if text.wrappedValue.isEmpty {
+                Button("粘贴") {
+                    if let pasted = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !pasted.isEmpty {
+                        text.wrappedValue = pasted
+                    }
+                }
+                .font(.caption.bold())
+                .foregroundStyle(Color(Design.Palette.ink))
+                .buttonStyle(.plain)
             }
             Button {
                 revealKey.toggle()

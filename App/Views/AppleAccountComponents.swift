@@ -22,6 +22,21 @@ struct UserAvatarView: View {
         return "灵"
     }
 
+    static let avatarGradients: [(name: String, top: String, bottom: String)] = [
+        ("墨玉", "#1C1C1E", "#48484A"),
+        ("极光蓝", "#0A84FF", "#0055D4"),
+        ("翡翠绿", "#248A3D", "#17976A"),
+        ("琥珀金", "#FF9F0A", "#C97A00"),
+        ("玫瑰粉", "#FF375F", "#C82353"),
+        ("星辰紫", "#5E5CE6", "#3634A3")
+    ]
+
+    private var activeGradientColors: [Color] {
+        let idx = max(0, min(Self.avatarGradients.count - 1, appState.cloudConfig.avatarThemeIndex))
+        let g = Self.avatarGradients[idx]
+        return [Color(hexColor: HexColor(g.top)), Color(hexColor: HexColor(g.bottom))]
+    }
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if let img = appState.userAvatarImage {
@@ -36,14 +51,14 @@ struct UserAvatarView: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [Color(Design.Palette.ink), Color(Design.Palette.slate)],
+                                colors: activeGradientColors,
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                     Text(monogram)
                         .font(.system(size: size * 0.42, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .foregroundStyle(Color.white)
                 }
                 .frame(width: size, height: size)
             } else {

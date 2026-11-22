@@ -313,6 +313,7 @@
     </div>
     <div class="toolbar-actions">
       <span class="badge"><span class="dot-green"></span> <span id="srv-status">服务在线 v4.0</span></span>
+      <button class="btn mono" id="lan-url-btn" onclick="copyLanURL()" title="点击复制 iPhone 局域网服务器地址">📱 探测局域网地址…</button>
       <button class="btn" onclick="seedDemoData()">✨ 注入演示打字与词库样本</button>
       <button class="btn" onclick="refreshDashboard()">↻ 刷新数据</button>
       <button class="btn" onclick="toggleTheme()">◑ 亮/暗墨玉</button>
@@ -423,9 +424,13 @@
 
     <!-- 4. 用户打字习惯画像报表 -->
     <section class="card">
-      <div class="card-header">
+      <div class="card-header" style="flex-wrap: wrap;">
         <div class="card-title">👤 客户 / 用户打字习惯画像与智能引擎调优报表</div>
-        <span class="badge">实时计算 · 零原文存储</span>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <input id="profile-search" class="input" style="min-width:190px; padding:6px 10px; font-size:12px;" placeholder="搜索用户名、邮箱、方案或标签…" oninput="filterProfiles()" />
+          <button class="btn" style="padding:6px 12px; font-size:12px;" onclick="exportProfilesJSON()">📥 导出画像 JSON</button>
+          <span class="badge">实时计算 · 零原文存储</span>
+        </div>
       </div>
       <div style="overflow-x: auto;">
         <table>
@@ -501,6 +506,58 @@
 
   <script>
     let relayEventSource = null;
+    let lastOverviewData = null;
+    let currentLanURL = '';
+
+    function escHTML(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function copyLanURL() {
+      const target = currentLanURL || window.location.origin;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(target).then(() => {
+          showToast(`已复制手机端接入地址：${target}`);
+        }).catch(() => showToast(`手机端地址：${target}`));
+      } else {
+        showToast(`手机端地址：${target}`);
+      }
+    }
+
+    function exportProfilesJSON() {
+      if (!lastOverviewData) {
+        showToast('数据尚未加载，请先刷新');
+        return;
+      }
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        version: lastOverviewData.version || '4.0.3',
+        lanURL: lastOverviewData.lanURL || window.location.origin,
+        stats: lastOverviewData.stats || {},
+        aggregate: lastOverviewData.aggregate || {},
+        profiles: lastOverviewData.profiles || []
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lingxi-analytics-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('已导出灵犀用户画像与聚合指标 JSON 报表');
+    }
+
+    function filterProfiles() {
+      const profiles = (lastOverviewData && lastOverviewData.profiles) ? lastOverviewData.profiles : [];
+      renderProfilesTable(profiles);
+    }
 
     function showToast(msg) {
       const el = document.getElementById('toast');
@@ -525,7 +582,11 @@
     async function refreshDashboard() {
       try {
         const data = await apiJSON('GET', '/api/v1/dashboard/overview');
-        document.getElementById('srv-status').textContent = `服务在线 v${data.version || '4.0.0'} · 限流保护开启`;
+        lastOverviewData = data;
+        currentLanURL = data.lanURL || window.location.origin;
+        const lanBtn = document.getElementById('lan-url-btn');
+        if (lanBtn) lanBtn.textContent = `📱 ${currentLanURL}`;
+        document.getElementById('srv-status').textContent = `服务在线 v${data.version || '4.0.3'} · 限流保护开启`;
         document.getElementById('kpi-users').textContent = `${data.stats.users} / ${data.stats.optedInUsers}`;
         document.getElementById('kpi-sync').textContent = data.stats.syncRecords;
         document.getElementById('kpi-habits').textContent = data.stats.habitEvents;
@@ -642,20 +703,36 @@
 
     function renderProfilesTable(profiles) {
       const tbody = document.getElementById('profiles-tbody');
-      if (!profiles.length) {
-        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--text-stone)">暂无用户画像，请点击右上角「✨ 注入演示打字与词库样本」立即体验。</td></tr>`;
+      const queryEl = document.getElementById('profile-search');
+      const q = (queryEl ? queryEl.value : '').trim().toLowerCase();
+      const filtered = !q ? profiles : profiles.filter(p => {
+        const haystack = [
+          p.username,
+          p.email,
+          p.userID,
+          p.primaryScheme,
+          p.primaryLayout,
+          ...(p.habitTags || [])
+        ].join(' ').toLowerCase();
+        return haystack.includes(q);
+      });
+      if (!filtered.length) {
+        const emptyMsg = profiles.length
+          ? `未找到包含「${escHTML(q)}」的用户画像。`
+          : '暂无用户画像，请点击右上角「✨ 注入演示打字与词库样本」立即体验。';
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--text-stone)">${emptyMsg}</td></tr>`;
         return;
       }
-      tbody.innerHTML = profiles.map(p => `
+      tbody.innerHTML = filtered.map(p => `
         <tr>
-          <td><strong>${p.username || '灵犀用户'}</strong><br/><span class="mono" style="font-size:11px;color:var(--text-stone)">${p.email || p.userID.slice(0, 8)}</span></td>
-          <td class="mono">${p.primaryScheme} / ${p.primaryLayout}</td>
-          <td class="mono"><strong>${p.avgCPM}</strong> / ${p.peakCPM} CPM</td>
-          <td class="mono">${p.avgWordLength} 字/词</td>
+          <td><strong>${escHTML(p.username || '灵犀用户')}</strong><br/><span class="mono" style="font-size:11px;color:var(--text-stone)">${escHTML(p.email || (p.userID || '').slice(0, 8))}</span></td>
+          <td class="mono">${escHTML(p.primaryScheme)} / ${escHTML(p.primaryLayout)}</td>
+          <td class="mono"><strong>${escHTML(p.avgCPM)}</strong> / ${escHTML(p.peakCPM)} CPM</td>
+          <td class="mono">${escHTML(p.avgWordLength)} 字/词</td>
           <td class="mono">${(p.backspaceRate * 100).toFixed(1)}% / ${(p.undoLearnRate * 100).toFixed(1)}%</td>
           <td class="mono">${(p.glideRatio * 100).toFixed(1)}%</td>
-          <td><div class="tag-list">${(p.habitTags || []).map(t => `<span class="tag">${t}</span>`).join('')}</div></td>
-          <td style="font-size:11.5px;color:var(--text-slate)">${(p.tuningRecommendations || []).map(r => `• ${r.title}`).join('<br/>')}</td>
+          <td><div class="tag-list">${(p.habitTags || []).map(t => `<span class="tag">${escHTML(t)}</span>`).join('')}</div></td>
+          <td style="font-size:11.5px;color:var(--text-slate)">${(p.tuningRecommendations || []).map(r => `• ${escHTML(r.title)}`).join('<br/>')}</td>
         </tr>
       `).join('');
     }
@@ -714,15 +791,30 @@
       const items = res.items || [];
       const feed = document.getElementById('relay-feed');
       if (!items.length) return;
-      feed.innerHTML = items.map(it => `
-        <div class="relay-item">
-          <div class="relay-text">
-            ${it.extractedCode ? `<span class="tag" style="margin-right:6px">💬 验证码 ${it.extractedCode}</span>` : `<span class="tag" style="margin-right:6px">${it.senderDevice || '跨屏'}</span>`}
-            ${it.contentText}
-          </div>
-          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="navigator.clipboard.writeText('${it.contentText.replace(/'/g, "\\'")}');showToast('已复制到电脑剪贴板')">复制</button>
-        </div>
-      `).join('');
+      feed.innerHTML = '';
+      items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'relay-item';
+        const textWrap = document.createElement('div');
+        textWrap.className = 'relay-text';
+        const badge = document.createElement('span');
+        badge.className = 'tag';
+        badge.style.marginRight = '6px';
+        badge.textContent = it.extractedCode ? `💬 验证码 ${it.extractedCode}` : (it.senderDevice || '跨屏');
+        textWrap.appendChild(badge);
+        textWrap.appendChild(document.createTextNode(it.contentText || ''));
+        const btn = document.createElement('button');
+        btn.className = 'btn';
+        btn.style.cssText = 'padding:4px 10px;font-size:11px';
+        btn.textContent = '复制';
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(it.contentText || '');
+          showToast('已复制到电脑剪贴板');
+        });
+        row.appendChild(textWrap);
+        row.appendChild(btn);
+        feed.appendChild(row);
+      });
     }
 
     function connectRelayStream() {

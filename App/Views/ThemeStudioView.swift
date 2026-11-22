@@ -16,6 +16,15 @@ extension Color {
 
     func toHexRGBString() -> String {
         let ui = UIColor(self)
+        if let srgbSpace = CGColorSpace(name: CGColorSpace.sRGB),
+           let converted = ui.cgColor.converted(to: srgbSpace, intent: .defaultIntent, options: nil),
+           let comps = converted.components,
+           comps.count >= 3 {
+            let r = Int((max(0, min(1, comps[0])) * 255).rounded())
+            let g = Int((max(0, min(1, comps[1])) * 255).rounded())
+            let b = Int((max(0, min(1, comps[2])) * 255).rounded())
+            return String(format: "#%02X%02X%02X", r, g, b)
+        }
         var r: CGFloat = 0
         var g: CGFloat = 0
         var b: CGFloat = 0
@@ -28,6 +37,11 @@ extension Color {
                 Int((max(0, min(1, b)) * 255).rounded())
             )
         }
+        var white: CGFloat = 0
+        if ui.getWhite(&white, alpha: &a) {
+            let v = Int((max(0, min(1, white)) * 255).rounded())
+            return String(format: "#%02X%02X%02X", v, v, v)
+        }
         return "#FFFFFF"
     }
 }
@@ -37,6 +51,7 @@ struct ThemeStudioView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var previewBarState: Int = 0 // 0=常规双簇态, 1=打字候选态, 2=验证码全栏接管态
+    @State private var pressedPreviewKey: String?
     @State private var themeShareStatus: String?
 
     private var activePreset: KeyboardThemePreset {
@@ -75,26 +90,45 @@ struct ThemeStudioView: View {
     }
 
     private var appearanceModeCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let isPureWhiteActive = (activePreset.id == "lingxi_pure" && !appState.theme.hasCustomColorOverrides)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("外观模式（纯白为主 · 可跟随系统）", systemImage: "circle.lefthalf.filled")
                     .font(.subheadline.bold())
                     .foregroundStyle(Color(Design.Palette.ink))
                 Spacer()
-                Text(appState.theme.appearanceMode.displayName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if !isPureWhiteActive {
+                    Button("一键纯白") {
+                        appState.theme.applyPresetSelection(
+                            KeyboardThemePreset.find(id: "lingxi_pure"),
+                            isSystemDark: colorScheme == .dark
+                        )
+                    }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color(Design.Palette.ink))
+                    .foregroundStyle(Color(Design.Palette.canvas))
+                    .clipShape(Capsule())
+                    .buttonStyle(.plain)
+                } else {
+                    Text("纯白已启用")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
             }
-            Picker("键盘外观模式", selection: $appState.theme.appearanceMode) {
+            Picker("键盘外观模式", selection: Binding(
+                get: { appState.theme.appearanceMode },
+                set: { newMode in
+                    appState.theme.applyAppearanceMode(newMode)
+                }
+            )) {
                 ForEach(KeyboardAppearanceMode.allCases) { mode in
                     Text(mode.displayName).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
-            .onChange(of: appState.theme.appearanceMode) { newMode in
-                appState.theme.adaptiveDarkMode = (newMode == .followSystem)
-            }
-            Text("「跟随系统」在浅色模式下展示苹果质感纯白圆角键帽，夜间自动切换为暗夜石墨；点击任意预设主题或自由调色也会立即生效。")
+            Text("「跟随系统」白天自动展示纯白圆角键帽、夜间切换深色石墨；选择「浅色主题」可全天候固定纯白，也可在下方选「雪域全白」或自由调色。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -176,10 +210,12 @@ struct ThemeStudioView: View {
                         .foregroundStyle(Color(hexColor: preset.candidateHighlight))
                         .clipShape(Capsule())
 
-                    Text("849201 · 【灵犀】5分钟有效")
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                        .lineLimit(1)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text("849201 · 【灵犀】您的登录验证码是 849201，5分钟内有效（可左右滑动查看全文）")
+                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
 
                     Spacer()
 
@@ -241,19 +277,32 @@ struct ThemeStudioView: View {
     }
 
     private func mockKey(_ label: String, fill: Color, text: Color, radius: Double, widthWeight: Double = 1.0) -> some View {
-        Text(label)
-            .font(.system(size: label.count > 2 ? 11 : 14, weight: appState.theme.boldKeyLabel ? .semibold : .regular))
-            .foregroundStyle(text)
-            .frame(maxWidth: .infinity)
-            .frame(height: 32)
-            .background(fill)
-            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(Color.black.opacity(activePreset.isDark ? 0.25 : 0.12), lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(activePreset.isDark ? 0.35 : 0.16), radius: 0.6, x: 0, y: 1)
-            .layoutPriority(widthWeight)
+        let isPressed = (pressedPreviewKey == label)
+        let activeFill = isPressed ? Color(hexColor: activePreset.keyPressedFill) : fill
+        return Button {
+            pressedPreviewKey = label
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                if pressedPreviewKey == label {
+                    pressedPreviewKey = nil
+                }
+            }
+        } label: {
+            Text(label)
+                .font(.system(size: label.count > 2 ? 11 : 14, weight: appState.theme.boldKeyLabel ? .semibold : .regular))
+                .foregroundStyle(text)
+                .frame(maxWidth: .infinity)
+                .frame(height: 32)
+                .background(activeFill)
+                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .stroke(Color.black.opacity(activePreset.isDark ? 0.25 : 0.14), lineWidth: 0.5)
+                )
+                .shadow(color: Color.black.opacity(isPressed ? 0 : (activePreset.isDark ? 0.35 : 0.18)), radius: 0.6, x: 0, y: 1)
+                .offset(y: isPressed ? 1 : 0)
+        }
+        .buttonStyle(.plain)
+        .layoutPriority(widthWeight)
     }
 
     // MARK: - 预设主题
@@ -267,21 +316,7 @@ struct ThemeStudioView: View {
                 ForEach(KeyboardThemePreset.presets) { preset in
                     let isSelected = (activePreset.id == preset.id && !appState.theme.hasCustomColorOverrides)
                     Button {
-                        appState.theme.selectedThemeID = preset.id
-                        appState.theme.clearCustomColors()
-                        if preset.isDark {
-                            appState.theme.darkThemeID = preset.id
-                            if appState.theme.appearanceMode == .alwaysLight || (appState.theme.appearanceMode == .followSystem && colorScheme != .dark) {
-                                appState.theme.appearanceMode = .alwaysDark
-                                appState.theme.adaptiveDarkMode = false
-                            }
-                        } else {
-                            appState.theme.lightThemeID = preset.id
-                            if appState.theme.appearanceMode == .alwaysDark || (appState.theme.appearanceMode == .followSystem && colorScheme == .dark) {
-                                appState.theme.appearanceMode = .alwaysLight
-                                appState.theme.adaptiveDarkMode = false
-                            }
-                        }
+                        appState.theme.applyPresetSelection(preset, isSystemDark: colorScheme == .dark)
                     } label: {
                         HStack(spacing: 10) {
                             ZStack {
@@ -349,6 +384,25 @@ struct ThemeStudioView: View {
             ColorPicker("字母键帽颜色", selection: hexColorBinding(\.customKeyFillHex, fallback: activePreset.keyFill), supportsOpacity: false)
             ColorPicker("按键文字颜色", selection: hexColorBinding(\.customKeyTextHex, fallback: activePreset.keyText), supportsOpacity: false)
             ColorPicker("发送键与强调色", selection: hexColorBinding(\.customAccentHex, fallback: activePreset.accentFill), supportsOpacity: false)
+
+            let ratio = activePreset.keyFill.contrastRatio(with: activePreset.keyText)
+            if ratio < 3.5 {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("按键文字与键帽对比度偏低 (\(String(format: "%.1f", ratio)):1)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("自动优化") {
+                        appState.theme.customKeyTextHex = activePreset.keyFill.isDarkColor ? "#F3F4F6" : "#0A0A0A"
+                    }
+                    .font(.caption.bold())
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
