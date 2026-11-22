@@ -803,4 +803,152 @@ final class LingxiTests: XCTestCase {
         let second = SyncInfra.deviceIdentity()
         XCTAssertEqual(first, second, "设备身份必须稳定（LWW 决胜第二排序键的前提）")
     }
+
+    // MARK: - M3-pre 同步引擎（SyncEngine / SnapshotSyncSource）
+
+    /// 测试用同步服务桩：记录推送批次与拉取调用，按需返回拉取页与冲突
+    private final class MockSyncService: SyncService {
+        var pushedBatches: [[SyncChange]] = []
+        var pullCalls: [SyncNamespace] = []
+        var pullResult: SyncPage
+        var conflicts: [SyncConflict]
+
+        init(pullResult: SyncPage = SyncPage(changes: [], nextCursor: 0, hasMore: false),
+             conflicts: [SyncConflict] = []) {
+            self.pullResult = pullResult
+            self.conflicts = conflicts
+        }
+
+        func pull(namespace: SyncNamespace, since: UInt64) async throws -> SyncPage {
+            pullCalls.append(namespace)
+            return pullResult
+        }
+
+        func push(_ changes: [SyncChange]) async throws -> [SyncConflict] {
+            pushedBatches.append(changes)
+            return conflicts
+        }
+    }
+
+    /// 引擎测试夹具：测试专用文件名 + 注入时钟 + 独立账本文件，绝不触碰真实用户数据
+    private func makeEngineFixture(_ mock: SyncService, testFile: String, ledgerFile: String) -> (SyncEngine, URL) {
+        let engine = SyncEngine(
+            sync: mock,
+            source: SnapshotSyncSource(entries: [.init(namespace: .settings, fileName: testFile)]),
+            clock: LamportClock(),
+            deviceID: "test-device",
+            ledgerStore: SyncLedgerStore(fileName: ledgerFile)
+        )
+        return (engine, AppGroup.fileURL(testFile))
+    }
+
+    func testSyncEngineLocalPushThenDedup() async throws {
+        let mock = MockSyncService()
+        let (engine, url) = makeEngineFixture(mock, testFile: "test_sync_a.json", ledgerFile: "test_ledger_a.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "v1".write(to: url, atomically: true, encoding: .utf8)
+        let r1 = try await engine.syncNow()
+        XCTAssertEqual(r1.pushed, 1)
+        XCTAssertEqual(mock.pushedBatches.count, 1)
+        XCTAssertEqual(r1.applied, 0)
+
+        let r2 = try await engine.syncNow()
+        XCTAssertEqual(r2.pushed, 0, "内容未变不得重复推送（账本字节级去重）")
+        XCTAssertEqual(mock.pushedBatches.count, 1)
+
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        let r3 = try await engine.syncNow()
+        XCTAssertEqual(r3.pushed, 1, "内容变化后再次推送新版本")
+    }
+
+    func testSyncEngineRemoteWinOverwritesLocalFile() async throws {
+        let remoteChange = SyncChange(
+            namespace: .settings, key: "main",
+            ciphertext: Data("remote-v9".utf8),
+            lamportTS: 99, deviceID: "device-b"
+        )
+        let mock = MockSyncService(pullResult: SyncPage(changes: [remoteChange], nextCursor: 99, hasMore: false))
+        let (engine, url) = makeEngineFixture(mock, testFile: "test_sync_b.json", ledgerFile: "test_ledger_b.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "local-v1".write(to: url, atomically: true, encoding: .utf8)
+        let report = try await engine.syncNow()
+
+        XCTAssertEqual(report.applied, 1, "远端更高时间戳胜出并落盘")
+        XCTAssertEqual(try Data(contentsOf: url), Data("remote-v9".utf8))
+        XCTAssertEqual(mock.pullCalls, [.settings])
+        XCTAssertEqual(report.pushed, 1)
+    }
+
+    func testSyncEngineTombstoneDeletesLocalFile() async throws {
+        let tombstone = SyncChange(
+            namespace: .settings, key: "main",
+            ciphertext: Data(), lamportTS: 50, deviceID: "device-b", tombstone: true
+        )
+        let mock = MockSyncService(pullResult: SyncPage(changes: [tombstone], nextCursor: 50, hasMore: false))
+        let (engine, url) = makeEngineFixture(mock, testFile: "test_sync_c.json", ledgerFile: "test_ledger_c.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "to-be-deleted".write(to: url, atomically: true, encoding: .utf8)
+        let report = try await engine.syncNow()
+        XCTAssertEqual(report.applied, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "墓碑胜出后本地文件应被删除")
+    }
+
+    func testSyncEngineLocalWinKeepsLocalFile() async throws {
+        let staleRemote = SyncChange(
+            namespace: .settings, key: "main",
+            ciphertext: Data("stale".utf8),
+            lamportTS: 0, deviceID: "device-old"
+        )
+        let mock = MockSyncService(pullResult: SyncPage(changes: [staleRemote], nextCursor: 0, hasMore: false))
+        let (engine, url) = makeEngineFixture(mock, testFile: "test_sync_d.json", ledgerFile: "test_ledger_d.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "local-current".write(to: url, atomically: true, encoding: .utf8)
+        let report = try await engine.syncNow()
+        XCTAssertEqual(report.applied, 0, "本地时间戳更高时远端旧记录不落盘")
+        XCTAssertEqual(try Data(contentsOf: url), Data("local-current".utf8))
+    }
+
+    func testSyncEngineWithLocalNoopIsHarmless() async throws {
+        let engine = SyncEngine(
+            sync: LocalNoopSyncService(),
+            source: SnapshotSyncSource(entries: [.init(namespace: .theme, fileName: "test_sync_e.json")]),
+            clock: LamportClock(),
+            deviceID: "test-device",
+            ledgerStore: SyncLedgerStore(fileName: "test_ledger_e.json")
+        )
+        let url = AppGroup.fileURL("test_sync_e.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try "noop".write(to: url, atomically: true, encoding: .utf8)
+
+        let report = try await engine.syncNow()
+        XCTAssertEqual(report.pushed, 1, "Noop push 语义：无云端数据、无冲突")
+        XCTAssertEqual(report.pulled, 0)
+        XCTAssertEqual(report.applied, 0)
+        XCTAssertEqual(report.conflicts, 0)
+    }
+
+    func testSyncEngineServerConflictWinApplied() async throws {
+        let serverWin = SyncChange(
+            namespace: .settings, key: "main",
+            ciphertext: Data("server-wins".utf8),
+            lamportTS: 100, deviceID: "device-b"
+        )
+        let mock = MockSyncService(
+            pullResult: SyncPage(changes: [], nextCursor: 0, hasMore: false),
+            conflicts: [SyncConflict(namespace: .settings, key: "main", serverRecord: serverWin)]
+        )
+        let (engine, url) = makeEngineFixture(mock, testFile: "test_sync_f.json", ledgerFile: "test_ledger_f.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "local-old".write(to: url, atomically: true, encoding: .utf8)
+        let report = try await engine.syncNow()
+
+        XCTAssertEqual(report.conflicts, 1)
+        XCTAssertEqual(report.applied, 1, "服务端 LWW 胜出记录视为远端最新并落盘")
+        XCTAssertEqual(try Data(contentsOf: url), Data("server-wins".utf8))
+    }
 }
