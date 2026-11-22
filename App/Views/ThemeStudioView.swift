@@ -30,6 +30,7 @@ struct ThemeStudioView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 18) {
+                    appearanceModeCard
                     previewStateSelector
                     previewCard
                     presetGrid
@@ -40,7 +41,7 @@ struct ThemeStudioView: View {
                 .padding()
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("皮肤工坊")
+            .navigationTitle("键盘外观")
             .onChange(of: selectedPhotoItem) { newItem in
                 guard let newItem else { return }
                 Task {
@@ -53,6 +54,38 @@ struct ThemeStudioView: View {
                 }
             }
         }
+    }
+
+    private var appearanceModeCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("外观模式（纯白为主 · 可跟随系统）", systemImage: "circle.lefthalf.filled")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(Color(Design.Palette.ink))
+                Spacer()
+                Text(appState.theme.appearanceMode.displayName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Picker("键盘外观模式", selection: $appState.theme.appearanceMode) {
+                ForEach(KeyboardAppearanceMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: appState.theme.appearanceMode) { newMode in
+                appState.theme.adaptiveDarkMode = (newMode == .followSystem)
+                if newMode == .alwaysLight {
+                    appState.theme.selectedThemeID = "lingxi_pure"
+                }
+            }
+            Text("「跟随系统」在浅色模式下展示苹果质感纯白圆角键帽，夜间自动切换为暗夜石墨；也可手动锁定「始终纯白」或「始终深色」。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var previewStateSelector: some View {
@@ -200,6 +233,11 @@ struct ThemeStudioView: View {
             .frame(height: 32)
             .background(fill)
             .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(Color.black.opacity(activePreset.isDark ? 0.25 : 0.12), lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(activePreset.isDark ? 0.35 : 0.16), radius: 0.6, x: 0, y: 1)
             .layoutPriority(widthWeight)
     }
 

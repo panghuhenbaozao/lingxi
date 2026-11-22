@@ -7,24 +7,51 @@ import UIKit
 struct DictionarySettingsView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("lastBackupExportAt") private var lastBackupExportAt: Double = 0
+    @State private var showAppleSignInSheet = false
 
     var body: some View {
         NavigationStack {
-            Form {
+            List {
+                // 对标 Apple iOS「设置」顶部第一栏：圆形头像 + Apple Account 卡片
                 Section {
-                    settingsLink(icon: "icloud.and.arrow.up", tint: Design.Palette.ink, title: "云端账号与打字习惯画像",
-                                 subtitle: cloudAccountSubtitle) {
-                        CloudAccountView()
+                    if appState.isCloudAuthenticated {
+                        NavigationLink {
+                            CloudAccountView()
+                        } label: {
+                            appleAccountHeaderRow(
+                                title: appState.cloudConfig.username.isEmpty ? "灵犀账号" : appState.cloudConfig.username,
+                                subtitle: appState.cloudConfig.email.isEmpty ? "E2EE 云同步 · 跨屏剪贴板 · 习惯画像" : appState.cloudConfig.email,
+                                isSignedIn: true
+                            )
+                        }
+                    } else {
+                        Button {
+                            showAppleSignInSheet = true
+                        } label: {
+                            HStack {
+                                appleAccountHeaderRow(
+                                    title: "登录灵犀账号",
+                                    subtitle: "设置端到端同步、跨屏剪贴板与习惯画像",
+                                    isSignedIn: false
+                                )
+                                Image(systemName: "chevron.right")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
+                            CloudAccountView()
+                        } label: {
+                            Label("跨屏剪贴板与自托管服务器设置", systemImage: "laptopcomputer.and.iphone")
+                                .font(.subheadline)
+                                .foregroundStyle(Color(Design.Palette.ink))
+                        }
                     }
-                    settingsLink(icon: "leaf.arrow.triangle.circlepath", tint: Design.Palette.ink, title: "可持续发展 · 三模同步 · 引擎自愈",
-                                 subtitle: sustainabilitySubtitle) {
-                        SustainabilityHubView()
-                    }
-                } header: {
-                    Text("云端账号、多模同步与可持续发展生态")
                 }
 
-                Section {
+                Section("输入体验") {
                     settingsLink(icon: "keyboard", tint: Design.Palette.ink, title: "输入方案与布局",
                                  subtitle: appState.settings.inputScheme.displayName + " · " + appState.settings.layoutMode.displayName) {
                         SchemeLayoutSettingsView()
@@ -51,23 +78,48 @@ struct DictionarySettingsView: View {
                     }
                 }
 
-                Section {
-                    settingsLink(icon: "book.closed", tint: Design.Palette.ink, title: "词库管理",
+                Section("词库、数据与可持续生态") {
+                    settingsLink(icon: "book.closed", tint: Design.Palette.ink, title: "词库管理与社区词包",
                                  subtitle: "自定义短语 \(appState.customWords.count) · 个人词库 \(appState.userWords.count)") {
                         LexiconSettingsView()
                     }
-                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计",
-                                 subtitle: "今日 \(TypingStatsStore.shared.summary().todayChars) 字 · 近 30 天趋势") {
+                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计与本机画像",
+                                 subtitle: "今日 \(TypingStatsStore.shared.summary().todayChars) 字 · 近 30 天与 24h 节律") {
                         TypingStatsView()
                     }
-                    settingsLink(icon: "externaldrive", tint: Design.Palette.ink, title: "备份与恢复",
+                    settingsLink(icon: "externaldrive", tint: Design.Palette.ink, title: "加密备份与恢复",
                                  subtitle: backupSubtitle) {
                         BackupSettingsView()
                     }
+                    settingsLink(icon: "leaf.arrow.triangle.circlepath", tint: Design.Palette.ink, title: "可持续发展 · 三模同步 · 引擎自愈",
+                                 subtitle: sustainabilitySubtitle) {
+                        SustainabilityHubView()
+                    }
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("设置")
+            .sheet(isPresented: $showAppleSignInSheet) {
+                AppleStyleSignInSheet()
+            }
         }
+    }
+
+    private func appleAccountHeaderRow(title: String, subtitle: String, isSignedIn: Bool) -> some View {
+        HStack(spacing: 14) {
+            UserAvatarView(size: 60, showEditBadge: false)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(isSignedIn ? Color(Design.Palette.ink) : Color.accentColor)
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
     }
 
     private var stylishFontName: String {

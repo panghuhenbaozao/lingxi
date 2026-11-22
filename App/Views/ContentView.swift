@@ -8,19 +8,19 @@ struct ContentView: View {
         TabView(selection: $selectedTab) {
             HomeTestView(onSelectTab: { selectedTab = $0 })
                 .tabItem {
-                    Label("体验", systemImage: "keyboard")
+                    Label("灵犀", systemImage: "keyboard")
                 }
                 .tag(0)
 
             ThemeStudioView()
                 .tabItem {
-                    Label("皮肤", systemImage: "paintpalette")
+                    Label("外观", systemImage: "paintpalette")
                 }
                 .tag(1)
 
             AISettingsView()
                 .tabItem {
-                    Label("AI 助手", systemImage: "sparkles")
+                    Label("AI", systemImage: "sparkles")
                 }
                 .tag(2)
 

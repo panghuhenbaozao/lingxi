@@ -60,16 +60,16 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
     static let presets: [KeyboardThemePreset] = [
         KeyboardThemePreset(
             id: "lingxi_pure",
-            name: "极简白",
-            subtitle: "净洁直白 · 线条静美",
+            name: "极简纯白",
+            subtitle: "苹果质感 · 纯白圆角键帽",
             isDark: false,
-            canvasTop: HexColor("#FFFFFF"),
-            canvasBottom: HexColor("#FFFFFF"),
-            toolbarBackground: HexColor("#FFFFFF"),
+            canvasTop: HexColor("#E8EAEF"),
+            canvasBottom: HexColor("#DFE2E8"),
+            toolbarBackground: HexColor("#F4F5F8"),
             keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#D4D7DC"),
-            specialKeyFill: HexColor("#EDEDF0"),
-            specialKeyPressedFill: HexColor("#D4D7DC"),
+            keyPressedFill: HexColor("#D6DBE4"),
+            specialKeyFill: HexColor("#CFD4DD"),
+            specialKeyPressedFill: HexColor("#B9C0CC"),
             accentFill: HexColor("#0A0A0A"),
             accentPressedFill: HexColor("#222222"),
             keyText: HexColor("#0A0A0A"),
@@ -77,8 +77,8 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
             accentText: HexColor("#FFFFFF"),
             candidateText: HexColor("#0A0A0A"),
             candidateHighlight: HexColor("#0A0A0A"),
-            keyShadowHex: HexColor("#E5E7EB"),
-            keyShadowOpacity: 0.1
+            keyShadowHex: HexColor("#898A8D"),
+            keyShadowOpacity: 0.34
         ),
         KeyboardThemePreset(
             id: "lingxi_light",
@@ -219,16 +219,34 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
     }
 }
 
+/// 键盘外观明暗策略（支持跟随系统自动切换，或手动锁定纯白/深色）。
+enum KeyboardAppearanceMode: String, Codable, CaseIterable, Identifiable {
+    case followSystem = "follow_system"
+    case alwaysLight = "always_light"
+    case alwaysDark = "always_dark"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .followSystem: return "跟随系统"
+        case .alwaysLight: return "始终纯白"
+        case .alwaysDark: return "始终深色"
+        }
+    }
+}
+
 /// 用户皮肤自定义配置。
 struct ThemeCustomization: Codable, Equatable {
     var selectedThemeID: String = "lingxi_pure"
     var darkThemeID: String = "midnight_geek"
     var adaptiveDarkMode: Bool = true
+    var appearanceMode: KeyboardAppearanceMode = .followSystem
     var customBackgroundFileName: String? = nil
     var backgroundBlurRadius: Double = 8.0
     var backgroundDimOpacity: Double = 0.25
-    var keyOpacity: Double = 0.94
-    var keyCornerRadius: Double = 7.0
+    var keyOpacity: Double = 0.96
+    var keyCornerRadius: Double = 8.0
     var boldKeyLabel: Bool = false
 
     private static let fileName = "lingxi_theme.json"
@@ -236,6 +254,23 @@ struct ThemeCustomization: Codable, Equatable {
 
     private static var cached: ThemeCustomization?
     private static var cachedMTime: Date?
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        selectedThemeID = try c.decodeIfPresent(String.self, forKey: .selectedThemeID) ?? "lingxi_pure"
+        darkThemeID = try c.decodeIfPresent(String.self, forKey: .darkThemeID) ?? "midnight_geek"
+        adaptiveDarkMode = try c.decodeIfPresent(Bool.self, forKey: .adaptiveDarkMode) ?? true
+        appearanceMode = try c.decodeIfPresent(KeyboardAppearanceMode.self, forKey: .appearanceMode)
+            ?? (adaptiveDarkMode ? .followSystem : .alwaysLight)
+        customBackgroundFileName = try c.decodeIfPresent(String.self, forKey: .customBackgroundFileName)
+        backgroundBlurRadius = try c.decodeIfPresent(Double.self, forKey: .backgroundBlurRadius) ?? 8.0
+        backgroundDimOpacity = try c.decodeIfPresent(Double.self, forKey: .backgroundDimOpacity) ?? 0.25
+        keyOpacity = try c.decodeIfPresent(Double.self, forKey: .keyOpacity) ?? 0.96
+        keyCornerRadius = try c.decodeIfPresent(Double.self, forKey: .keyCornerRadius) ?? 8.0
+        boldKeyLabel = try c.decodeIfPresent(Bool.self, forKey: .boldKeyLabel) ?? false
+    }
 
     static func load(force: Bool = false) -> ThemeCustomization {
         let mtime = AppGroup.modificationDate(of: fileName)
@@ -257,18 +292,28 @@ struct ThemeCustomization: Codable, Equatable {
     }
 
     func activePreset(isSystemDark: Bool) -> KeyboardThemePreset {
-        if adaptiveDarkMode && isSystemDark {
-            let chosen = KeyboardThemePreset.find(id: selectedThemeID)
-            if chosen.isDark {
-                return chosen
+        let chosen = KeyboardThemePreset.find(id: selectedThemeID)
+        let darkPreset: KeyboardThemePreset = {
+            if chosen.isDark { return chosen }
+            let d = KeyboardThemePreset.find(id: darkThemeID)
+            return d.isDark ? d : (KeyboardThemePreset.presets.first(where: { $0.isDark }) ?? d)
+        }()
+        let lightPreset: KeyboardThemePreset = {
+            if !chosen.isDark { return chosen }
+            return KeyboardThemePreset.find(id: "lingxi_pure")
+        }()
+
+        switch appearanceMode {
+        case .followSystem:
+            if adaptiveDarkMode && isSystemDark {
+                return darkPreset
             }
-            let dark = KeyboardThemePreset.find(id: darkThemeID)
-            if dark.isDark {
-                return dark
-            }
-            return KeyboardThemePreset.presets.first(where: { $0.isDark }) ?? dark
+            return lightPreset
+        case .alwaysLight:
+            return lightPreset
+        case .alwaysDark:
+            return darkPreset
         }
-        return KeyboardThemePreset.find(id: selectedThemeID)
     }
 
     var customBackgroundURL: URL? {

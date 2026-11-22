@@ -78,6 +78,8 @@ def main() -> int:
         "centerXAnchor", "centerYAnchor", "constraint", "translatesAutoresizingMaskIntoConstraints",
         "removeFromSuperview", "addSubview", "setNeedsLayout", "layoutIfNeeded", "subviews",
         "arrangedSubviews", "addArrangedSubview", "removeArrangedSubview", "isUserInteractionEnabled",
+        "trimmingCharacters", "components", "lowercased", "uppercased", "replacingOccurrences",
+        "hasPrefix", "hasSuffix", "split", "dropFirst", "dropLast",
     }
     our_roots = [
         "appState", "settings", "theme", "aiConfig", "cloudConfig", "relayConfig", "habitProfile",

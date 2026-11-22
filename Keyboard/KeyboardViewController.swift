@@ -1293,10 +1293,10 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        // 退格重选：紧接上屏后点按 ⌫，撤销已上屏词条、回退误学记录，并恢复原拼音/编码重选
+        // 已上屏后按 ⌫：绝不把旧拼音重新拉回屏幕（避免“打出去的字还在、拼音又回来了”的干扰体验）。
+        // 仅在静默后台撤回刚刚误学的词频记录，然后直接执行标准单字符退格删除。
         if !isRepeat, let selUndo = lastSelectionUndo, !selUndo.isExpired {
             lastSelectionUndo = nil
-            sessionDeleteCount += 1
             sessionUndoLearnCount += 1
             if let rec = selUndo.learnRecord {
                 engine?.userLexicon.undoLearn(rec)
@@ -1306,29 +1306,6 @@ final class KeyboardViewController: UIInputViewController {
             }
             if selUndo.learnRecord != nil || selUndo.extraLearnRecord != nil {
                 engine?.invalidateCache()
-            }
-            if selUndo.inTranslateBuffer && isTranslateMode {
-                if translateSourceBuffer.hasSuffix(selUndo.committedText) {
-                    translateSourceBuffer.removeLast(selUndo.committedText.count)
-                    scheduleLiveTranslation(for: translateSourceBuffer)
-                }
-                lastCommittedWord = selUndo.prevLastCommittedWord
-                rawComposing = selUndo.rawComposing
-                recomputeCandidates()
-                return
-            } else if !selUndo.inTranslateBuffer && !isTranslateMode {
-                let before = textDocumentProxy.documentContextBeforeInput ?? ""
-                if before.isEmpty || before.hasSuffix(selUndo.committedText) {
-                    performEdit {
-                        for _ in 0..<selUndo.committedText.count {
-                            self.textDocumentProxy.deleteBackward()
-                        }
-                    }
-                    lastCommittedWord = selUndo.prevLastCommittedWord
-                    rawComposing = selUndo.rawComposing
-                    recomputeCandidates()
-                    return
-                }
             }
         }
         lastSelectionUndo = nil
@@ -1360,6 +1337,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         pendingPhraseSegments.removeAll()
         lastCommittedWord = nil
+        sessionDeleteCount += 1
         performEdit {
             // 成对括号智能退格连删：光标位于空括号中间（如 `（|）`、`(|)`）按 ⌫ 一次删掉整对
             if !isRepeat,
@@ -1373,6 +1351,10 @@ final class KeyboardViewController: UIInputViewController {
             } else {
                 self.textDocumentProxy.deleteBackward()
             }
+        }
+        if englishComposing.isEmpty && !currentCandidates.isEmpty {
+            currentCandidates = []
+            refreshToolbar()
         }
         autoCapitalizeIfNeeded()
     }
@@ -1752,6 +1734,7 @@ final class KeyboardViewController: UIInputViewController {
             : cand.word
         if settings.inlineComposingEnabled && aiPromptDraft == nil {
             performEdit {
+                self.textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
                 self.textDocumentProxy.unmarkText()
             }
         }

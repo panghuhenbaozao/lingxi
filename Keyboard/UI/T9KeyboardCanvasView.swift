@@ -723,11 +723,13 @@ private final class T9KeyCapView: UIView {
         self.isSpecial = isSpecial
         self.isAccent = isAccent
 
+        bgView.layer.cornerCurve = .continuous
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = theme.keyShadowOpacity
-        bgView.layer.borderWidth = 0.7
-        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
+        bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
+        bgView.layer.borderWidth = 0.5
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.24 : 0.32).cgColor
 
         iconView.isHidden = true
         titleLabel.isHidden = false

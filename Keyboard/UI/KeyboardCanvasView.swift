@@ -1089,12 +1089,13 @@ private final class KeyCapView: UIView {
         self.model = model
         self.theme = theme
 
+        bgView.layer.cornerCurve = .continuous
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = theme.keyShadowOpacity
-        // 极简白：每个键帽以 hairline 边框分界（边框=键体深色淡版），已按的态用 keyPressedFill
-        bgView.layer.borderWidth = 0.7
-        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
+        bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
+        bgView.layer.borderWidth = 0.5
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.24 : 0.32).cgColor
         if bgView.bounds.width > 0 {
             bgView.layer.shadowPath = UIBezierPath(
                 roundedRect: bgView.bounds,
@@ -1204,10 +1205,16 @@ private final class KeyCapView: UIView {
 
     func setPressed(_ pressed: Bool) {
         guard let theme, let model else { return }
-        // 极简白：按下微移 +1pt（向屏幕内侧下沉），配合阴影收起，视觉上变“压实”
+        // 苹果质感圆角键帽：按下微移 +1pt，配合立体底影与清晰细描边，确保白色键帽圆角清晰利落
         bgView.transform = pressed ? CGAffineTransform(translationX: 0, y: 1) : .identity
+        bgView.layer.cornerCurve = .continuous
+        bgView.layer.cornerRadius = theme.keyCornerRadius
+        bgView.layer.borderWidth = 0.5
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.24 : 0.32).cgColor
+        bgView.layer.shadowColor = theme.keyShadowColor.cgColor
+        bgView.layer.shadowOpacity = pressed ? 0 : theme.keyShadowOpacity
+        bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
         bgView.layer.shadowRadius = pressed ? 0 : 0.6
-        bgView.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
         if model.isAccent {
             bgView.backgroundColor = pressed ? theme.accentPressedFill : theme.accentFill
         } else if model.isSpecial {

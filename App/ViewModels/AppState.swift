@@ -31,6 +31,9 @@ final class AppState: ObservableObject {
     @Published var userWords: [UserWordEntry] = []
     @Published var isKeyboardEnabled: Bool = false
     @Published var customBgPreview: UIImage?
+    @Published var userAvatarImage: UIImage?
+
+    static let userAvatarFileName = "lingxi_user_avatar.jpg"
 
     let lexicon = UserLexicon()
     private var autoSyncTask: Task<Void, Never>?
@@ -60,6 +63,7 @@ final class AppState: ObservableObject {
         userWords = lexicon.allEntries(limit: 250)
         isKeyboardEnabled = checkKeyboardEnabled()
         loadCustomBackgroundPreview()
+        loadUserAvatar()
     }
 
     /// 当已登录或已接入客户 API Key 且开启自动同步时，按当前激活的同步层实现（LocalNoop / LAN / E2EE Cloud）防抖触发后台无感同步
@@ -137,6 +141,40 @@ final class AppState: ObservableObject {
             customBgPreview = UIImage(data: data)
         } else {
             customBgPreview = nil
+        }
+    }
+
+    // MARK: - Apple 风格用户头像持久化
+
+    func saveUserAvatarImage(_ image: UIImage) {
+        let targetSide: CGFloat = 256
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: targetSide, height: targetSide))
+        let square = renderer.image { _ in
+            let minSide = min(image.size.width, image.size.height)
+            let scale = targetSide / max(1, minSide)
+            let drawW = image.size.width * scale
+            let drawH = image.size.height * scale
+            let drawRect = CGRect(x: (targetSide - drawW) / 2, y: (targetSide - drawH) / 2, width: drawW, height: drawH)
+            image.draw(in: drawRect)
+        }
+        guard let jpeg = square.jpegData(compressionQuality: 0.85) else { return }
+        let url = AppGroup.fileURL(Self.userAvatarFileName)
+        if (try? jpeg.write(to: url, options: [.atomic])) != nil {
+            userAvatarImage = square
+        }
+    }
+
+    func removeUserAvatarImage() {
+        try? FileManager.default.removeItem(at: AppGroup.fileURL(Self.userAvatarFileName))
+        userAvatarImage = nil
+    }
+
+    private func loadUserAvatar() {
+        let url = AppGroup.fileURL(Self.userAvatarFileName)
+        if let data = try? Data(contentsOf: url) {
+            userAvatarImage = UIImage(data: data)
+        } else {
+            userAvatarImage = nil
         }
     }
 
