@@ -1171,7 +1171,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         ]
         return items.map { ns, title, icon, label in
             let cursor = ledger.cursors[ns.rawValue] ?? 0
-            let hasPushed = ledger.pushedHashes.keys.contains(where: { $0.hasPrefix(ns.rawValue + "::") })
+            let hasPushed = ledger.records.values.contains(where: { $0.namespace == ns && !$0.tombstone })
             return NamespaceSyncSummary(
                 id: ns.rawValue,
                 namespace: ns,
