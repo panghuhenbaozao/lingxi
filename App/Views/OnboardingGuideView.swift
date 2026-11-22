@@ -15,8 +15,8 @@ struct OnboardingGuideView: View {
                 }
 
                 Section {
-                    guideRow(step: "3", title: "打开允许完全访问", detail: "用于：AI 联网润色翻译、读取系统按键音效、以及主 App 与键盘之间同步皮肤/词库/剪贴板。")
-                    Text("隐私承诺：普通拼音打字完全在本地 SQLite 引擎运行，绝不上传您的按键记录。")
+                    guideRow(step: "3", title: "打开允许完全访问", detail: "用于：主 App 与键盘之间通过 App Group 加密容器共享皮肤/词库/剪贴板预览、系统按键震动音效，以及您主动触发的 AI 辅助功能。")
+                    Text("架构铁律：普通拼音/双拼/五笔打字 100% 在本地 SQLite 引擎离线运行，永不上传任何按键或输入原文；云同步采用端侧 E2EE 零知识加密。")
                         .font(.footnote)
                         .foregroundStyle(Color(Design.Palette.slate))
                         .padding(.top, Design.Spacing.xs)

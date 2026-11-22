@@ -49,6 +49,9 @@ public struct SyncNamespace: RawRepresentable, Equatable, Hashable, Codable {
 
     public static let settings = SyncNamespace(rawValue: "settings")
     public static let phrases = SyncNamespace(rawValue: "phrases")
+    public static let quickPhrases = SyncNamespace(rawValue: "quick_phrases")
+    public static let recentEmojis = SyncNamespace(rawValue: "recent_emojis")
+    public static let typingStats = SyncNamespace(rawValue: "typing_stats")
     public static let lexicon = SyncNamespace(rawValue: "lexicon")
     public static let theme = SyncNamespace(rawValue: "theme")
 }
@@ -233,10 +236,9 @@ public final class LocalNoopInsightService: InsightService {
 
 // MARK: - 服务工厂（唯一组装点）
 
-/// 业务代码从这里取服务实例；M3 接云时只改这一个文件的组装逻辑。
+/// 业务代码从这里取服务实例；未登录/未配置 API Key 时自动退化为本地离线零请求态。
 public enum LingxiServices {
-    /// 当前组装：全部 Local Noop（纯离线态）
-    public static let auth: AuthService = LocalNoopAuthService()
-    public static let sync: SyncService = LocalNoopSyncService()
-    public static let insight: InsightService = LocalNoopInsightService()
+    public static var auth: AuthService { CloudBackendClient.shared }
+    public static var sync: SyncService { CloudBackendClient.shared }
+    public static var insight: InsightService { CloudBackendClient.shared }
 }

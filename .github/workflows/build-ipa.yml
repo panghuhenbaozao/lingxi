@@ -16,9 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Pinyin Dictionary & Prototype
+      - name: Verify Pinyin Dictionary, Prototype & Cloud Backend Server
         run: |
+          python3 Tools/verify_swift_integrity.py
           python3 Tools/engine_prototype.py
+          python3 Server/lingxi_server.py --self-test
+          python3 Server/lingxi_server.py --backup-drill
 
       - name: Select Xcode & Install XcodeGen
         run: |

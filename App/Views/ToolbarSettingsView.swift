@@ -42,14 +42,17 @@ struct ToolbarSettingsView: View {
     var body: some View {
         Form {
             Section {
+                toolbarLivePreview
                 Picker("预设方案", selection: presetBinding) {
                     ForEach(ToolbarPreset.allCases) { p in
                         Text(p.displayName).tag(p)
                     }
                 }
                 .pickerStyle(.segmented)
+            } header: {
+                Text("顶部工具栏与智能胶囊预览")
             } footer: {
-                Text("选择预设快速应用；手动调整后自动变为自定义。被关闭的按钮收纳进键盘上的『⋯』菜单。")
+                Text("日常空闲时左置『灵犀 AI / 译』胶囊、右置轻量工具按钮；当收到短信验证码或新复制内容时，顶栏会自动切换为全宽智能粘贴胶囊。低频的表情与光标移动已从顶栏移除。")
             }
 
             Section {
@@ -66,7 +69,7 @@ struct ToolbarSettingsView: View {
                 }
                 .onMove(perform: moveItems)
             } header: {
-                Text("功能按钮")
+                Text("功能按钮显隐与排序")
             } footer: {
                 Text("开关控制按钮是否显示，拖动右侧手柄调整顺序。撤销按钮仅在刚删除内容时出现。")
             }
@@ -128,6 +131,134 @@ struct ToolbarSettingsView: View {
         let d = LingxiSettings()
         return appState.settings.candidateBarHeight == d.candidateBarHeight
             && appState.settings.candidateFontSize == d.candidateFontSize
+    }
+
+    /// 模拟键盘顶部栏的两种核心形态：
+    /// 1) 常规空闲态（左置灵犀 AI + 译，右置剪贴板与设置）
+    /// 2) 收到短信验证码或新复制内容时的「全栏独占接管胶囊」
+    private var toolbarLivePreview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("常规空闲态")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(Design.Palette.stone))
+                HStack(spacing: 8) {
+                    if isButtonVisible(.ai) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("灵犀 AI")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Color(Design.Palette.ink).opacity(0.08))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color(Design.Palette.ink).opacity(0.24), lineWidth: 0.5))
+                    }
+                    if isButtonVisible(.translate) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "character.bubble")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("译")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(Design.Palette.surface))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                    }
+                    Spacer(minLength: 4)
+                    if isButtonVisible(.layout) {
+                        Text("九键")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Color(Design.Palette.surface))
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                    }
+                    if isButtonVisible(.clipboard) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Color(Design.Palette.surface))
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                    }
+                    if isButtonVisible(.settings) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Color(Design.Palette.surface))
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                    }
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 44)
+                .background(Color(Design.Palette.canvas))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("复制文本 / 收到短信验证码时（自动隐藏按钮，整栏接管显示）")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(Design.Palette.stone))
+                HStack(spacing: 6) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "message.badge.filled.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("验证码")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(Design.Palette.ink).opacity(0.10))
+                    .clipShape(Capsule())
+
+                    Text("849201 · 【灵犀】您的登录验证码…")
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 2)
+
+                    Text("填入 849201")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color(Design.Palette.ink))
+                        .clipShape(Capsule())
+
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .padding(4)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 40)
+                .background(Color(Design.Palette.surface))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color(Design.Palette.ink).opacity(0.22), lineWidth: 0.5))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func isButtonVisible(_ id: ToolbarButtonID) -> Bool {
+        sortedItems.first(where: { $0.buttonID == id })?.isVisible ?? true
     }
 
     /// 模拟候选栏预览：高度/字号随滑杆即时变化；观感对齐键盘（首选主题色淡底，次选 hairline 描边）

@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>灵犀输入法 (Lingxi IME) · 云端控制台与客户习惯分析看板</title>
+  <style>
+    :root {
+      --bg-page: #F2F3F5;
+      --bg-canvas: #FFFFFF;
+      --bg-surface: #F7F8FA;
+      --border-hairline: #E5E7EB;
+      --text-ink: #0A0A0A;
+      --text-slate: #45515E;
+      --text-stone: #6E6E73;
+      --accent-ink: #0A0A0A;
+      --accent-fg: #FFFFFF;
+      --status-green: #17976A;
+      --status-red: #C94A4A;
+      --radius-card: 16px;
+      --radius-sm: 10px;
+      --radius-pill: 9999px;
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    }
+    [data-theme="dark"] {
+      --bg-page: #000000;
+      --bg-canvas: #1C1C1E;
+      --bg-surface: #2C2C2E;
+      --border-hairline: #3A3A3C;
+      --text-ink: #F2F2F7;
+      --text-slate: #C7C7CC;
+      --text-stone: #98989D;
+      --accent-ink: #F2F2F7;
+      --accent-fg: #0A0A0A;
+      --status-green: #34C77B;
+      --status-red: #FF6B6B;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg-page);
+      color: var(--text-ink);
+      line-height: 1.5;
+      padding-bottom: 48px;
+      transition: background 180ms ease, color 180ms ease;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: var(--bg-canvas);
+      border-bottom: 1px solid var(--border-hairline);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: var(--accent-ink);
+      color: var(--accent-fg);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .brand-title { font-size: 16.5px; font-weight: 700; }
+    .brand-sub { font-size: 12px; color: var(--text-stone); }
+    .toolbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 8px 16px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-canvas);
+      color: var(--text-ink);
+      cursor: pointer;
+      transition: transform 150ms ease, opacity 150ms ease, background 150ms ease;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary {
+      background: var(--accent-ink);
+      color: var(--accent-fg);
+      border-color: var(--accent-ink);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: var(--radius-pill);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-hairline);
+      color: var(--text-ink);
+    }
+    .dot-green {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--status-green);
+      display: inline-block;
+    }
+    .container {
+      max-width: 1280px;
+      margin: 24px auto 0;
+      padding: 0 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-card);
+      padding: 20px;
+    }
+    .kpi-label { font-size: 12px; color: var(--text-stone); font-weight: 500; }
+    .kpi-val {
+      font-family: var(--font-mono);
+      font-size: 26px;
+      font-weight: 700;
+      margin-top: 6px;
+    }
+    .kpi-foot { font-size: 11px; color: var(--text-stone); margin-top: 4px; }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+      gap: 20px;
+    }
+    @media (max-width: 640px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      gap: 8px;
+    }
+    .card-title { font-size: 15px; font-weight: 700; }
+    .card-desc { font-size: 12px; color: var(--text-stone); margin-bottom: 14px; }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .input {
+      flex: 1;
+      min-width: 160px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-surface);
+      color: var(--text-ink);
+      font-size: 13px;
+      outline: none;
+    }
+    .input-mono { font-family: var(--font-mono); letter-spacing: 1px; font-weight: 600; }
+    .input:focus { border-color: var(--text-ink); }
+    .relay-feed {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .relay-item {
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-hairline);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .relay-text {
+      font-size: 13px;
+      word-break: break-all;
+      flex: 1;
+    }
+    .bar-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 4px;
+      height: 120px;
+      padding: 12px 8px 4px;
+      background: var(--bg-surface);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-hairline);
+    }
+    .bar-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      height: 100%;
+      justify-content: flex-end;
+    }
+    .bar-fill {
+      width: 100%;
+      background: var(--accent-ink);
+      border-radius: 3px 3px 0 0;
+      min-height: 3px;
+      transition: height 220ms ease;
+    }
+    .bar-lbl {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      color: var(--text-stone);
+    }
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
+      gap: 8px;
+    }
+    .heat-cell {
+      padding: 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-surface);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .heat-title { font-size: 12px; font-weight: 600; }
+    .heat-val { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
+    .heat-bar-bg {
+      height: 5px;
+      background: var(--border-hairline);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .heat-bar-fg {
+      height: 100%;
+      background: var(--accent-ink);
+      border-radius: 99px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border-hairline);
+    }
+    th { color: var(--text-stone); font-weight: 600; font-size: 11.5px; }
+    .mono { font-family: var(--font-mono); }
+    .tag-list { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tag {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: var(--radius-pill);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-hairline);
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: var(--accent-ink);
+      color: var(--accent-fg);
+      padding: 10px 18px;
+      border-radius: var(--radius-pill);
+      font-size: 12.5px;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+      z-index: 100;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">灵</div>
+      <div>
+        <div class="brand-title">灵犀输入法 · 云端控制台与客户习惯画像看板</div>
+        <div class="brand-sub">零知识 E2EE 同步库 · 跨屏剪贴板秒传 · 实时打字习惯与 B 端企业 API 审计</div>
+      </div>
+    </div>
+    <div class="toolbar-actions">
+      <span class="badge"><span class="dot-green"></span> <span id="srv-status">服务在线 v4.0</span></span>
+      <button class="btn" onclick="seedDemoData()">✨ 注入演示打字与词库样本</button>
+      <button class="btn" onclick="refreshDashboard()">↻ 刷新数据</button>
+      <button class="btn" onclick="toggleTheme()">◑ 亮/暗墨玉</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 1. 核心可观测性指标 -->
+    <section class="kpi-grid">
+      <div class="card">
+        <div class="kpi-label">注册用户 / 已授权画像</div>
+        <div class="kpi-val" id="kpi-users">0 / 0</div>
+        <div class="kpi-foot">同步与分析通道物理分离</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">E2EE 零知识同步密文块</div>
+        <div class="kpi-val" id="kpi-sync">0</div>
+        <div class="kpi-foot">XChaCha20 / AES-256-GCM 密文存储</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">实时打字习惯会话样本</div>
+        <div class="kpi-val" id="kpi-habits">0</div>
+        <div class="kpi-foot">结构性零原文 · 会话级聚合</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">AI 与实时翻译 API 调用</div>
+        <div class="kpi-val" id="kpi-ai">0</div>
+        <div class="kpi-foot" id="kpi-latency">平均延迟 -- ms</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">B 端企业客户 / 计费调用</div>
+        <div class="kpi-val" id="kpi-b2b">0 / 0</div>
+        <div class="kpi-foot">180 天全量合规审计留痕</div>
+      </div>
+    </section>
+
+    <!-- 2. 跨设备实时剪贴板接力 + 24小时打字节律 -->
+    <section class="grid-2">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📋 跨设备实时剪贴板接力（6 位匹配码免登录秒传）</div>
+          <span class="badge" id="relay-sse-badge">SSE 实时通道就绪</span>
+        </div>
+        <div class="card-desc">
+          对标微信输入法跨屏剪贴板：在电脑与 iPhone 输入相同 6 位匹配码，电脑复制的文本或验证码将秒级推送至 iPhone 键盘顶部全宽胶囊。
+        </div>
+        <div class="input-row">
+          <input id="relay-code" class="input input-mono" style="max-width: 140px;" value="886699" maxlength="8" placeholder="6位匹配码" />
+          <button class="btn" onclick="connectRelayStream()">连接匹配码通道</button>
+          <button class="btn" onclick="sendDemoOTP()">💬 模拟发短信验证码到手机键盘</button>
+        </div>
+        <div class="input-row">
+          <input id="relay-text" class="input" placeholder="输入要秒传到手机键盘顶栏的文字、链接或验证码…" />
+          <button class="btn btn-primary" onclick="pushRelayClipboard()">秒传到手机</button>
+        </div>
+        <div class="relay-feed" id="relay-feed">
+          <div class="relay-item"><span class="relay-text" style="color:var(--text-stone)">暂无跨屏剪贴板记录，点击上方「模拟发短信验证码」或输入文字即可秒传。</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🕒 24 小时昼夜打字习惯节律 & 方案分布</div>
+          <span class="badge" id="primary-scheme-badge">主方案：全拼</span>
+        </div>
+        <div class="card-desc">
+          基于 Wakapi 心跳时间窗算法，聚合用户全天 00:00–23:00 的活跃击键分布与输入方案偏好。
+        </div>
+        <div class="bar-chart" id="hourly-chart"></div>
+        <div style="margin-top: 14px;">
+          <div class="kpi-label" style="margin-bottom: 8px;">输入方案与 AI 技能调用分布</div>
+          <div class="heatmap-grid" id="scheme-ai-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. 拼音易混音热力图 + 用户词库领域热力图 -->
+    <section class="grid-2">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🔥 拼音易混音与错拼习惯热力图 (Confusion Matrix)</div>
+          <span class="badge">自动反哺引擎模糊音设置</span>
+        </div>
+        <div class="card-desc">
+          实时分析用户拼写中的平翘舌 (zh/z, ch/c, sh/s)、前后鼻音 (an/ang, en/eng, in/ing) 与鼻边音 (n/l) 混淆频次。
+        </div>
+        <div class="heatmap-grid" id="confusion-heatmap"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🧭 用户个人词库领域热力图 & 社区词包订阅仓库 (M4)</div>
+          <span class="badge">反哺 AI 写作个人表达风格</span>
+        </div>
+        <div class="card-desc">
+          分析用户自造词与高频短语所属领域（科技研发 / 商务职场 / 日常社交 / 学术创作），并托管可一键订阅的 WowType TSV 社区词包。
+        </div>
+        <div class="heatmap-grid" id="domain-heatmap" style="margin-bottom: 14px;"></div>
+        <div class="kpi-label" style="margin-bottom: 6px;">托管的开源社区词库包 (`/api/v1/community/packs`)</div>
+        <div class="tag-list" id="community-packs" style="margin-bottom: 10px;"></div>
+        <div class="input-row" style="margin-bottom: 0;">
+          <input id="new-pack-name" class="input" style="max-width: 170px;" placeholder="新词包名 (如：法律术语包)" />
+          <input id="new-pack-tsv" class="input input-mono" placeholder="WowType TSV (如：fy	法院诉讼)" />
+          <button class="btn" onclick="publishCommunityPack()">+ 发布到社区仓</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. 用户打字习惯画像报表 -->
+    <section class="card">
+      <div class="card-header">
+        <div class="card-title">👤 客户 / 用户打字习惯画像与智能引擎调优报表</div>
+        <span class="badge">实时计算 · 零原文存储</span>
+      </div>
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>用户 / 账号</th>
+              <th>主方案 / 布局</th>
+              <th>平均 / 峰值速率</th>
+              <th>平均词长</th>
+              <th>退格率 / 撤学率</th>
+              <th>滑行占比</th>
+              <th>画像标签 (Habit Tags)</th>
+              <th>智能引擎调优建议</th>
+            </tr>
+          </thead>
+          <tbody id="profiles-tbody">
+            <tr><td colspan="8" style="color:var(--text-stone)">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 5. B 端企业客户管理、计费与 GDPR/个保法合规审计流水 -->
+    <section class="grid-2">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🏢 B 端企业 API 客户管理与计费看板 (`api_clients`)</div>
+          <span class="badge">独立 Service Key + Scope 白名单</span>
+        </div>
+        <div class="input-row">
+          <input id="b2b-org" class="input" placeholder="输入企业客户名称 (如：灵犀企业版 SaaS)" />
+          <button class="btn btn-primary" onclick="createB2BClient()">+ 签发企业密钥 (lxb_live_...)</button>
+        </div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>企业机构</th>
+                <th>密钥前缀</th>
+                <th>授权 Scope</th>
+                <th>调用次数 / 计费单元</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="b2b-clients-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🛡️ GDPR / 个保法授权流水 (`consent_records`) & B 端审计 (`b2b_audit_logs`)</div>
+          <span class="badge">不可变审计留痕 180 天</span>
+        </div>
+        <div style="overflow-x: auto; max-height: 260px;">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>类型 / 主体</th>
+                <th>Scope / 接口</th>
+                <th>状态 / 版本</th>
+              </tr>
+            </thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let relayEventSource = null;
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 2600);
+    }
+
+    function toggleTheme() {
+      const root = document.documentElement;
+      const cur = root.getAttribute('data-theme');
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    }
+
+    async function apiJSON(method, path, body = null, extraHeaders = {}) {
+      const opts = { method, headers: { 'Content-Type': 'application/json', ...extraHeaders } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      return await res.json();
+    }
+
+    async function refreshDashboard() {
+      try {
+        const data = await apiJSON('GET', '/api/v1/dashboard/overview');
+        document.getElementById('srv-status').textContent = `服务在线 v${data.version || '4.0.0'} · 限流保护开启`;
+        document.getElementById('kpi-users').textContent = `${data.stats.users} / ${data.stats.optedInUsers}`;
+        document.getElementById('kpi-sync').textContent = data.stats.syncRecords;
+        document.getElementById('kpi-habits').textContent = data.stats.habitEvents;
+        document.getElementById('kpi-ai').textContent = data.stats.aiApiLogs;
+        document.getElementById('kpi-latency').textContent = `平均响应延迟 ${data.stats.avgAiLatencyMs || 0} ms`;
+        document.getElementById('kpi-b2b').textContent = `${data.stats.b2bClients} / ${data.stats.b2bBillableUnits}`;
+
+        renderHourlyChart(data.aggregate.hourlyRhythm || {});
+        renderSchemeAndAI(data.aggregate.schemeBreakdown || {}, data.aggregate.aiBreakdown || {});
+        renderConfusionHeatmap(data.aggregate.confusionMatrix || {});
+        renderDomainHeatmap(data.aggregate.domainScores || {}, data.communityPacks || []);
+        renderProfilesTable(data.profiles || []);
+        renderB2BClients(data.b2bClients || []);
+        renderAuditLogs(data.consentLogs || [], data.b2bAuditLogs || []);
+        loadRelayItems();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderHourlyChart(rhythm) {
+      const wrap = document.getElementById('hourly-chart');
+      wrap.innerHTML = '';
+      let maxVal = 1;
+      for (let h = 0; h < 24; h++) {
+        const v = rhythm[String(h)] || 0;
+        if (v > maxVal) maxVal = v;
+      }
+      for (let h = 0; h < 24; h++) {
+        const v = rhythm[String(h)] || 0;
+        const pct = Math.max(4, Math.round((v / maxVal) * 86));
+        const col = document.createElement('div');
+        col.className = 'bar-col';
+        col.title = `${String(h).padStart(2, '0')}:00 — ${v} 字`;
+        col.innerHTML = `<div class="bar-fill" style="height:${pct}%;opacity:${v > 0 ? 1 : 0.2}"></div><span class="bar-lbl">${h % 3 === 0 ? String(h).padStart(2, '0') : ''}</span>`;
+        wrap.appendChild(col);
+      }
+    }
+
+    function renderSchemeAndAI(schemes, ai) {
+      const grid = document.getElementById('scheme-ai-grid');
+      grid.innerHTML = '';
+      const entries = [];
+      for (const [k, v] of Object.entries(schemes)) entries.push({ label: `方案 · ${k}`, val: `${v} 字` });
+      for (const [k, v] of Object.entries(ai)) entries.push({ label: `AI · ${k}`, val: `${v.calls} 次 (${v.avgLatencyMs}ms)` });
+      if (entries.length === 0) {
+        grid.innerHTML = `<div class="heat-cell"><div class="heat-title">暂无数据</div><div class="heat-val">--</div></div>`;
+        return;
+      }
+      entries.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'heat-cell';
+        div.innerHTML = `<div class="heat-title">${item.label}</div><div class="heat-val">${item.val}</div>`;
+        grid.appendChild(div);
+      });
+    }
+
+    function renderConfusionHeatmap(matrix) {
+      const labels = {
+        zh_z: 'zh ↔ z 平翘舌',
+        ch_c: 'ch ↔ c 平翘舌',
+        sh_s: 'sh ↔ s 平翘舌',
+        n_l: 'n ↔ l 鼻边音',
+        an_ang: 'an ↔ ang 前后鼻音',
+        en_eng: 'en ↔ eng 前后鼻音',
+        in_ing: 'in ↔ ing 前后鼻音',
+        f_h: 'f ↔ h 唇齿音',
+        huang_wang: 'huang ↔ wang 介音'
+      };
+      const wrap = document.getElementById('confusion-heatmap');
+      wrap.innerHTML = '';
+      const maxV = Math.max(1, ...Object.values(matrix));
+      for (const [key, title] of Object.entries(labels)) {
+        const count = matrix[key] || 0;
+        const pct = Math.min(100, Math.round((count / maxV) * 100));
+        const cell = document.createElement('div');
+        cell.className = 'heat-cell';
+        cell.innerHTML = `
+          <div class="heat-title">${title}</div>
+          <div class="heat-val">${count} 次</div>
+          <div class="heat-bar-bg"><div class="heat-bar-fg" style="width:${pct}%"></div></div>
+        `;
+        wrap.appendChild(cell);
+      }
+    }
+
+    function renderDomainHeatmap(domains, packs) {
+      const allDomains = ['科技与研发', '商务与职场', '日常与社交', '学术与创作'];
+      const wrap = document.getElementById('domain-heatmap');
+      wrap.innerHTML = '';
+      const maxV = Math.max(1, ...Object.values(domains));
+      allDomains.forEach(d => {
+        const score = domains[d] || 0;
+        const pct = Math.min(100, Math.round((score / maxV) * 100));
+        const cell = document.createElement('div');
+        cell.className = 'heat-cell';
+        cell.innerHTML = `
+          <div class="heat-title">${d}</div>
+          <div class="heat-val">${score} 词命中</div>
+          <div class="heat-bar-bg"><div class="heat-bar-fg" style="width:${pct}%"></div></div>
+        `;
+        wrap.appendChild(cell);
+      });
+
+      const packWrap = document.getElementById('community-packs');
+      packWrap.innerHTML = '';
+      packs.forEach(p => {
+        const span = document.createElement('span');
+        span.className = 'tag';
+        span.textContent = `📦 ${p.name} (${p.wordCount}词 · v${p.version})`;
+        packWrap.appendChild(span);
+      });
+    }
+
+    function renderProfilesTable(profiles) {
+      const tbody = document.getElementById('profiles-tbody');
+      if (!profiles.length) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--text-stone)">暂无用户画像，请点击右上角「✨ 注入演示打字与词库样本」立即体验。</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = profiles.map(p => `
+        <tr>
+          <td><strong>${p.username || '灵犀用户'}</strong><br/><span class="mono" style="font-size:11px;color:var(--text-stone)">${p.email || p.userID.slice(0, 8)}</span></td>
+          <td class="mono">${p.primaryScheme} / ${p.primaryLayout}</td>
+          <td class="mono"><strong>${p.avgCPM}</strong> / ${p.peakCPM} CPM</td>
+          <td class="mono">${p.avgWordLength} 字/词</td>
+          <td class="mono">${(p.backspaceRate * 100).toFixed(1)}% / ${(p.undoLearnRate * 100).toFixed(1)}%</td>
+          <td class="mono">${(p.glideRatio * 100).toFixed(1)}%</td>
+          <td><div class="tag-list">${(p.habitTags || []).map(t => `<span class="tag">${t}</span>`).join('')}</div></td>
+          <td style="font-size:11.5px;color:var(--text-slate)">${(p.tuningRecommendations || []).map(r => `• ${r.title}`).join('<br/>')}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderB2BClients(clients) {
+      const tbody = document.getElementById('b2b-clients-tbody');
+      if (!clients.length) {
+        tbody.innerHTML = `<tr><td colspan="5" style="color:var(--text-stone)">暂无企业客户，输入名称即可签发 B 端密钥。</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = clients.map(c => `
+        <tr>
+          <td><strong>${c.org}</strong></td>
+          <td class="mono">${c.keyPrefix}</td>
+          <td class="mono" style="font-size:11px">${c.scopes}</td>
+          <td class="mono">${c.callCount} 次 / ${c.billableUnits} 单元</td>
+          <td><button class="btn" style="padding:4px 10px;font-size:11px" onclick="testB2BCall('${c.id}')">模拟企业计费查询</button></td>
+        </tr>
+      `).join('');
+    }
+
+    function renderAuditLogs(consents, audits) {
+      const tbody = document.getElementById('audit-tbody');
+      const rows = [];
+      consents.forEach(c => rows.push({
+        ts: c.at,
+        who: `用户授权 (${c.userID.slice(0, 6)})`,
+        scope: c.scope,
+        status: c.granted ? `✓ 已授权 (${c.policyVersion})` : '✕ 已撤回'
+      }));
+      audits.forEach(a => rows.push({
+        ts: a.createdAt,
+        who: `B端企业 (${a.org})`,
+        scope: `${a.endpoint} [${a.scopeUsed}]`,
+        status: `HTTP ${a.statusCode} · 计费+1`
+      }));
+      rows.sort((a, b) => b.ts - a.ts);
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-stone)">暂无审计记录</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.slice(0, 20).map(r => `
+        <tr>
+          <td class="mono" style="font-size:11px">${new Date(r.ts * 1000).toLocaleTimeString()}</td>
+          <td>${r.who}</td>
+          <td class="mono" style="font-size:11px">${r.scope}</td>
+          <td>${r.status}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function loadRelayItems() {
+      const code = document.getElementById('relay-code').value.trim();
+      if (!code) return;
+      const res = await apiJSON('GET', `/api/v1/relay/clipboard?code=${encodeURIComponent(code)}`);
+      const items = res.items || [];
+      const feed = document.getElementById('relay-feed');
+      if (!items.length) return;
+      feed.innerHTML = items.map(it => `
+        <div class="relay-item">
+          <div class="relay-text">
+            ${it.extractedCode ? `<span class="tag" style="margin-right:6px">💬 验证码 ${it.extractedCode}</span>` : `<span class="tag" style="margin-right:6px">${it.senderDevice || '跨屏'}</span>`}
+            ${it.contentText}
+          </div>
+          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="navigator.clipboard.writeText('${it.contentText.replace(/'/g, "\\'")}');showToast('已复制到电脑剪贴板')">复制</button>
+        </div>
+      `).join('');
+    }
+
+    function connectRelayStream() {
+      const code = document.getElementById('relay-code').value.trim();
+      if (!code) return;
+      if (relayEventSource) relayEventSource.close();
+      try {
+        relayEventSource = new EventSource(`/api/v1/relay/stream?code=${encodeURIComponent(code)}`);
+        document.getElementById('relay-sse-badge').textContent = `SSE 已连接 (${code})`;
+        relayEventSource.onmessage = () => { loadRelayItems(); };
+      } catch (e) {}
+      loadRelayItems();
+      showToast(`已连接 6 位跨屏匹配码通道：${code}`);
+    }
+
+    async function pushRelayClipboard() {
+      const code = document.getElementById('relay-code').value.trim();
+      const text = document.getElementById('relay-text').value.trim();
+      if (!code || !text) { showToast('请输入匹配码与要秒传的内容'); return; }
+      await apiJSON('POST', '/api/v1/relay/clipboard', { pairCode: code, contentText: text, senderDevice: 'Web 控制台' });
+      document.getElementById('relay-text').value = '';
+      await loadRelayItems();
+      showToast('已秒传至跨屏通道！手机键盘顶栏将直接显示该内容');
+    }
+
+    async function sendDemoOTP() {
+      const code = document.getElementById('relay-code').value.trim() || '886699';
+      const otp = Math.floor(100000 + Math.random() * 900000);
+      const sms = `【灵犀云安全】您的跨设备登录验证码为 ${otp}，5分钟内有效。`;
+      await apiJSON('POST', '/api/v1/relay/clipboard', { pairCode: code, contentText: sms, senderDevice: '短信接力网关' });
+      await loadRelayItems();
+      showToast(`已发送模拟验证码 ${otp} 到匹配码 ${code}`);
+    }
+
+    async function createB2BClient() {
+      const org = document.getElementById('b2b-org').value.trim() || '灵犀企业分析客户';
+      const res = await apiJSON('POST', '/api/v1/b2b/clients', { org, scopes: 'profile:read,aggregate:read' });
+      document.getElementById('b2b-org').value = '';
+      showToast(`已签发企业密钥：${res.serviceKey}`);
+      refreshDashboard();
+    }
+
+    async function testB2BCall(clientId) {
+      await apiJSON('POST', '/api/v1/b2b/simulate-query', { clientID: clientId });
+      showToast('已执行 B 端聚合画像查询并记入 180 天审计流水');
+      refreshDashboard();
+    }
+
+    async function seedDemoData() {
+      await apiJSON('POST', '/api/v1/dashboard/seed-demo', {});
+      showToast('✨ 已注入完整演示用户、打字习惯、易混音热力图与企业审计样本');
+      refreshDashboard();
+    }
+
+    async function publishCommunityPack() {
+      const name = document.getElementById('new-pack-name').value.trim();
+      const tsv = document.getElementById('new-pack-tsv').value.trim();
+      if (!name || !tsv) {
+        showToast('请输入新词包名称与 TSV 词条内容');
+        return;
+      }
+      await apiJSON('POST', '/api/v1/community/packs', {
+        name,
+        category: '社区共创',
+        tsv: tsv.replace(/\\t/g, '\t').replace(/\\n/g, '\n')
+      });
+      document.getElementById('new-pack-name').value = '';
+      document.getElementById('new-pack-tsv').value = '';
+      showToast(`📦 已发布社区词包「${name}」，App 端可立即拉取订阅`);
+      refreshDashboard();
+    }
+
+    refreshDashboard();
+    connectRelayStream();
+  </script>
+</body>
+</html>

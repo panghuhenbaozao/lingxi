@@ -37,6 +37,13 @@ struct ResolvedTheme {
     let boldKeyLabel: Bool
     let customBackgroundImage: UIImage?
 
+    /// 顶栏胶囊与分割线细描边色（亮色模式取柔和边框色，暗色模式取微透高亮边框色）
+    var keyBorder: UIColor {
+        preset.isDark
+            ? UIColor.white.withAlphaComponent(0.16)
+            : keyShadowColor.withAlphaComponent(0.85)
+    }
+
     static func resolve(
         customization: ThemeCustomization = ThemeCustomization.load(),
         isDarkAppearance: Bool,

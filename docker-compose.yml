@@ -1,0 +1,16 @@
+services:
+  lingxi-server:
+    build:
+      context: ./Server
+      dockerfile: Dockerfile
+    container_name: lingxi-cloud-server
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - lingxi_data:/data
+    environment:
+      - TZ=Asia/Shanghai
+
+volumes:
+  lingxi_data:

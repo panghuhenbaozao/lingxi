@@ -1,26 +1,23 @@
 import Foundation
 
 /// Toolbar button stable identity for layout persistence.
+/// 已移除低频『表情』与『光标移动』按钮，保持键盘顶栏极简专注。
 enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case ai
     case translate
     case clipboard
-    case emoji
-    case edit
     case layout
     case settings
     case undo
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .ai: return "AI"
-        case .translate: return "Translate"
-        case .clipboard: return "Clipboard"
-        case .emoji: return "Emoji"
-        case .edit: return "Edit"
-        case .layout: return "Layout"
-        case .settings: return "Settings"
-        case .undo: return "Undo"
+        case .ai: return "灵犀 AI"
+        case .translate: return "边打边译"
+        case .clipboard: return "剪贴板"
+        case .layout: return "九键/26键切换"
+        case .settings: return "快捷设置"
+        case .undo: return "撤销删除"
         }
     }
     var symbolName: String {
@@ -28,12 +25,14 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .ai: return "sparkles"
         case .translate: return "character.bubble"
         case .clipboard: return "doc.on.clipboard"
-        case .emoji: return "face.smiling"
-        case .edit: return "textformat"
         case .layout: return "rectangle.grid.3x2"
-        case .settings: return "gearshape"
-        case .undo: return "arrow.uturn.left"
+        case .settings: return "slider.horizontal.3"
+        case .undo: return "arrow.uturn.backward"
         }
+    }
+    /// 是否属于左侧主功能胶囊区（AI / 译），其余归于右侧工具区
+    var isPrimaryLeftAction: Bool {
+        self == .ai || self == .translate
     }
 }
 
@@ -57,10 +56,17 @@ struct ToolbarItemConfig: Codable, Equatable, Identifiable {
     }
 }
 
-/// v4 极简默认布局：高频按钮上栏（AI/译/剪贴板/设置 + 撤销事件位），
-/// 低频按钮（表情/编辑面板/九键切换）默认收起——可在『键盘工具栏』设置页开启。
+/// 兼容旧版 JSON 中已废弃按钮（如 emoji / edit）的宽松解码器
+private struct LegacyToolbarItemReader: Decodable {
+    let buttonID: String?
+    let isVisible: Bool?
+    let order: Int?
+}
+
+/// 极简默认布局：左侧 [灵犀 AI][译] + 右侧 [剪贴板][快捷设置][撤销事件位]，
+/// 『九键/26键切换』默认隐藏，可在 App『键盘工具栏』设置页随时开启。
 let defaultToolbarLayout: [ToolbarItemConfig] = ToolbarButtonID.allCases.enumerated().map { idx, bid in
-    let collapsedByDefault: Set<ToolbarButtonID> = [.emoji, .edit, .layout]
+    let collapsedByDefault: Set<ToolbarButtonID> = [.layout]
     return ToolbarItemConfig(buttonID: bid, isVisible: !collapsedByDefault.contains(bid), order: idx)
 }
 
@@ -286,7 +292,7 @@ struct LingxiSettings: Codable, Equatable {
     var wubiAutoCommitUnique4: Bool = true
     var wubiShowCodeHints: Bool = true
     var clipboardBannerEnabled: Bool = true
-    var autoReadClipboardPreview: Bool = false
+    var autoReadClipboardPreview: Bool = true
     var smartOTPExtraction: Bool = true
     var autoCapitalizeEnglish: Bool = true
     var doubleSpacePeriod: Bool = true
@@ -381,8 +387,15 @@ struct LingxiSettings: Codable, Equatable {
         translateTargetLang = try c.decodeIfPresent(String.self, forKey: .translateTargetLang) ?? d.translateTargetLang
         translateFormalTone = try c.decodeIfPresent(Bool.self, forKey: .translateFormalTone) ?? d.translateFormalTone
         stylishFontID = try c.decodeIfPresent(String.self, forKey: .stylishFontID) ?? d.stylishFontID
-        let rawToolbarLayout = try c.decodeIfPresent([ToolbarItemConfig].self, forKey: .toolbarLayout) ?? d.toolbarLayout
-        toolbarLayout = LingxiSettings.normalizedToolbarLayout(rawToolbarLayout)
+        if let legacyReaders = try c.decodeIfPresent([LegacyToolbarItemReader].self, forKey: .toolbarLayout) {
+            let parsed: [ToolbarItemConfig] = legacyReaders.enumerated().compactMap { idx, r in
+                guard let idStr = r.buttonID, let bid = ToolbarButtonID(rawValue: idStr) else { return nil }
+                return ToolbarItemConfig(buttonID: bid, isVisible: r.isVisible ?? true, order: r.order ?? idx)
+            }
+            toolbarLayout = LingxiSettings.normalizedToolbarLayout(parsed)
+        } else {
+            toolbarLayout = LingxiSettings.normalizedToolbarLayout(d.toolbarLayout)
+        }
         showComposingStrip = try c.decodeIfPresent(Bool.self, forKey: .showComposingStrip) ?? d.showComposingStrip
         let rawBarH = try c.decodeIfPresent(Double.self, forKey: .candidateBarHeight) ?? d.candidateBarHeight
         candidateBarHeight = min(64, max(44, rawBarH))

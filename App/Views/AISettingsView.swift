@@ -19,6 +19,37 @@ struct AISettingsView: View {
                         }
                     }
 
+                    // 一键主流服务商模板预设
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            providerQuickPreset("Gemini 3.8 Flash") {
+                                appState.aiConfig.provider = .gemini
+                                appState.aiConfig.geminiModel = GeminiModelOption.flash38.rawValue
+                            }
+                            providerQuickPreset("DeepSeek V3") {
+                                appState.aiConfig.provider = .openAICompatible
+                                appState.aiConfig.openAIBaseURL = "https://api.deepseek.com/v1"
+                                appState.aiConfig.openAIModel = "deepseek-chat"
+                            }
+                            providerQuickPreset("通义千问 Qwen") {
+                                appState.aiConfig.provider = .openAICompatible
+                                appState.aiConfig.openAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                                appState.aiConfig.openAIModel = "qwen-plus"
+                            }
+                            providerQuickPreset("SiliconFlow") {
+                                appState.aiConfig.provider = .openAICompatible
+                                appState.aiConfig.openAIBaseURL = "https://api.siliconflow.cn/v1"
+                                appState.aiConfig.openAIModel = "deepseek-ai/DeepSeek-V3"
+                            }
+                            providerQuickPreset("本地 Ollama") {
+                                appState.aiConfig.provider = .openAICompatible
+                                appState.aiConfig.openAIBaseURL = "http://127.0.0.1:11434/v1"
+                                appState.aiConfig.openAIModel = "qwen2.5:7b"
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+
                     if appState.aiConfig.provider == .gemini {
                         Picker("Gemini 模型", selection: $appState.aiConfig.geminiModel) {
                             ForEach(GeminiModelOption.allCases) { opt in
@@ -48,11 +79,40 @@ struct AISettingsView: View {
                         )
                     }
                 } header: {
-                    Text("模型与密钥")
+                    Text("模型与密钥（支持主流 API 与本地私有模型一键预设）")
                 } footer: {
                     Text(appState.aiConfig.provider == .gemini
                          ? "直连 Google Gemini Interactions API（v1beta/interactions），默认禁用服务端对话留存 (store=false) 保护输入隐私。"
-                         : "支持 DeepSeek (https://api.deepseek.com/v1)、SiliconFlow、OpenAI 或自建反代端点。")
+                         : "支持 DeepSeek、通义千问、SiliconFlow、OpenAI 或自建 Ollama 本地离线推理端点。")
+                }
+
+                // 实时打字习惯感知 → AI 动态人设闭环
+                Section {
+                    let habitSuffix = TypingHabitTracker.shared.personalHabitSystemPromptSuffix()
+                    let profile = appState.habitProfile
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("打字习惯感知引擎已联动", systemImage: "brain.head.profile")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Spacer()
+                            Text(profile.domainAffinity.primaryDomain)
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color(Design.Palette.surface))
+                                .clipShape(Capsule())
+                        }
+                        Text(habitSuffix.isEmpty
+                             ? "日常打字与使用 AI 后，灵犀会自动分析您的句长节奏、常用词库领域（科技/商务/日常/学术）与正式度偏好，并自动微调 AI 润色和翻译语气。"
+                             : "当前自动注入的个人习惯上下文：\n\(habitSuffix)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("个人打字习惯 → AI 动态文风自适应")
                 }
 
                 Section("文风偏好与创意度") {
@@ -109,7 +169,7 @@ struct AISettingsView: View {
                 } header: {
                     Text("连通性诊断")
                 } footer: {
-                    Text("请确保在 iOS 系统设置中为「灵犀输入法」开启了「允许完全访问」，否则键盘扩展在微信等 App 内无法发起网络请求。")
+                    Text("普通拼音/双拼/五笔打字 100% 在本地 SQLite 引擎离线完成；仅当您主动点击顶栏「✨ 灵犀 AI」或「💬 译」时才会调用您配置的模型接口。")
                 }
 
                 Section("键盘内支持的 AI 技能") {
@@ -120,6 +180,22 @@ struct AISettingsView: View {
             }
             .navigationTitle("AI 灵犀助手")
         }
+    }
+
+    private func providerQuickPreset(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.bold())
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(Design.Palette.surface))
+                .foregroundStyle(Color(Design.Palette.ink))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

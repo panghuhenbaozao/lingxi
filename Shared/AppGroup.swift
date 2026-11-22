@@ -44,8 +44,9 @@ enum AppGroup {
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    /// L1 安全要求：App Group 文件统一启用 completeUntilFirstUserAuthentication 硬件加密保护级。
     @discardableResult
-    static func writeJSON<T: Encodable>(_ value: T, to fileName: String, protected: Bool = false) -> Bool {
+    static func writeJSON<T: Encodable>(_ value: T, to fileName: String, protected: Bool = true) -> Bool {
         let url = fileURL(fileName)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

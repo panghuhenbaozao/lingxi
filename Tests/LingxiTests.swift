@@ -545,14 +545,21 @@ final class LingxiTests: XCTestCase {
 
         // 归一化：乱序 + 缺项 + 显隐，应补全缺失按钮并按 order 重排
         var custom: [ToolbarItemConfig] = [
-            ToolbarItemConfig(buttonID: .emoji, isVisible: false, order: 0),
+            ToolbarItemConfig(buttonID: .layout, isVisible: false, order: 0),
             ToolbarItemConfig(buttonID: .ai, isVisible: true, order: 1),
         ]
         custom = LingxiSettings.normalizedToolbarLayout(custom)
         XCTAssertEqual(custom.count, ToolbarButtonID.allCases.count)
-        XCTAssertEqual(custom.first?.buttonID, .emoji)
+        XCTAssertEqual(custom.first?.buttonID, .layout)
         XCTAssertEqual(custom[1].buttonID, .ai)
         XCTAssertFalse(custom[0].isVisible)
+        // 旧版含已废弃 emoji / edit 按钮的 JSON 解码时应自动剥离，不报错且不残留
+        let deprecatedButtonsJSON = """
+        {"toolbarLayout":[{"buttonID":"emoji","isVisible":true,"order":0},{"buttonID":"edit","isVisible":true,"order":1},{"buttonID":"ai","isVisible":true,"order":2}]}
+        """
+        let migrated = try JSONDecoder().decode(LingxiSettings.self, from: Data(deprecatedButtonsJSON.utf8))
+        XCTAssertEqual(migrated.toolbarLayout.count, ToolbarButtonID.allCases.count)
+        XCTAssertEqual(migrated.toolbarLayout.first?.buttonID, .ai)
         // 缺失的按钮应被补全且默认可见
         XCTAssertTrue(custom.contains(where: { $0.buttonID == .undo && $0.isVisible }))
         // order 应被重排为 0..n-1
@@ -950,5 +957,139 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(report.conflicts, 1)
         XCTAssertEqual(report.applied, 1, "服务端 LWW 胜出记录视为远端最新并落盘")
         XCTAssertEqual(try Data(contentsOf: url), Data("server-wins".utf8))
+    }
+
+    func testTypingHabitTrackerAndRealTimeProfileAnalysis() {
+        let events = [
+            TypingHabitEventPayload(
+                startedAt: 1_760_000_000,
+                durationSeconds: 60,
+                committedChars: 180,
+                committedWords: 60,
+                deleteCount: 24,
+                undoLearnCount: 4,
+                glideWords: 12,
+                typoCorrectedCount: 6,
+                aiInvocations: 2,
+                translateChars: 40,
+                schemeID: "xiaohe",
+                layoutID: "qwerty26",
+                activeHour: 23,
+                deviceID: "test-dev",
+                confusionCounts: ["zh_z": 4, "an_ang": 2]
+            )
+        ]
+        let aiLogs = [
+            AIAPIUsagePayload(
+                feature: "live_translate",
+                provider: "gemini",
+                targetLang: "英文",
+                formalTone: true,
+                inputChars: 40,
+                outputChars: 85,
+                latencyMs: 310
+            )
+        ]
+        let profile = TypingHabitTracker.computeProfile(events: events, aiLogs: aiLogs, userID: "u-test")
+        XCTAssertEqual(profile.totalChars, 180)
+        XCTAssertEqual(profile.totalWords, 60)
+        XCTAssertEqual(profile.avgCPM, 180.0, accuracy: 0.1)
+        XCTAssertEqual(profile.avgWordLength, 3.0, accuracy: 0.01)
+        XCTAssertEqual(profile.primaryScheme, "xiaohe")
+        XCTAssertEqual(profile.confusionMatrix["zh_z"], 4)
+        XCTAssertTrue(profile.habitTags.contains("小鹤双拼高阶用户"))
+        XCTAssertTrue(profile.habitTags.contains("高速击键达人"))
+        XCTAssertTrue(profile.habitTags.contains("长句整输习惯"))
+        XCTAssertTrue(profile.habitTags.contains("滑行轨迹玩家"))
+        XCTAssertTrue(profile.habitTags.contains("深夜高产创作者"))
+        XCTAssertTrue(profile.habitTags.contains("AI 协同写作者"))
+        XCTAssertTrue(profile.tuningRecommendations.contains { $0.settingKey == "fuzzy.zhZ" })
+        XCTAssertTrue(profile.tuningRecommendations.contains { $0.settingKey == "dynamicKeyHitBoxEnabled" })
+        XCTAssertTrue(profile.tuningRecommendations.contains { $0.settingKey == "autoLearnThreshold" })
+        XCTAssertEqual(profile.aiFeatureBreakdown["live_translate"]?.calls, 1)
+
+        // 拼音易混音自动检测测试
+        let conf1 = TypingHabitTracker.detectPinyinConfusions(rawInput: "zongguo", resolvedPinyin: "zhong'guo")
+        XCTAssertEqual(conf1["zh_z"], 1)
+        let conf2 = TypingHabitTracker.detectPinyinConfusions(rawInput: "fanan", resolvedPinyin: "fang'an")
+        XCTAssertEqual(conf2["an_ang"], 1)
+        let conf3 = TypingHabitTracker.detectPinyinConfusions(rawInput: "lihao", resolvedPinyin: "ni'hao")
+        XCTAssertEqual(conf3["n_l"], 1)
+
+        // 个人词库领域偏好分析测试
+        let dom = TypingHabitTracker.analyzeLexiconDomains(words: ["微服务架构", "数据库索引", "后端接口部署"])
+        XCTAssertEqual(dom.primaryDomain, "科技与研发")
+    }
+
+    func testCompositeAndLexiconSyncSource() async throws {
+        let lexicon = UserLexicon()
+        _ = lexicon.importTSV("ling xi yun\t灵犀云同步测试词\t5\t1\n")
+        defer { lexicon.forget(word: "灵犀云同步测试词", py: "ling'xi'yun") }
+
+        let mock = MockSyncService()
+        let composite = CompositeSyncSource(sources: [
+            SnapshotSyncSource(entries: [.init(namespace: .settings, fileName: "test_comp_settings.json")]),
+            UserLexiconSyncSource()
+        ])
+        let settingsURL = AppGroup.fileURL("test_comp_settings.json")
+        defer { try? FileManager.default.removeItem(at: settingsURL) }
+        try "{\"inputScheme\":\"xiaohe\"}".write(to: settingsURL, atomically: true, encoding: .utf8)
+
+        let engine = SyncEngine(
+            sync: mock,
+            source: composite,
+            clock: LamportClock(),
+            deviceID: "test-dev",
+            ledgerStore: SyncLedgerStore(fileName: "test_ledger_composite.json")
+        )
+        let report = try await engine.syncNow()
+        XCTAssertEqual(report.pushed, 2, "设置快照与个人词库应在同一轮事务中一并推送")
+        let pushedNamespaces = Set(mock.pushedBatches.flatMap { $0.map(\.namespace) })
+        XCTAssertTrue(pushedNamespaces.contains(.settings))
+        XCTAssertTrue(pushedNamespaces.contains(.lexicon))
+    }
+
+    func testL1SensitiveClipboardShieldingAndL2L3CryptoAndM2M4Compliance() throws {
+        // L1 端侧敏感形态（身份证号 / 密码 / 私钥）自动屏蔽测试
+        XCTAssertTrue(ClipboardClassifier.isSensitiveContent("11010519900307281X"), "18位身份证号必须自动屏蔽")
+        XCTAssertTrue(ClipboardClassifier.isSensitiveContent("登录密码：MySuperSecret99"), "显式密码串必须自动屏蔽")
+        XCTAssertTrue(ClipboardClassifier.isSensitiveContent("-----BEGIN PRIVATE KEY----- MIIEvgIBADANBg"), "私钥串必须自动屏蔽")
+        XCTAssertFalse(ClipboardClassifier.isSensitiveContent("【灵犀】您的验证码是 849201，5分钟内有效"), "正常短信验证码不得误屏蔽")
+        XCTAssertFalse(ClipboardClassifier.isSensitiveContent("https://lingxi.app/docs"), "普通链接不得误屏蔽")
+
+        // L2 ChaCha20-Poly1305 AEAD 与 L3 HMAC-SHA256 请求防重放签名测试
+        let master = Data("lingxi-l2-chacha-key-material-2026".utf8)
+        let key = SyncCrypto.deriveSyncKey(from: master)
+        let plain = Data("{\"lexicon\":\"零知识密文同步\"}".utf8)
+        let chachaCipher = try SyncCrypto.sealChaChaPoly(plain, key: key)
+        XCTAssertNotEqual(chachaCipher, plain)
+        let chachaOpened = try SyncCrypto.openChaChaPoly(chachaCipher, key: key)
+        XCTAssertEqual(chachaOpened, plain)
+
+        let sig1 = SyncCrypto.signRequest(body: plain, timestamp: 1_760_000_000, nonce: "n-1001", secret: "sk_test")
+        let sig2 = SyncCrypto.signRequest(body: plain, timestamp: 1_760_000_000, nonce: "n-1001", secret: "sk_test")
+        let sigDiff = SyncCrypto.signRequest(body: plain, timestamp: 1_760_000_301, nonce: "n-1001", secret: "sk_test")
+        XCTAssertEqual(sig1, sig2, "相同 body+ts+nonce 的 HMAC-SHA256 签名必须确定性一致")
+        XCTAssertNotEqual(sig1, sigDiff, "时间戳变动后签名必须不同")
+
+        // M4 词库社区订阅服务（复用 WowType TSV 格式）测试
+        let packCount = CommunityLexiconService.shared.subscribe(packID: "ai_llm_tech")
+        XCTAssertGreaterThan(packCount, 0, "订阅社区词库包应成功导入词条")
+        XCTAssertTrue(CommunityLexiconService.shared.isSubscribed("ai_llm_tech"))
+
+        // 第六部分 PIPL / GDPR 不可变授权流水与全量数据可携权导出测试
+        ComplianceService.shared.recordConsent(scope: "typing_analytics", granted: true)
+        let exportedJSON = ComplianceService.shared.exportAllPortableDataJSON()
+        XCTAssertTrue(exportedJSON.contains("LINGXI-GDPR-PORTABLE-EXPORT-v1"), "可携权导出必须包含完整 JSON 导出信封")
+        XCTAssertTrue(exportedJSON.contains("consentAuditLedger"), "可携权导出必须包含不可变授权流水")
+
+        // 可持续发展引擎健康自愈巡检与 BigBang 炸词提取测试
+        let healthBefore = EngineHealthAndSustainabilityService.shared.diagnose()
+        XCTAssertGreaterThanOrEqual(healthBefore.healthScore, 60)
+        let healOutcome = EngineHealthAndSustainabilityService.shared.performSelfHealing()
+        XCTAssertGreaterThanOrEqual(healOutcome.newHealthScore, 60)
+
+        let tokens = BigBangTokenizer.tokenize("灵犀输入法支持跨设备实时剪贴板接力与零知识同步")
+        XCTAssertFalse(tokens.isEmpty, "BigBang 炸词分词结果不得为空")
     }
 }

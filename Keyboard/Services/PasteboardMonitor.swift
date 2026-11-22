@@ -1,4 +1,3 @@
-import NaturalLanguage
 import UIKit
 import UniformTypeIdentifiers
 
@@ -53,32 +52,6 @@ final class PasteTargetView: UIView {
     }
 }
 
-/// 剪贴板「炸词提取 (BigBang)」分词器：基于系统 `NaturalLanguage` 框架，零外部依赖。
-enum BigBangTokenizer {
-    static func tokenize(_ text: String) -> [String] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        let limited = String(trimmed.prefix(400))
-
-        let tokenizer = NLTokenizer(unit: .word)
-        tokenizer.string = limited
-
-        var tokens: [String] = []
-        tokenizer.enumerateTokens(in: limited.startIndex..<limited.endIndex) { range, _ in
-            let piece = String(limited[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !piece.isEmpty {
-                tokens.append(piece)
-            }
-            return tokens.count < 48
-        }
-
-        if tokens.isEmpty {
-            return limited.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        }
-        return tokens
-    }
-}
-
 /// 剪贴板顶部提醒胶囊状态。
 enum ClipboardBannerState: Equatable {
     case hidden
@@ -86,10 +59,13 @@ enum ClipboardBannerState: Equatable {
     case readyPreview(item: ClipboardItem)
 }
 
-/// 剪贴板变更侦测器，兼顾 iOS 16+ 零弹窗体验与智能验证码提取。
+/// 剪贴板变更侦测器，兼顾 iOS 16+ 零弹窗体验、跨屏剪贴板接力与智能验证码提取。
+/// 当用户新复制内容、跨设备秒传或收到验证码时，顶栏自动切换为全宽剪贴板/验证码智能胶囊；
+/// 用户点击粘贴或关闭后，才标记当前 changeCount 与 pendingBannerItem 已处理并恢复常规顶栏。
 final class PasteboardMonitor {
     private(set) var bannerState: ClipboardBannerState = .hidden
     private var dismissedChangeCount: Int = -1
+    private var activeChangeCount: Int = -1
 
     func refresh(settings: LingxiSettings, onChange: @escaping (ClipboardBannerState) -> Void) {
         guard settings.clipboardBannerEnabled else {
@@ -100,19 +76,53 @@ final class PasteboardMonitor {
 
         let pb = UIPasteboard.general
         let currentCount = pb.changeCount
+
+        // 1. 若系统剪贴板无字符串，检查是否有跨屏剪贴板接力或主 App 刚写入的待展示条目
         guard pb.hasStrings else {
-            bannerState = .hidden
-            onChange(.hidden)
+            if let pending = ClipboardStore.pendingBannerItem() {
+                bannerState = .readyPreview(item: pending)
+                onChange(bannerState)
+            } else {
+                bannerState = .hidden
+                onChange(.hidden)
+            }
             return
         }
 
+        // 2. 若当前系统 changeCount 已消费，仍检查是否有跨设备秒传的新待展示条目
         if currentCount == dismissedChangeCount || currentCount == ClipboardStore.lastHandledChangeCount() {
+            if let pending = ClipboardStore.pendingBannerItem() {
+                bannerState = .readyPreview(item: pending)
+                onChange(bannerState)
+                return
+            }
+            if bannerState != .hidden {
+                bannerState = .hidden
+                onChange(.hidden)
+            }
             return
         }
 
-        if settings.autoReadClipboardPreview {
+        // 3. 若当前 changeCount 已经处于预览展示态，保持显示不重复重入
+        if currentCount == activeChangeCount, bannerState != .hidden {
+            onChange(bannerState)
+            return
+        }
+
+        if settings.autoReadClipboardPreview || settings.smartOTPExtraction {
             if let text = pb.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if let item = ClipboardStore.record(text, changeCount: currentCount) {
+                // L1 安全防线：若剪贴板为身份证号、银行卡号、私钥或显式密码，立即屏蔽并跳过横幅提示
+                if ClipboardClassifier.isSensitiveContent(text) {
+                    dismissedChangeCount = currentCount
+                    ClipboardStore.markChangeCountHandled(currentCount)
+                    bannerState = .hidden
+                    onChange(.hidden)
+                    return
+                }
+                // 注意：此处仅入库历史并标记 pendingBannerItem，不提前标记 lastHandledChangeCount，
+                // 确保用户第一次复制后顶栏持续显示所复制内容，直到点击粘贴或关闭
+                if let item = ClipboardStore.record(text, changeCount: nil) {
+                    activeChangeCount = currentCount
                     bannerState = .readyPreview(item: item)
                     onChange(bannerState)
                     return
@@ -125,6 +135,7 @@ final class PasteboardMonitor {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let matched = (try? result.get()) ?? []
+                self.activeChangeCount = currentCount
                 let state = ClipboardBannerState.detectedNewContent(
                     changeCount: currentCount,
                     isURL: matched.contains(.probableWebURL),
@@ -138,27 +149,33 @@ final class PasteboardMonitor {
 
     func handleCapturedPaste(_ text: String, settings: LingxiSettings) -> (item: ClipboardItem?, shouldOfferOTPChoice: Bool) {
         let count = UIPasteboard.general.changeCount
-        let item = ClipboardStore.record(text, changeCount: count)
+        let item = ClipboardStore.record(text, changeCount: nil)
         if let item, settings.smartOTPExtraction, let code = item.extractedCode, item.text.count > code.count + 4 {
+            activeChangeCount = count
             bannerState = .readyPreview(item: item)
             return (item, true)
         }
-        dismissedChangeCount = count
-        bannerState = .hidden
+        dismissCurrent()
         return (item, false)
     }
 
     func dismissCurrent() {
+        let countToMark: Int
         switch bannerState {
         case .detectedNewContent(let count, _, _):
-            dismissedChangeCount = count
-            ClipboardStore.markChangeCountHandled(count)
+            countToMark = count
         case .readyPreview:
-            dismissedChangeCount = UIPasteboard.general.changeCount
-            ClipboardStore.markChangeCountHandled(dismissedChangeCount)
+            countToMark = activeChangeCount >= 0 ? activeChangeCount : UIPasteboard.general.changeCount
         case .hidden:
-            break
+            countToMark = activeChangeCount
         }
+        if countToMark >= 0 {
+            dismissedChangeCount = countToMark
+            ClipboardStore.markChangeCountHandled(countToMark)
+        } else {
+            ClipboardStore.clearPendingBanner()
+        }
+        activeChangeCount = -1
         bannerState = .hidden
     }
 }

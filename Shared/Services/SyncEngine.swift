@@ -122,6 +122,92 @@ public final class SnapshotSyncSource: SyncDataSource {
 
 }
 
+/// 个人自学习词库同步数据源：将 UserLexicon (user_dict.sqlite) 导出为确定性 TSV 快照参与 LWW 云同步，
+/// 远端胜出时自动合并导入本地词库。
+public final class UserLexiconSyncSource: SyncDataSource {
+    public let watchedNamespaces: [SyncNamespace] = [.lexicon]
+
+    public init() {}
+
+    public func collectChanges(deviceID: String, clock: LamportClock, ledger: inout SyncLedger) -> [SyncChange] {
+        let lexicon = UserLexicon()
+        let tsv = lexicon.exportTSV()
+        guard let data = tsv.data(using: .utf8), !data.isEmpty else { return [] }
+        // 若仅包含表头注释而无实际词条且账本为空，跳过空推送
+        let nonHeaderLines = tsv.split(whereSeparator: \.isNewline).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+        let recordKey = SyncNamespace.lexicon.rawValue + "/main"
+        if nonHeaderLines.isEmpty && ledger.records[recordKey] == nil {
+            return []
+        }
+        if let existing = ledger.records[recordKey], existing.ciphertext == data {
+            return []
+        }
+        let change = SyncChange(
+            namespace: .lexicon,
+            key: "main",
+            ciphertext: data,
+            lamportTS: clock.tick(),
+            deviceID: deviceID,
+            tombstone: false
+        )
+        ledger.records[recordKey] = change
+        return [change]
+    }
+
+    @discardableResult
+    public func apply(_ changes: [SyncChange]) -> Int {
+        var applied = 0
+        let lexicon = UserLexicon()
+        for change in changes where change.namespace == .lexicon && change.key == "main" {
+            if change.tombstone {
+                lexicon.clearAll()
+                applied += 1
+            } else if let text = String(data: change.ciphertext, encoding: .utf8) {
+                _ = lexicon.importTSV(text)
+                applied += 1
+            }
+        }
+        return applied
+    }
+}
+
+/// 组合数据源：将设置、主题、自定义短语文件快照与个人 SQLite 词库统一纳入单次 LWW 同步事务。
+public final class CompositeSyncSource: SyncDataSource {
+    private let sources: [SyncDataSource]
+
+    public var watchedNamespaces: [SyncNamespace] {
+        var seen = Set<SyncNamespace>()
+        var result: [SyncNamespace] = []
+        for src in sources {
+            for ns in src.watchedNamespaces where seen.insert(ns).inserted {
+                result.append(ns)
+            }
+        }
+        return result
+    }
+
+    public init(sources: [SyncDataSource]) {
+        self.sources = sources
+    }
+
+    public func collectChanges(deviceID: String, clock: LamportClock, ledger: inout SyncLedger) -> [SyncChange] {
+        var all: [SyncChange] = []
+        for src in sources {
+            all.append(contentsOf: src.collectChanges(deviceID: deviceID, clock: clock, ledger: &ledger))
+        }
+        return all
+    }
+
+    @discardableResult
+    public func apply(_ changes: [SyncChange]) -> Int {
+        var total = 0
+        for src in sources {
+            total += src.apply(changes)
+        }
+        return total
+    }
+}
+
 // MARK: - 引擎
 
 /// 一次同步的执行报告
@@ -153,13 +239,25 @@ public final class SyncEngine {
         self.ledgerStore = ledgerStore
     }
 
-    /// 生产共享实例：Local Noop 同步服务（离线默认态）+ 设置/主题快照源
+    /// 生产全量重要数据源：覆盖全部 7 类核心用户数据（设置、主题、自定义编码短语、快捷回复短语、常用表情权重、打字统计与个人 SQLite 词库）
+    public static func makeFullSyncSource() -> SyncDataSource {
+        CompositeSyncSource(sources: [
+            SnapshotSyncSource(entries: [
+                .init(namespace: .settings, fileName: "lingxi_settings.json"),
+                .init(namespace: .theme, fileName: "lingxi_theme.json"),
+                .init(namespace: .phrases, fileName: "lingxi_custom_words.json"),
+                .init(namespace: .quickPhrases, fileName: "lingxi_phrases.json"),
+                .init(namespace: .recentEmojis, fileName: "lingxi_recent_emojis.json"),
+                .init(namespace: .typingStats, fileName: "typing_stats.json")
+            ]),
+            UserLexiconSyncSource()
+        ])
+    }
+
+    /// 生产共享实例：Local Noop 同步服务（离线默认态）+ 全量重要数据源
     public static let shared = SyncEngine(
         sync: LingxiServices.sync,
-        source: SnapshotSyncSource(entries: [
-            .init(namespace: .settings, fileName: "lingxi_settings.json"),
-            .init(namespace: .theme, fileName: "lingxi_theme.json")
-        ])
+        source: makeFullSyncSource()
     )
 
     /// 完整一轮同步。网络不可达时向上抛出（调用方静默处理，离线是默认态不是错误态）。

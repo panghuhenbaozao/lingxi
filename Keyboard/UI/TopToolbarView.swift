@@ -1,9 +1,13 @@
 import UIKit
 
-/// 键盘顶部工具与候选条（46pt 高度）：
-/// - 空闲时：快捷功能按钮 + 剪贴板智能胶囊（零弹窗 UIPasteControl / 验证码提取）
+/// 键盘顶部工具与智能状态栏（50pt 默认高度，可调 44–64pt）：
+/// - 空闲常规态（极简白 / 墨玉设计）：
+///   左侧主功能胶囊区 `[✨ 灵犀 AI]` `[译]` + 右侧轻量工具按钮 `[剪贴板]` `[设置]`（彻底移除表情/光标移动与 ⋯ 折叠杂乱项）
+/// - 剪贴板 / 短信验证码独占接管态（Full-Bar Takeover）：
+///   当检测到新复制内容或短信验证码时，自动隐藏常规工具栏按钮，整栏切换为「验证码一键填入 / 刚复制内容预览与粘贴」智能胶囊条；
+///   粘贴或关闭后立即恢复常规工具栏。
 /// - 拼音输入中：上方紧凑音节分词/纠错预览 + 候选词横向滚动条
-/// - AI 自由提问模式：高亮提问草稿栏 + 一键发送问 AI
+/// - 边打边译 / AI 提问态：专享流式预览与快捷上屏控制条
 final class TopToolbarView: UIView {
     struct TranslateBarState: Equatable {
         var targetLanguage: String
@@ -22,8 +26,6 @@ final class TopToolbarView: UIView {
         case commitTranslatedText
         case commitTranslateSource
         case toggleClipboard
-        case toggleEmoji
-        case toggleTextEditing
         case toggleQuickSettings
         case toggleLayoutQuick
         case undoDelete
@@ -38,8 +40,6 @@ final class TopToolbarView: UIView {
         case pickLastChar(String)
         case sendAIPrompt
         case cancelAIPrompt
-        /// v4：聚合面板内触发被收纳按钮的动作
-        case overflowTrigger(ToolbarButtonID)
     }
 
     var onAction: ((Action) -> Void)?
@@ -47,37 +47,27 @@ final class TopToolbarView: UIView {
     var onLongPressCandidate: ((Int, UIView) -> Void)?
     var onToggleExpandCandidates: (() -> Void)?
 
+    private let bottomHairline = UIView()
     private let composingLabel = UILabel()
     let candidateBar = CandidateBarView()
 
-    // 空闲功能区
+    // 空闲功能区：左主胶囊簇 + 右工具簇
     private let idleContainer = UIView()
-    private let buttonsStack = UIStackView()
+    private let leftClusterStack = UIStackView()
+    private let rightClusterStack = UIStackView()
     private let aiButton = UIButton(type: .system)
     private let translateButton = UIButton(type: .system)
     private let clipboardButton = UIButton(type: .system)
-    private let emojiButton = UIButton(type: .system)
-    private let editButton = UIButton(type: .system)
     private let layoutButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
     private let undoButton = UIButton(type: .system)
-    /// v4 极简态：『⋯』聚合按钮——收纳被配置隐藏的低频按钮，点开弹出选择面板
-    private let overflowButton = UIButton(type: .system)
-    /// 聚合面板（半屏菜单）：展示被收起的按钮，选中即触发对应动作
-    private let overflowPanel = UIView()
-    private var overflowPanelButtons: [(id: ToolbarButtonID, btn: UIButton)] = []
-    private var isOverflowPanelVisible = false
-    /// 当前被收纳的按钮清单（applyToolbarConfiguration 时更新，主题重建用）
-    private var currentHiddenIDs: [ToolbarButtonID] = []
 
-    // 剪贴板智能胶囊
+    // 剪贴板 / 短信验证码全栏独占接管胶囊（Full-Bar Takeover）
     private let bannerContainer = UIView()
-    private let bannerScroll = UIScrollView()
     private let bannerStack = UIStackView()
     private let pasteTargetView = PasteTargetView()
     private var pasteControl: UIPasteControl?
     private var currentBannerState: ClipboardBannerState = .hidden
-    /// 防闪烁：上次重建剪贴板胶囊时的状态签名，未变化时跳过全量重建
     private var lastBannerKey = ""
 
     // 长按候选词操作浮条
@@ -106,12 +96,10 @@ final class TopToolbarView: UIView {
     private var isTranslateBarActive = false
     private var hasFullAccess = false
     private var onCapturedPaste: ((String) -> Void)?
-    /// 工具栏布局配置（按钮排序 + 显隐），默认与原始固定顺序一致
     private var toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout
-    /// 拼音/组合串预览条显隐开关
     private var showComposingStrip = true
-    /// 撤销按钮是否被配置允许显示（与实际 showUndo 状态叠加）
     private var undoConfiguredVisible = true
+    private var lastToolbarLayoutKey = ""
 
     init(onCapturedPaste: @escaping (String) -> Void) {
         self.onCapturedPaste = onCapturedPaste
@@ -128,6 +116,9 @@ final class TopToolbarView: UIView {
             self?.onCapturedPaste?(text)
         }
         addSubview(pasteTargetView)
+
+        bottomHairline.isUserInteractionEnabled = false
+        addSubview(bottomHairline)
 
         composingLabel.font = .systemFont(ofSize: 13.5, weight: .semibold)
         composingLabel.isHidden = true
@@ -146,68 +137,129 @@ final class TopToolbarView: UIView {
         addSubview(candidateBar)
 
         addSubview(idleContainer)
-        buttonsStack.axis = .horizontal
-        buttonsStack.alignment = .fill // .fill：系统按钮被拉伸到 44pt，触摸目标符合 HIG
-        buttonsStack.spacing = 3
-        idleContainer.addSubview(buttonsStack)
 
-        configureToolButton(aiButton, title: "AI", symbol: "sparkles", action: #selector(didTapAI))
-        configureToolButton(translateButton, title: "译", symbol: nil, action: #selector(didTapTranslate))
-        configureToolButton(clipboardButton, title: nil, symbol: "doc.on.clipboard", action: #selector(didTapClipboard))
-        configureToolButton(emojiButton, title: nil, symbol: "face.smiling", action: #selector(didTapEmoji))
-        configureToolButton(editButton, title: nil, symbol: "arrow.up.and.down.and.arrow.left.and.right", action: #selector(didTapEdit))
-        configureToolButton(layoutButton, title: "九键", symbol: nil, action: #selector(didTapLayout))
-        configureToolButton(settingsButton, title: nil, symbol: "slider.horizontal.3", action: #selector(didTapSettings))
-        configureToolButton(overflowButton, title: nil, symbol: "ellipsis", action: #selector(didTapOverflow))
-        // VoiceOver：纯图标按钮补充功能标签（带文字标题的按钮沿用标题）
-        clipboardButton.accessibilityLabel = "剪贴板"
-        emojiButton.accessibilityLabel = "表情符号"
-        editButton.accessibilityLabel = "文本编辑面板"
-        settingsButton.accessibilityLabel = "键盘设置"
-        overflowButton.accessibilityLabel = "更多功能"
+        leftClusterStack.axis = .horizontal
+        leftClusterStack.alignment = .center
+        leftClusterStack.spacing = 8
+        idleContainer.addSubview(leftClusterStack)
+
+        rightClusterStack.axis = .horizontal
+        rightClusterStack.alignment = .center
+        rightClusterStack.spacing = 6
+        idleContainer.addSubview(rightClusterStack)
+
+        // 左侧核心胶囊：灵犀 AI + 译
+        configurePrimaryPillButton(
+            aiButton,
+            title: "灵犀 AI",
+            symbol: "sparkles",
+            action: #selector(didTapAI)
+        )
+        configurePrimaryPillButton(
+            translateButton,
+            title: "译",
+            symbol: "character.bubble",
+            action: #selector(didTapTranslate)
+        )
+
+        // 右侧工具胶囊：撤销、九键切换、剪贴板、快捷设置
+        configureUtilityButton(
+            clipboardButton,
+            title: nil,
+            symbol: "doc.on.clipboard",
+            accessibilityLabel: "剪贴板",
+            action: #selector(didTapClipboard)
+        )
+        configureUtilityButton(
+            layoutButton,
+            title: "九键",
+            symbol: nil,
+            accessibilityLabel: "切换九键与26键",
+            action: #selector(didTapLayout)
+        )
+        configureUtilityButton(
+            settingsButton,
+            title: nil,
+            symbol: "slider.horizontal.3",
+            accessibilityLabel: "键盘快捷设置",
+            action: #selector(didTapSettings)
+        )
 
         undoButton.setTitle(" 撤销", for: .normal)
-        let undoImg = UIImage(systemName: "arrow.uturn.backward", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+        let undoImg = UIImage(
+            systemName: "arrow.uturn.backward",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold)
+        )
         undoButton.setImage(undoImg, for: .normal)
         undoButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-        undoButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
-        undoButton.layer.cornerRadius = 13
+        undoButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        undoButton.layer.cornerRadius = 15
+        undoButton.layer.cornerCurve = .continuous
         undoButton.isHidden = true
         undoButton.accessibilityLabel = "撤销"
         undoButton.addTarget(self, action: #selector(didTapUndo), for: .touchUpInside)
 
-        [aiButton, translateButton, clipboardButton, emojiButton, editButton, layoutButton, settingsButton, undoButton, overflowButton].forEach {
-            buttonsStack.addArrangedSubview($0)
+        leftClusterStack.addArrangedSubview(aiButton)
+        leftClusterStack.addArrangedSubview(translateButton)
+        [undoButton, layoutButton, clipboardButton, settingsButton].forEach {
+            rightClusterStack.addArrangedSubview($0)
         }
 
+        // 全栏接管胶囊容器（复制内容 / 短信验证码到来时整栏替换显示）
         bannerContainer.isHidden = true
+        bannerContainer.layer.cornerRadius = 18
+        bannerContainer.layer.cornerCurve = .continuous
+        bannerContainer.layer.borderWidth = 0.5
         idleContainer.addSubview(bannerContainer)
-        bannerScroll.showsHorizontalScrollIndicator = false
-        bannerScroll.delaysContentTouches = false
-        bannerContainer.addSubview(bannerScroll)
+
         bannerStack.axis = .horizontal
         bannerStack.alignment = .center
         bannerStack.spacing = 6
-        bannerScroll.addSubview(bannerStack)
+        bannerContainer.addSubview(bannerStack)
 
         wordActionContainer.isHidden = true
         addSubview(wordActionContainer)
 
-        // v4 聚合面板：横排胶囊浮层，覆盖工具栏区域（与词操作浮条同层）
-        // 点击面板任意处关闭（cancelsTouchesInView=false，按钮 touchUpInside 不受影响）
-        let overflowDismissTap = UITapGestureRecognizer(target: self, action: #selector(didTapOverflowDismiss))
-        overflowDismissTap.cancelsTouchesInView = false
-        overflowPanel.addGestureRecognizer(overflowDismissTap)
-        overflowPanel.isHidden = true
-        overflowPanel.layer.cornerRadius = 14
-        overflowPanel.layer.shadowColor = UIColor.black.cgColor
-        overflowPanel.layer.shadowOpacity = 0.12
-        overflowPanel.layer.shadowRadius = 8
-        overflowPanel.layer.shadowOffset = CGSize(width: 0, height: 3)
-        addSubview(overflowPanel)
-
         setupAIPromptBar()
         setupTranslateBar()
+    }
+
+    private func configurePrimaryPillButton(_ btn: UIButton, title: String, symbol: String, action: Selector) {
+        let cfg = UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold)
+        btn.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
+        btn.setTitle(" " + title, for: .normal)
+        btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 11, bottom: 6, right: 11)
+        btn.layer.cornerRadius = 15
+        btn.layer.cornerCurve = .continuous
+        btn.layer.borderWidth = 0.5
+        btn.addTarget(self, action: action, for: .touchUpInside)
+    }
+
+    private func configureUtilityButton(
+        _ btn: UIButton,
+        title: String?,
+        symbol: String?,
+        accessibilityLabel: String,
+        action: Selector
+    ) {
+        if let symbol {
+            let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            btn.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
+        }
+        if let title {
+            let prefix = symbol == nil ? "" : " "
+            btn.setTitle("\(prefix)\(title)", for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        } else {
+            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
+        }
+        btn.layer.cornerRadius = 15
+        btn.layer.cornerCurve = .continuous
+        btn.layer.borderWidth = 0.5
+        btn.accessibilityLabel = accessibilityLabel
+        btn.addTarget(self, action: action, for: .touchUpInside)
     }
 
     private func setupTranslateBar() {
@@ -228,6 +280,7 @@ final class TopToolbarView: UIView {
             btn.titleLabel?.adjustsFontSizeToFitWidth = true
             btn.titleLabel?.minimumScaleFactor = 0.75
             btn.layer.cornerRadius = 11
+            btn.layer.cornerCurve = .continuous
             translateBar.addSubview(btn)
         }
 
@@ -264,15 +317,17 @@ final class TopToolbarView: UIView {
 
         aiPromptSendBtn.setTitle("问 AI", for: .normal)
         aiPromptSendBtn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .bold)
-        aiPromptSendBtn.layer.cornerRadius = 12
-        aiPromptSendBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+        aiPromptSendBtn.layer.cornerRadius = 14
+        aiPromptSendBtn.layer.cornerCurve = .continuous
+        aiPromptSendBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 11, bottom: 5, right: 11)
         aiPromptSendBtn.actionHandler = { [weak self] in self?.onAction?(.sendAIPrompt) }
         aiPromptBar.addSubview(aiPromptSendBtn)
 
         aiPromptCancelBtn.setTitle("取消", for: .normal)
         aiPromptCancelBtn.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
-        aiPromptCancelBtn.layer.cornerRadius = 12
-        aiPromptCancelBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
+        aiPromptCancelBtn.layer.cornerRadius = 14
+        aiPromptCancelBtn.layer.cornerCurve = .continuous
+        aiPromptCancelBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
         aiPromptCancelBtn.actionHandler = { [weak self] in self?.onAction?(.cancelAIPrompt) }
         aiPromptBar.addSubview(aiPromptCancelBtn)
     }
@@ -282,63 +337,40 @@ final class TopToolbarView: UIView {
         case .ai: return aiButton
         case .translate: return translateButton
         case .clipboard: return clipboardButton
-        case .emoji: return emojiButton
-        case .edit: return editButton
         case .layout: return layoutButton
         case .settings: return settingsButton
         case .undo: return undoButton
         }
     }
 
-    /// 防抖动：上次应用的工具栏布局签名，未变化时跳过重排（update 在打字链路高频触发）
-    private var lastToolbarLayoutKey = ""
-
-    /// 按配置重排工具栏按钮顺序并应用显隐（undo 的实际显隐还与 showUndo 叠加）
+    /// 按配置应用左右分簇排序与显隐
     private func applyToolbarConfiguration() {
         let sorted = LingxiSettings.normalizedToolbarLayout(toolbarLayout)
         let key = sorted.map { "\($0.buttonID.rawValue):\($0.isVisible ? 1 : 0)" }.joined(separator: ",")
         guard key != lastToolbarLayoutKey else { return }
         lastToolbarLayoutKey = key
-        var hiddenIDs: [ToolbarButtonID] = []
+
         for item in sorted {
             let btn = button(for: item.buttonID)
-            buttonsStack.addArrangedSubview(btn)
+            if item.buttonID.isPrimaryLeftAction {
+                leftClusterStack.addArrangedSubview(btn)
+            } else {
+                rightClusterStack.addArrangedSubview(btn)
+            }
             if item.buttonID == .undo {
                 undoConfiguredVisible = item.isVisible
                 btn.isHidden = !item.isVisible || undoButton.isHidden
             } else {
                 btn.isHidden = !item.isVisible
-                if !item.isVisible { hiddenIDs.append(item.buttonID) }
             }
         }
-        // v4 极简态：『⋯』固定在栈尾，仅当存在被收纳按钮时显示；面板内容同步重建
-        buttonsStack.addArrangedSubview(overflowButton)
-        overflowButton.isHidden = hiddenIDs.isEmpty
-        currentHiddenIDs = hiddenIDs
-        rebuildOverflowPanel(hiddenIDs: hiddenIDs)
         setNeedsLayout()
-    }
-
-    private func configureToolButton(_ btn: UIButton, title: String?, symbol: String?, action: Selector) {
-        if let symbol {
-            let cfg = UIImage.SymbolConfiguration(pointSize: 13.5, weight: .medium)
-            btn.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
-        }
-        if let title {
-            let prefix = symbol == nil ? "" : " "
-            btn.setTitle("\(prefix)\(title)", for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 6.5, bottom: 5, right: 6.5)
-        } else {
-            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 6.5, bottom: 6, right: 6.5)
-        }
-        btn.layer.cornerRadius = 13
-        btn.addTarget(self, action: action, for: .touchUpInside)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         pasteTargetView.frame = CGRect(x: 2, y: 2, width: 4, height: 4)
+        bottomHairline.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
 
         if hasCandidates {
             let showComposing = !(composingLabel.text ?? "").isEmpty
@@ -354,77 +386,76 @@ final class TopToolbarView: UIView {
         }
 
         idleContainer.frame = bounds
-        let buttonsSize = buttonsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-        let buttonsWidth = min(buttonsSize.width, bounds.width - 12)
-        // 新布局：工具按钮 44pt 打底（符合触摸目标规范），AI 按钮最醒目
-        let toolH: CGFloat = 44
-        buttonsStack.frame = CGRect(x: 8, y: (bounds.height - toolH) / 2, width: buttonsWidth, height: toolH)
+        let pillH: CGFloat = 30
+        let pillY = (bounds.height - pillH) / 2
 
-        let bannerX = buttonsStack.frame.maxX + 6
-        let bannerW = max(0, bounds.width - bannerX - 6)
-        bannerContainer.frame = CGRect(x: bannerX, y: 4, width: bannerW, height: bounds.height - 8)
-        bannerScroll.frame = bannerContainer.bounds
-        let contentW = max(bannerW, bannerStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
-        bannerStack.frame = CGRect(x: 0, y: 0, width: contentW, height: bannerScroll.bounds.height)
-        bannerScroll.contentSize = bannerStack.frame.size
+        let leftSize = leftClusterStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        leftClusterStack.frame = CGRect(x: 12, y: pillY, width: leftSize.width, height: pillH)
+
+        let rightSize = rightClusterStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        let rightX = max(leftClusterStack.frame.maxX + 8, bounds.width - 12 - rightSize.width)
+        rightClusterStack.frame = CGRect(x: rightX, y: pillY, width: rightSize.width, height: pillH)
+
+        // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
+        let bannerH: CGFloat = min(36, bounds.height - 10)
+        bannerContainer.frame = CGRect(
+            x: 10,
+            y: (bounds.height - bannerH) / 2,
+            width: max(0, bounds.width - 20),
+            height: bannerH
+        )
+        bannerStack.frame = bannerContainer.bounds.insetBy(dx: 8, dy: 3)
 
         wordActionContainer.frame = bounds
 
-        // v4 聚合面板与工具栏同层覆盖；stack 跟随面板实际尺寸（构建时面板 bounds 尚为零，不能只靠 autoresizing）
-        overflowPanel.frame = bounds
-        if let stack = overflowPanel.subviews.first as? UIStackView {
-            stack.frame = overflowPanel.bounds.insetBy(dx: 8, dy: 0)
-        }
-
         aiPromptBar.frame = bounds
-        let cancelW: CGFloat = 50
-        let sendW: CGFloat = 62
-        aiPromptCancelBtn.frame = CGRect(x: bounds.width - cancelW - 8, y: 8, width: cancelW, height: 30)
-        aiPromptSendBtn.frame = CGRect(x: aiPromptCancelBtn.frame.minX - sendW - 6, y: 8, width: sendW, height: 30)
-        aiPromptLabel.frame = CGRect(x: 12, y: 8, width: max(40, aiPromptSendBtn.frame.minX - 18), height: 30)
+        let cancelW: CGFloat = 52
+        let sendW: CGFloat = 64
+        aiPromptCancelBtn.frame = CGRect(x: bounds.width - cancelW - 10, y: (bounds.height - 30) / 2, width: cancelW, height: 30)
+        aiPromptSendBtn.frame = CGRect(x: aiPromptCancelBtn.frame.minX - sendW - 6, y: (bounds.height - 30) / 2, width: sendW, height: 30)
+        aiPromptLabel.frame = CGRect(x: 12, y: (bounds.height - 30) / 2, width: max(40, aiPromptSendBtn.frame.minX - 18), height: 30)
 
         translateBar.frame = bounds
         let tCloseW: CGFloat = 24
-        let tLangW: CGFloat = 40
+        let tLangW: CGFloat = 42
         let tToneW: CGFloat = 34
         let tSrcW: CGFloat = 26
-        let tCommitW: CGFloat = 38
-        let tY: CGFloat = 9
+        let tCommitW: CGFloat = 40
         let tH: CGFloat = 28
-        translateCloseBtn.frame = CGRect(x: bounds.width - 6 - tCloseW, y: tY, width: tCloseW, height: tH)
+        let tY: CGFloat = (bounds.height - tH) / 2
+        translateCloseBtn.frame = CGRect(x: bounds.width - 8 - tCloseW, y: tY, width: tCloseW, height: tH)
         translateLangBtn.frame = CGRect(x: translateCloseBtn.frame.minX - 4 - tLangW, y: tY, width: tLangW, height: tH)
         translateToneBtn.frame = CGRect(x: translateLangBtn.frame.minX - 4 - tToneW, y: tY, width: tToneW, height: tH)
         translateSourceBtn.frame = CGRect(x: translateToneBtn.frame.minX - 4 - tSrcW, y: tY, width: tSrcW, height: tH)
         translateCommitBtn.frame = CGRect(x: translateSourceBtn.frame.minX - 4 - tCommitW, y: tY, width: tCommitW, height: tH)
         let textW = max(56, translateCommitBtn.frame.minX - 14)
-        translateSourceLabel.frame = CGRect(x: 10, y: 3, width: textW, height: 15)
-        translateResultLabel.frame = CGRect(x: 10, y: 19, width: textW, height: 22)
+        translateSourceLabel.frame = CGRect(x: 10, y: 4, width: textW, height: 15)
+        translateResultLabel.frame = CGRect(x: 10, y: 20, width: textW, height: 22)
     }
 
     func apply(theme: ResolvedTheme) {
         self.theme = theme
         backgroundColor = theme.toolbarBg
+        bottomHairline.backgroundColor = theme.keyBorder.withAlphaComponent(0.65)
         composingLabel.textColor = theme.candidateHighlight
 
-        aiButton.backgroundColor = theme.accentFill.withAlphaComponent(0.14)
-        aiButton.tintColor = theme.candidateHighlight
-        aiButton.setTitleColor(theme.candidateHighlight, for: .normal)
+        stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        translateButton.backgroundColor = theme.keyFill.withAlphaComponent(0.75)
-        translateButton.tintColor = theme.keyText
-        translateButton.setTitleColor(theme.keyText, for: .normal)
-
-        for btn in [clipboardButton, emojiButton, editButton, layoutButton, settingsButton, overflowButton] {
-            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.75)
+        for btn in [clipboardButton, layoutButton, settingsButton] {
+            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
+            btn.layer.borderColor = theme.keyBorder.withAlphaComponent(0.85).cgColor
         }
-        overflowPanel.backgroundColor = theme.toolbarBg
+
         undoButton.backgroundColor = theme.accentFill
         undoButton.tintColor = theme.accentText
         undoButton.setTitleColor(theme.accentText, for: .normal)
 
-        aiPromptBar.backgroundColor = theme.accentFill.withAlphaComponent(0.12)
+        bannerContainer.backgroundColor = theme.keyFill
+        bannerContainer.layer.borderColor = theme.candidateHighlight.withAlphaComponent(0.28).cgColor
+
+        aiPromptBar.backgroundColor = theme.accentFill.withAlphaComponent(0.10)
         aiPromptLabel.textColor = theme.keyText
         aiPromptSendBtn.backgroundColor = theme.accentFill
         aiPromptSendBtn.setTitleColor(theme.accentText, for: .normal)
@@ -440,16 +471,39 @@ final class TopToolbarView: UIView {
         translateSourceBtn.setTitleColor(theme.keyText, for: .normal)
         translateToneBtn.backgroundColor = theme.specialKeyFill
         translateToneBtn.setTitleColor(theme.keyText, for: .normal)
-        translateLangBtn.backgroundColor = theme.keyFill.withAlphaComponent(0.9)
+        translateLangBtn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
         translateLangBtn.setTitleColor(theme.keyText, for: .normal)
         translateCloseBtn.backgroundColor = theme.specialKeyFill
         translateCloseBtn.tintColor = theme.keyText
 
         candidateBar.apply(theme: theme)
-        // 主题变化后强制重建胶囊以应用新配色
         rebuildBanner(force: true)
-        // v4：主题变化后同步重建聚合面板配色
-        rebuildOverflowPanel(hiddenIDs: currentHiddenIDs)
+    }
+
+    private func stylePrimaryButtons(theme: ResolvedTheme, aiActive: Bool, translateActive: Bool) {
+        if aiActive {
+            aiButton.backgroundColor = theme.accentFill
+            aiButton.tintColor = theme.accentText
+            aiButton.setTitleColor(theme.accentText, for: .normal)
+            aiButton.layer.borderColor = UIColor.clear.cgColor
+        } else {
+            aiButton.backgroundColor = theme.accentFill.withAlphaComponent(0.10)
+            aiButton.tintColor = theme.candidateHighlight
+            aiButton.setTitleColor(theme.candidateHighlight, for: .normal)
+            aiButton.layer.borderColor = theme.candidateHighlight.withAlphaComponent(0.26).cgColor
+        }
+
+        if translateActive {
+            translateButton.backgroundColor = theme.accentFill
+            translateButton.tintColor = theme.accentText
+            translateButton.setTitleColor(theme.accentText, for: .normal)
+            translateButton.layer.borderColor = UIColor.clear.cgColor
+        } else {
+            translateButton.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
+            translateButton.tintColor = theme.keyText
+            translateButton.setTitleColor(theme.keyText, for: .normal)
+            translateButton.layer.borderColor = theme.keyBorder.withAlphaComponent(0.85).cgColor
+        }
     }
 
     func update(
@@ -499,8 +553,6 @@ final class TopToolbarView: UIView {
             } else {
                 translateResultLabel.text = tr.isTranslating ? "\(tr.translatedText) ▍" : tr.translatedText
             }
-            // 方向指示：输入中文时译向目标语言，输入外文时译回中文（双向互译）；
-            // 尚未输入时默认展示主用方向 中→目标语言
             let hasForeign = tr.sourceText.range(of: "[A-Za-z]", options: .regularExpression) != nil
             let hasChinese = tr.sourceText.range(of: "[\\u4e00-\\u9fff]", options: .regularExpression) != nil
             let directionLabel = (hasForeign && !hasChinese) ? "英→中" : "中→\(tr.targetLanguage)"
@@ -526,28 +578,16 @@ final class TopToolbarView: UIView {
 
         composingLabel.text = showComposingStrip ? composingDisplay : ""
         candidateBar.isHidden = !hasCandidates
-        // v4：聚合面板打开时工具按钮区保持隐藏（update 高频触发不能破坏面板态）
-        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden) || isOverflowPanelVisible
-        // v4：离开空闲态时自动收起聚合面板
-        if hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden) {
-            if isOverflowPanelVisible { hideOverflowPanel() }
-        }
+        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
-        if let theme {
-            aiButton.backgroundColor = aiPanelActive
-                ? theme.accentFill
-                : theme.accentFill.withAlphaComponent(0.14)
-            let aiTint = aiPanelActive ? theme.accentText : theme.candidateHighlight
-            aiButton.tintColor = aiTint
-            aiButton.setTitleColor(aiTint, for: .normal)
+        // 当剪贴板新内容或短信验证码胶囊激活时，隐藏常规的「灵犀 AI / 译 / 工具」按钮栏，由剪贴板胶囊独占顶栏
+        let isBannerTakeoverActive = (currentBannerState != .hidden)
+        leftClusterStack.isHidden = isBannerTakeoverActive
+        rightClusterStack.isHidden = isBannerTakeoverActive
 
-            translateButton.backgroundColor = isTranslateBarActive
-                ? theme.accentFill
-                : theme.keyFill.withAlphaComponent(0.75)
-            let trTint = isTranslateBarActive ? theme.accentText : theme.keyText
-            translateButton.tintColor = trTint
-            translateButton.setTitleColor(trTint, for: .normal)
+        if let theme {
+            stylePrimaryButtons(theme: theme, aiActive: aiPanelActive, translateActive: isTranslateBarActive)
         }
 
         if hasCandidates {
@@ -618,22 +658,42 @@ final class TopToolbarView: UIView {
         rebuildBanner(force: false)
     }
 
+    /// 构建全宽独占顶栏的「短信验证码 / 新复制内容」智能胶囊
     private func rebuildBanner(force: Bool) {
-        // 防闪烁：refreshUI 高频触发本方法，剪贴板状态未变化时跳过全量重建（含 UIPasteControl 重建）
         let bannerKey = "\(currentBannerState)|\(hasFullAccess)"
         if !force && bannerKey == lastBannerKey { return }
         lastBannerKey = bannerKey
+
         bannerStack.arrangedSubviews.forEach {
             bannerStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
         guard let theme else { return }
 
+        let isTakeover = (currentBannerState != .hidden)
+        leftClusterStack.isHidden = isTakeover
+        rightClusterStack.isHidden = isTakeover
+
         switch currentBannerState {
         case .hidden:
             bannerContainer.isHidden = true
+
         case .detectedNewContent(_, let isURL, let isNumber):
             bannerContainer.isHidden = false
+
+            let badge = makeTagBadge(
+                icon: isURL ? "link" : (isNumber ? "number.square.fill" : "doc.on.clipboard.fill"),
+                text: isURL ? "新链接" : (isNumber ? "验证码/数字" : "刚复制"),
+                theme: theme
+            )
+            let hintLabel = UILabel()
+            hintLabel.text = isNumber ? "检测到复制的数字或验证码" : "检测到刚复制的新内容"
+            hintLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+            hintLabel.textColor = theme.keyText
+            hintLabel.lineBreakMode = .byTruncatingTail
+            hintLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
             var cfg = UIPasteControl.Configuration()
             cfg.displayMode = .iconAndLabel
             cfg.cornerStyle = .capsule
@@ -642,23 +702,18 @@ final class TopToolbarView: UIView {
             let control = UIPasteControl(configuration: cfg)
             control.target = pasteTargetView
             control.translatesAutoresizingMaskIntoConstraints = false
-            control.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            control.heightAnchor.constraint(equalToConstant: 26).isActive = true
             control.setContentCompressionResistancePriority(.required, for: .horizontal)
             self.pasteControl = control
 
-            let hintLabel = UILabel()
-            hintLabel.text = isURL ? "🔗新链接" : (isNumber ? "🔢新数字" : "📋新复制")
-            hintLabel.font = .systemFont(ofSize: 12, weight: .medium)
-            hintLabel.textColor = theme.candidateText
-
+            bannerStack.addArrangedSubview(badge)
             bannerStack.addArrangedSubview(hintLabel)
             bannerStack.addArrangedSubview(control)
 
-            // 当某些宿主 App 限制 UIPasteControl 时，提供直接读取兜底按钮
             if hasFullAccess {
                 let fallbackBtn = makeCapsuleButton(
                     title: "直贴",
-                    bg: theme.keyFill.withAlphaComponent(0.9),
+                    bg: theme.specialKeyFill,
                     fg: theme.keyText
                 ) { [weak self] in
                     self?.onAction?(.directPasteFallback)
@@ -669,38 +724,108 @@ final class TopToolbarView: UIView {
 
         case .readyPreview(let item):
             bannerContainer.isHidden = false
+            let singleLine = item.text
+                .replacingOccurrences(of: "\r\n", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
             if let code = item.extractedCode {
-                let otpBtn = makeCapsuleButton(
-                    title: "🔢 填验证码 \(code)",
+                // 模式 A：短信/通知验证码全栏独占提醒
+                let badge = makeTagBadge(icon: "message.badge.filled.fill", text: "验证码", theme: theme)
+
+                let codePreviewBtn = ActionClosureButton(type: .system)
+                codePreviewBtn.setTitle("\(code)  ·  \(singleLine)", for: .normal)
+                codePreviewBtn.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+                codePreviewBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+                codePreviewBtn.setTitleColor(theme.keyText, for: .normal)
+                codePreviewBtn.contentHorizontalAlignment = .leading
+                codePreviewBtn.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                codePreviewBtn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                codePreviewBtn.actionHandler = { [weak self] in
+                    self?.onAction?(.insertOTP(code))
+                }
+
+                let fillBtn = makeCapsuleButton(
+                    title: "填入 \(code)",
                     bg: theme.accentFill,
                     fg: theme.accentText
                 ) { [weak self] in
                     self?.onAction?(.insertOTP(code))
                 }
-                bannerStack.addArrangedSubview(otpBtn)
-            }
 
-            let preview = item.text.replacingOccurrences(of: "\n", with: " ")
-            let clipped = preview.count > 12 ? String(preview.prefix(12)) + "…" : preview
-            let pasteBtn = makeCapsuleButton(
-                title: "📋 \(clipped)",
-                bg: theme.keyFill.withAlphaComponent(0.9),
-                fg: theme.keyText
-            ) { [weak self] in
-                self?.onAction?(.pasteCaptured(item.text))
+                bannerStack.addArrangedSubview(badge)
+                bannerStack.addArrangedSubview(codePreviewBtn)
+                bannerStack.addArrangedSubview(fillBtn)
+
+                if singleLine.count > code.count + 4 {
+                    let fullBtn = makeCapsuleButton(
+                        title: "全文",
+                        bg: theme.specialKeyFill,
+                        fg: theme.keyText
+                    ) { [weak self] in
+                        self?.onAction?(.pasteCaptured(item.text))
+                    }
+                    bannerStack.addArrangedSubview(fullBtn)
+                }
+                bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
+            } else {
+                // 模式 B：刚复制的内容全栏独占预览与一键粘贴
+                let (icon, tagTitle): (String, String) = {
+                    switch item.category {
+                    case .url: return ("link", "新链接")
+                    case .phone: return ("phone.fill", "号码")
+                    case .code: return ("number.square.fill", "验证码")
+                    case .text: return ("doc.on.clipboard.fill", "刚复制")
+                    }
+                }()
+                let badge = makeTagBadge(icon: icon, text: tagTitle, theme: theme)
+
+                let contentBtn = ActionClosureButton(type: .system)
+                contentBtn.setTitle(singleLine, for: .normal)
+                contentBtn.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+                contentBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+                contentBtn.setTitleColor(theme.keyText, for: .normal)
+                contentBtn.contentHorizontalAlignment = .leading
+                contentBtn.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                contentBtn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                contentBtn.accessibilityLabel = "刚复制的内容：\(singleLine)，点按直接粘贴"
+                contentBtn.actionHandler = { [weak self] in
+                    self?.onAction?(.pasteCaptured(item.text))
+                }
+
+                let pasteBtn = makeCapsuleButton(
+                    title: "粘贴",
+                    bg: theme.accentFill,
+                    fg: theme.accentText
+                ) { [weak self] in
+                    self?.onAction?(.pasteCaptured(item.text))
+                }
+
+                bannerStack.addArrangedSubview(badge)
+                bannerStack.addArrangedSubview(contentBtn)
+                bannerStack.addArrangedSubview(pasteBtn)
+                bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
             }
-            let aiReplyBtn = makeCapsuleButton(
-                title: "✨ AI回",
-                bg: theme.accentFill.withAlphaComponent(0.16),
-                fg: theme.candidateHighlight
-            ) { [weak self] in
-                self?.onAction?(.askAIForClipboard(item.text))
-            }
-            bannerStack.addArrangedSubview(pasteBtn)
-            bannerStack.addArrangedSubview(aiReplyBtn)
-            bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
         }
         setNeedsLayout()
+    }
+
+    private func makeTagBadge(icon: String, text: String, theme: ResolvedTheme) -> UIView {
+        let pill = UIButton(type: .system)
+        pill.isUserInteractionEnabled = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
+        pill.setImage(UIImage(systemName: icon, withConfiguration: cfg), for: .normal)
+        pill.setTitle(" " + text, for: .normal)
+        pill.titleLabel?.font = .systemFont(ofSize: 11, weight: .semibold)
+        pill.tintColor = theme.candidateHighlight
+        pill.setTitleColor(theme.candidateHighlight, for: .normal)
+        pill.backgroundColor = theme.accentFill.withAlphaComponent(0.12)
+        pill.layer.cornerRadius = 12
+        pill.layer.cornerCurve = .continuous
+        pill.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        pill.setContentHuggingPriority(.required, for: .horizontal)
+        pill.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return pill
     }
 
     private func makeCapsuleButton(title: String, bg: UIColor, fg: UIColor, handler: @escaping () -> Void) -> UIButton {
@@ -710,112 +835,32 @@ final class TopToolbarView: UIView {
         btn.backgroundColor = bg
         btn.setTitleColor(fg, for: .normal)
         btn.layer.cornerRadius = 13
-        btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
+        btn.layer.cornerCurve = .continuous
+        btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+        btn.setContentHuggingPriority(.required, for: .horizontal)
+        btn.setContentCompressionResistancePriority(.required, for: .horizontal)
         btn.actionHandler = handler
         return btn
     }
 
     private func makeCloseButton(tint: UIColor) -> UIButton {
         let btn = ActionClosureButton(type: .system)
-        let cfg = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .bold)
         btn.setImage(UIImage(systemName: "xmark", withConfiguration: cfg), for: .normal)
         btn.tintColor = tint
-        btn.accessibilityLabel = "关闭剪贴板提示"
+        btn.accessibilityLabel = "关闭剪贴板提示并恢复工具栏"
         btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        btn.setContentHuggingPriority(.required, for: .horizontal)
+        btn.setContentCompressionResistancePriority(.required, for: .horizontal)
         btn.actionHandler = { [weak self] in
             self?.onAction?(.dismissClipboardBanner)
         }
         return btn
     }
 
-    // MARK: v4 聚合面板（⋯）
-
-    /// 重建聚合面板：横排胶囊按钮（被收纳功能）+ 收起按钮
-    private func rebuildOverflowPanel(hiddenIDs: [ToolbarButtonID]) {
-        overflowPanel.subviews.forEach { $0.removeFromSuperview() }
-        overflowPanelButtons = []
-        guard !hiddenIDs.isEmpty, let theme else { return }
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.alignment = .center
-        stack.spacing = 6
-        stack.frame = overflowPanel.bounds.insetBy(dx: 8, dy: 0)
-        stack.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        for id in hiddenIDs {
-            let btn = ActionClosureButton(type: .system)
-            let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-            btn.setImage(UIImage(systemName: id.symbolName, withConfiguration: cfg), for: .normal)
-            btn.setTitle(" " + overflowDisplayName(for: id), for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.9)
-            btn.tintColor = theme.keyText
-            btn.setTitleColor(theme.keyText, for: .normal)
-            btn.layer.cornerRadius = 13
-            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
-            btn.accessibilityLabel = overflowDisplayName(for: id)
-            btn.actionHandler = { [weak self] in
-                self?.hideOverflowPanel()
-                self?.onAction?(.overflowTrigger(id))
-            }
-            stack.addArrangedSubview(btn)
-            overflowPanelButtons.append((id, btn))
-        }
-        let closeBtn = ActionClosureButton(type: .system)
-        let xCfg = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
-        closeBtn.setImage(UIImage(systemName: "chevron.up", withConfiguration: xCfg), for: .normal)
-        closeBtn.tintColor = theme.keyHintText
-        closeBtn.accessibilityLabel = "收起更多功能"
-        closeBtn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
-        closeBtn.actionHandler = { [weak self] in self?.hideOverflowPanel() }
-        stack.addArrangedSubview(closeBtn)
-        overflowPanel.addSubview(stack)
-    }
-
-    /// 聚合面板按钮显示名
-    private func overflowDisplayName(for id: ToolbarButtonID) -> String {
-        switch id {
-        case .ai: return "AI 助手"
-        case .translate: return "边打边译"
-        case .clipboard: return "剪贴板"
-        case .emoji: return "表情"
-        case .edit: return "文本编辑"
-        case .layout: return "九键/26键"
-        case .settings: return "快捷设置"
-        case .undo: return "撤销"
-        }
-    }
-
-    private func showOverflowPanel() {
-        guard !overflowPanelButtons.isEmpty else { return }
-        isOverflowPanelVisible = true
-        overflowPanel.isHidden = false
-        idleContainer.isHidden = true
-        setNeedsLayout()
-    }
-
-    private func hideOverflowPanel() {
-        guard isOverflowPanelVisible else { return }
-        isOverflowPanelVisible = false
-        overflowPanel.isHidden = true
-        // 恢复空闲区可见性：与 update() 的判定一致
-        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
-        setNeedsLayout()
-    }
-
-    @objc private func didTapOverflow() {
-        isOverflowPanelVisible ? hideOverflowPanel() : showOverflowPanel()
-    }
-
-    /// v4：点击聚合面板空白处关闭（按钮自身点击由 actionHandler 处理，重复 hide 有 guard 无副作用）
-    @objc private func didTapOverflowDismiss() {
-        if isOverflowPanelVisible { hideOverflowPanel() }
-    }
-
     @objc private func didTapAI() { onAction?(.toggleAI) }
     @objc private func didTapTranslate() { onAction?(.toggleTranslateMode) }
     @objc private func didTapClipboard() { onAction?(.toggleClipboard) }
-    @objc private func didTapEmoji() { onAction?(.toggleEmoji) }
-    @objc private func didTapEdit() { onAction?(.toggleTextEditing) }
     @objc private func didTapLayout() { onAction?(.toggleLayoutQuick) }
     @objc private func didTapSettings() { onAction?(.toggleQuickSettings) }
     @objc private func didTapUndo() { onAction?(.undoDelete) }

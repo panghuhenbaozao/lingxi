@@ -12,6 +12,19 @@ struct DictionarySettingsView: View {
         NavigationStack {
             Form {
                 Section {
+                    settingsLink(icon: "icloud.and.arrow.up", tint: Design.Palette.ink, title: "云端账号与打字习惯画像",
+                                 subtitle: cloudAccountSubtitle) {
+                        CloudAccountView()
+                    }
+                    settingsLink(icon: "leaf.arrow.triangle.circlepath", tint: Design.Palette.ink, title: "可持续发展 · 三模同步 · 引擎自愈",
+                                 subtitle: sustainabilitySubtitle) {
+                        SustainabilityHubView()
+                    }
+                } header: {
+                    Text("云端账号、多模同步与可持续发展生态")
+                }
+
+                Section {
                     settingsLink(icon: "keyboard", tint: Design.Palette.ink, title: "输入方案与布局",
                                  subtitle: appState.settings.inputScheme.displayName + " · " + appState.settings.layoutMode.displayName) {
                         SchemeLayoutSettingsView()
@@ -59,6 +72,21 @@ struct DictionarySettingsView: View {
 
     private var stylishFontName: String {
         StylishFontStyle(rawValue: appState.settings.stylishFontID)?.displayName ?? "常规"
+    }
+
+    private var cloudAccountSubtitle: String {
+        let tags = appState.habitProfile.habitTags
+        let tagSummary = tags.first ?? "实时画像就绪"
+        if appState.isCloudAuthenticated {
+            let user = appState.cloudConfig.username.isEmpty ? "API Key 已连接" : appState.cloudConfig.username
+            return "\(user) · \(tagSummary)"
+        }
+        return "登录 / 接入 API Key · 6位码跨屏剪贴板 · \(tagSummary)"
+    }
+
+    private var sustainabilitySubtitle: String {
+        let health = EngineHealthAndSustainabilityService.shared.diagnose()
+        return "健康度 \(health.healthScore) 分 · \(health.activeTransport.title) · \(health.activePlan.badgeText)"
     }
 
     private var backupSubtitle: String {
@@ -319,6 +347,7 @@ private struct LexiconSettingsView: View {
     @State private var showUserLexiconTSVSheet = false
     @State private var userLexiconDraft = ""
     @State private var userLexiconStatusMessage: String?
+    @State private var subscribedPacks: Set<String> = CommunityLexiconService.shared.subscribedPackIDs()
 
     private var filteredWords: [UserWordEntry] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -391,6 +420,50 @@ private struct LexiconSettingsView: View {
                 Text("自定义短语 / 快捷编码 (\(appState.customWords.count))")
             } footer: {
                 Text("兼容 WowType custom.tsv（编码<TAB>词，可用 \\n 换行）。输入对应字母编码时优先级最高，排在候选栏第 1 位。")
+            }
+
+            Section {
+                ForEach(CommunityLexiconService.shared.allAvailablePacks()) { pack in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(pack.name)
+                                    .font(.subheadline.bold())
+                                Text(pack.category)
+                                    .font(.caption2.bold())
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(Design.Palette.surface))
+                                    .clipShape(Capsule())
+                            }
+                            Text(pack.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Button {
+                            let added = CommunityLexiconService.shared.subscribe(pack: pack)
+                            subscribedPacks = CommunityLexiconService.shared.subscribedPackIDs()
+                            appState.refreshAll()
+                            customStatusMessage = "已订阅「\(pack.name)」并导入/更新 \(added) 条专业词条"
+                        } label: {
+                            Text(subscribedPacks.contains(pack.id) ? "已订阅 · 更新" : "一键订阅")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(subscribedPacks.contains(pack.id) ? Color(Design.Palette.surface) : Color(Design.Palette.ink))
+                                .foregroundStyle(subscribedPacks.contains(pack.id) ? Color(Design.Palette.ink) : Color(Design.Palette.canvas))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.vertical, 2)
+                }
+            } header: {
+                Text("开源词库社区订阅 (M4 · 对标 HeliBoard & WowType)")
+            } footer: {
+                Text("订阅开源社区托管的 TSV 专题词库包，App 内一键导入并随云同步自动分发到各端。")
             }
 
             Section {

@@ -74,6 +74,57 @@ enum ClipboardClassifier {
         return .text
     }
 
+    /// L1 隐私防线：检测剪贴板敏感形态（18位身份证号、16-19位Luhn银行卡号、私钥或显式密码串）。
+    /// 命中时自动屏蔽，不进键盘顶栏横幅、不落本地剪贴板历史。
+    static func isSensitiveContent(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // 1. 私钥或 PEM 块
+        if trimmed.contains("-----BEGIN ") && trimmed.contains("PRIVATE KEY-----") {
+            return true
+        }
+
+        // 2. 18 位中国居民身份证号（含出生年月与末位 0-9/X 校验）
+        let idPattern = #"(?<![0-9])[1-9][0-9]{5}(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx](?![0-9])"#
+        if trimmed.range(of: idPattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        // 3. 16~19 位银行卡号（纯数字或空格/连字符分隔，且通过 Luhn 模 10 校验）
+        let compactDigits = trimmed.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "-", with: "")
+        if (16...19).contains(compactDigits.count), compactDigits.allSatisfy(\.isNumber), passesLuhnCheck(compactDigits) {
+            return true
+        }
+
+        // 4. 显式密码键值对（排除含"验证码"的正常短信）
+        let lower = trimmed.lowercased()
+        let isOTP = cueKeywords.contains { lower.contains($0) }
+        if !isOTP {
+            let pwPattern = #"(?:密码|登录密码|支付密码|password|passwd|pwd|secret_key)\s*[：:=is为]\s*\S{6,}"#
+            if trimmed.range(of: pwPattern, options: [.regularExpression, .caseInsensitive]) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func passesLuhnCheck(_ digits: String) -> Bool {
+        var sum = 0
+        let reversed = digits.reversed().compactMap { Int(String($0)) }
+        guard reversed.count == digits.count else { return false }
+        for (idx, d) in reversed.enumerated() {
+            if idx % 2 == 1 {
+                let doubled = d * 2
+                sum += doubled > 9 ? (doubled - 9) : doubled
+            } else {
+                sum += d
+            }
+        }
+        return sum > 0 && sum % 10 == 0
+    }
+
     static func isProbableURL(_ text: String) -> Bool {
         let lower = text.lowercased()
         if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
@@ -138,6 +189,7 @@ final class ClipboardStore {
     private struct Storage: Codable {
         var items: [ClipboardItem] = []
         var lastHandledChangeCount: Int = -1
+        var pendingBannerItemID: UUID? = nil
     }
 
     private static var storage: Storage {
@@ -149,6 +201,22 @@ final class ClipboardStore {
         sortItems(storage.items)
     }
 
+    /// 返回尚未在键盘顶栏粘贴或关闭的最新待展示剪贴板/跨屏接力条目
+    static func pendingBannerItem() -> ClipboardItem? {
+        let st = storage
+        guard let pid = st.pendingBannerItemID else { return nil }
+        return st.items.first(where: { $0.id == pid })
+    }
+
+    static func clearPendingBanner(changeCount: Int? = nil) {
+        var st = storage
+        st.pendingBannerItemID = nil
+        if let count = changeCount, count >= 0 {
+            st.lastHandledChangeCount = count
+        }
+        storage = st
+    }
+
     static func lastHandledChangeCount() -> Int {
         storage.lastHandledChangeCount
     }
@@ -156,14 +224,20 @@ final class ClipboardStore {
     static func markChangeCountHandled(_ count: Int) {
         var st = storage
         st.lastHandledChangeCount = count
+        st.pendingBannerItemID = nil
         storage = st
     }
 
-    /// 记录一条新的剪贴板内容（自动去重并保留置顶状态）。
+    /// 记录一条新的剪贴板内容（自动去重并保留置顶状态；若命中 L1 敏感证件号/银行卡/密码规则则自动屏蔽）。
     @discardableResult
     static func record(_ rawText: String, changeCount: Int? = nil) -> ClipboardItem? {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.isEmpty, !ClipboardClassifier.isSensitiveContent(trimmed) else {
+            if let count = changeCount {
+                markChangeCountHandled(count)
+            }
+            return nil
+        }
 
         var st = storage
         if let count = changeCount {
@@ -180,6 +254,10 @@ final class ClipboardStore {
         let item = ClipboardItem(text: trimmed, createdAt: Date(), isPinned: wasPinned)
         st.items.insert(item, at: 0)
         st.items = trimUnpinned(sortItems(st.items))
+        // 若未显式标记为已消费，设为待顶栏全栏接管展示条目
+        if changeCount == nil {
+            st.pendingBannerItemID = item.id
+        }
         storage = st
         return item
     }

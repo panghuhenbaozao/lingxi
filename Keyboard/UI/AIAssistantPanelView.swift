@@ -364,10 +364,12 @@ final class AIAssistantPanelView: UIView {
             guard let self else { return }
             do {
                 var accumulated = ""
+                let featureTag = self.lastCustomPrompt != nil ? "ai_ask" : (self.lastAction?.rawValue ?? "ai_polish")
                 for try await delta in client.streamText(
                     prompt: prompt,
                     systemInstruction: systemInstruction,
-                    config: config
+                    config: config,
+                    featureTag: featureTag
                 ) {
                     if Task.isCancelled { break }
                     accumulated += delta

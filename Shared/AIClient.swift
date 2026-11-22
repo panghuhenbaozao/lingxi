@@ -34,10 +34,12 @@ final class AIClient {
     func streamText(
         prompt: String,
         systemInstruction: String,
-        config: AIConfig = AIConfig.load()
+        config: AIConfig = AIConfig.load(),
+        featureTag: String = "ai_assistant"
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let startTime = Date()
                 do {
                     guard config.isConfigured else {
                         throw AIClientError.missingAPIKey
@@ -59,6 +61,19 @@ final class AIClient {
                             continuation: continuation
                         )
                     }
+                    let latencyMs = Int(Date().timeIntervalSince(startTime) * 1000)
+                    let settings = LingxiSettings.load()
+                    _ = TypingHabitTracker.shared.recordAIUsage(
+                        AIAPIUsagePayload(
+                            feature: featureTag,
+                            provider: config.provider.rawValue,
+                            targetLang: settings.translateTargetLang,
+                            formalTone: settings.translateFormalTone,
+                            inputChars: prompt.count,
+                            outputChars: max(1, prompt.count),
+                            latencyMs: max(10, latencyMs)
+                        )
+                    )
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -86,10 +101,17 @@ final class AIClient {
         return trimmed
     }
 
-    private static func mergeSystem(base: String, custom: String) -> String {
+    static func mergeSystem(base: String, custom: String) -> String {
+        var result = base
         let extra = custom.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !extra.isEmpty else { return base }
-        return "\(base)\n用户附加风格偏好：\(extra)"
+        if !extra.isEmpty {
+            result += "\n用户附加风格偏好：\(extra)"
+        }
+        let habitSuffix = TypingHabitTracker.shared.personalHabitSystemPromptSuffix()
+        if !habitSuffix.isEmpty {
+            result += "\n\(habitSuffix)"
+        }
+        return result
     }
 
     // MARK: - Google Gemini Interactions API (v1beta/interactions)

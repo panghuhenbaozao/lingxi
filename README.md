@@ -42,6 +42,19 @@
 4. **内嵌流式 AI 写作助手**
    - 支持 **Google Gemini Interactions API**（`store=false` 隐私不留存）与 **OpenAI 兼容接口**（DeepSeek / Qwen / OpenAI / 反代），支持自由提问、整理口述草稿、润色、高情商回复、翻译与神回复剪贴板。
 
+5. **极简双簇顶栏 + 短信验证码/新复制内容全栏独占接管 + 跨设备实时剪贴板接力 + Web 控制台与云端画像 (`v4.0`)**
+   - **极简顶栏与全栏智能接管 (`TopToolbarView`)**：移除顶栏低频表情、光标移动与折叠菜单（表情/颜文字检索迁入主 App「剪贴板与短语」页）；空闲时左置 `[✨ 灵犀 AI]` `[💬 译]`、右置 `[剪贴板]` `[设置]`。当收到短信验证码或新复制内容时，**自动隐藏工具栏按钮，整栏切换为「验证码一键填入 / 刚复制内容预览与粘贴」智能胶囊**，粘贴或关闭后立即恢复。
+   - **跨设备实时剪贴板接力 (`ClipboardRelayService` + SSE 推流)**：对标微信输入法跨屏剪贴板，支持 **6 位数字匹配码免登录秒传**（REST `POST/GET /api/v1/relay/clipboard` + SSE 实时推流 `GET /api/v1/relay/stream`），电脑与手机之间一键接力文本、链接与短信验证码。
+   - **后端可视化 Web 控制台 / 客户管理看板 (`Server/dashboard.html`)**：启动后端后访问 `http://127.0.0.1:8787/dashboard`，即可可视化查看 API 调用趋势、24 小时打字时段热力曲线、拼音易混音纠错矩阵 (`zh↔z` / `an↔ang` / `in↔ing` / `n↔l`)、用户词库领域偏好热力图、B 端企业客户管理与 180 天审计日志、PIPL/GDPR 授权流水及在线跨屏剪贴板接力工作台。
+   - **可插拔三同步实现 + 纵深五层安全 (L1–L5) + 11 表数据库 (`Server/schema.sql` & `Server/lingxi_server.py`)**：完整提供 `LocalNoopSyncService`（离线）、`LANSyncService`（M2 局域网 `NWListener` + 6 位码 `ChaCha20-Poly1305` 双机直连）、`CloudBackendClient`（M3 零知识 E2EE 云同步），以及 M4 词库社区订阅 (`CommunityLexiconService`) 与 PIPL/GDPR 全量可携权导出 (`ComplianceService`)。详见 [全栈架构说明书](docs/ARCHITECTURE_AND_BACKEND.md)。
+
+   ```bash
+   # 启动本地云端后端服务与可视化 Web 控制台 (访问 http://127.0.0.1:8787/dashboard)
+   python3 Server/lingxi_server.py --host 127.0.0.1 --port 8787
+   # 运行后端 v4.0 全规格自检测试 (8/8 架构章节全覆盖)
+   python3 Server/lingxi_server.py --self-test
+   ```
+
 ---
 
 ## 构建与安装（支持免 Mac 云端打包）

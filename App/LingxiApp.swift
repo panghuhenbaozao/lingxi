@@ -12,6 +12,7 @@ struct LingxiApp: App {
                 .onChange(of: scenePhase) { newPhase in
                     if newPhase == .active {
                         appState.refreshAll()
+                        appState.scheduleAutoSyncIfNeeded()
                     }
                 }
         }

@@ -19,6 +19,8 @@ struct ThemeStudioView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var previewBarState: Int = 0 // 0=常规双簇态, 1=打字候选态, 2=验证码全栏接管态
+    @State private var themeShareStatus: String?
 
     private var activePreset: KeyboardThemePreset {
         appState.theme.activePreset(isSystemDark: colorScheme == .dark)
@@ -28,10 +30,12 @@ struct ThemeStudioView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 18) {
+                    previewStateSelector
                     previewCard
                     presetGrid
                     customBackgroundSection
                     keyAppearanceSection
+                    communityThemeShareSection
                 }
                 .padding()
             }
@@ -51,7 +55,16 @@ struct ThemeStudioView: View {
         }
     }
 
-    // MARK: - 实时拟真预览
+    private var previewStateSelector: some View {
+        Picker("顶栏预览状态", selection: $previewBarState) {
+            Text("常规双簇态").tag(0)
+            Text("打字候选态").tag(1)
+            Text("验证码全栏接管").tag(2)
+        }
+        .pickerStyle(.segmented)
+    }
+
+    // MARK: - 实时拟真预览（完整联动顶栏 v3 三态）
 
     private var previewCard: some View {
         let preset = activePreset
@@ -60,37 +73,79 @@ struct ThemeStudioView: View {
         let radius = appState.theme.keyCornerRadius
 
         return VStack(spacing: 0) {
-            // 顶部候选栏预览
-            HStack(spacing: 10) {
-                Text("✨ AI")
-                    .font(.caption.bold())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color(hexColor: preset.accentFill).opacity(0.18))
-                    .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                    .clipShape(Capsule())
+            // 顶部栏 v3 三态联动预览
+            HStack(spacing: 8) {
+                if previewBarState == 0 {
+                    // 常规双簇态：左 [✨ 灵犀 AI] [💬 译] · 右 [剪贴板] [设置]
+                    Text("✨ 灵犀 AI")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Color(hexColor: preset.accentFill).opacity(0.16))
+                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                        .clipShape(Capsule())
 
-                Text("译")
-                    .font(.caption.bold())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
-                    .foregroundStyle(Color(hexColor: preset.keyText))
-                    .clipShape(Capsule())
+                    Text("💬 译")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .padding(.horizontal, 9)
+                        .frame(height: 28)
+                        .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
+                        .foregroundStyle(Color(hexColor: preset.keyText))
+                        .clipShape(Capsule())
 
-                Text("灵犀输入法")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                Text("真好看")
-                    .font(.subheadline)
-                    .foregroundStyle(Color(hexColor: preset.candidateText))
-                Text("绝绝子")
-                    .font(.subheadline)
-                    .foregroundStyle(Color(hexColor: preset.candidateText))
-                Spacer()
+                    Spacer()
+
+                    ForEach(["doc.on.clipboard", "slider.horizontal.3"], id: \.self) { icon in
+                        Image(systemName: icon)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color(hexColor: preset.keyText))
+                            .frame(width: 28, height: 28)
+                            .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
+                            .clipShape(Capsule())
+                    }
+                } else if previewBarState == 1 {
+                    // 打字候选态
+                    Text("灵犀输入法")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                    Text("极简白")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(hexColor: preset.candidateText))
+                    Text("墨玉黑")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(hexColor: preset.candidateText))
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color(hexColor: preset.candidateText))
+                } else {
+                    // 验证码/新复制内容全栏独占接管态（隐藏 AI/译）
+                    Text("💬 验证码")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(hexColor: preset.accentFill).opacity(0.16))
+                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                        .clipShape(Capsule())
+
+                    Text("849201 · 【灵犀】5分钟有效")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    Text("填入 849201")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 9)
+                        .frame(height: 25)
+                        .background(Color(hexColor: preset.accentFill))
+                        .foregroundStyle(Color(hexColor: preset.accentText))
+                        .clipShape(Capsule())
+                }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .frame(height: 44)
             .background(Color(hexColor: preset.toolbarBackground).opacity(hasBg ? 0.85 : 1.0))
 
             // 模拟按键区
@@ -263,6 +318,66 @@ struct ThemeStudioView: View {
                         Text(preset.name).tag(preset.id)
                     }
                 }
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    // MARK: - 开源社区皮肤 JSON 导出分享与导入
+
+    private var communityThemeShareSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("开源社区皮肤 JSON 分享与导入", systemImage: "square.and.arrow.up.on.square")
+                .font(.headline)
+            Text("可将当前调好的圆角、透明度与深浅配对配置一键复制为 JSON 分享给社区，或从剪贴板导入他人分享的皮肤配置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Button {
+                    let enc = JSONEncoder()
+                    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    if let data = try? enc.encode(appState.theme),
+                       let json = String(data: data, encoding: .utf8) {
+                        UIPasteboard.general.string = json
+                        themeShareStatus = "✓ 已复制当前皮肤配置 JSON 到剪贴板"
+                    }
+                } label: {
+                    Label("复制皮肤 JSON", systemImage: "doc.on.doc")
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(Color(Design.Palette.surface))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    guard let raw = UIPasteboard.general.string,
+                          let data = raw.data(using: .utf8),
+                          let imported = try? JSONDecoder().decode(ThemeCustomization.self, from: data) else {
+                        themeShareStatus = "剪贴板中未检测到有效的皮肤 JSON 配置"
+                        return
+                    }
+                    appState.theme = imported
+                    themeShareStatus = "✓ 已成功从剪贴板导入并应用社区皮肤配置"
+                } label: {
+                    Label("从剪贴板导入", systemImage: "arrow.down.doc.fill")
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(Color(Design.Palette.ink))
+                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let msg = themeShareStatus {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.ink))
             }
         }
         .padding()

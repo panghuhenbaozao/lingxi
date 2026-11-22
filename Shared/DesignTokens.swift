@@ -1,3 +1,4 @@
+import SwiftUI
 import UIKit
 
 extension UIColor {
@@ -77,5 +78,14 @@ enum Design {
         static let lg: CGFloat = 20
         static let xl: CGFloat = 24
         static let xxl: CGFloat = 32
+    }
+
+    enum Typography {
+        enum SwiftUIFont {
+            static let h3 = Font.system(size: 15, weight: .semibold)
+            static let body = Font.system(size: 13.5, weight: .regular)
+            static let label = Font.system(size: 12.5, weight: .semibold)
+            static let caption = Font.system(size: 11.5, weight: .regular)
+        }
     }
 }

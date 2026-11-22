@@ -15,7 +15,6 @@ final class KeyboardViewController: UIInputViewController {
         case numbers
         case symbolsEmoji
         case clipboard
-        case textEditing
         case ai
         case quickSettings
     }
@@ -46,7 +45,6 @@ final class KeyboardViewController: UIInputViewController {
     private let expandedCandidates = ExpandedCandidatesView()
     private let symbolEmojiPanel = SymbolEmojiPanelView()
     private let clipboardPanel = ClipboardPanelView()
-    private let textEditingPanel = TextEditingPanelView()
     private let aiPanel = AIAssistantPanelView()
     private let quickSettingsPanel = QuickSettingsSheetView()
 
@@ -121,6 +119,16 @@ final class KeyboardViewController: UIInputViewController {
     private var lastInternalEditTime: CFTimeInterval = 0
     private var lastAdaptedTraitSignature: String = ""
 
+    // 打字习惯会话聚合器（仅记录数值行为指标到 App Group，绝不含输入原文）
+    private var sessionHabitStartedAt: Date?
+    private var sessionCommittedChars: Int = 0
+    private var sessionCommittedWords: Int = 0
+    private var sessionDeleteCount: Int = 0
+    private var sessionUndoLearnCount: Int = 0
+    private var sessionGlideWords: Int = 0
+    private var sessionTypoCorrectedCount: Int = 0
+    private var sessionConfusionCounts: [String: Int] = [:]
+
     // MARK: - 生命周期
 
     override func viewDidLoad() {
@@ -144,6 +152,11 @@ final class KeyboardViewController: UIInputViewController {
         refreshClipboardState()
         updateReturnKeyAppearance()
         autoCapitalizeIfNeeded()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        flushTypingHabitSessionIfNeeded()
     }
 
     override func viewWillLayoutSubviews() {
@@ -249,7 +262,6 @@ final class KeyboardViewController: UIInputViewController {
             expandedCandidates,
             symbolEmojiPanel,
             clipboardPanel,
-            textEditingPanel,
             aiPanel,
             quickSettingsPanel,
         ]
@@ -506,10 +518,6 @@ final class KeyboardViewController: UIInputViewController {
         }
         clipboardPanel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
-        }
-
-        textEditingPanel.onAction = { [weak self] action in
-            self?.handleTextEditingAction(action)
         }
 
         aiPanel.onInsertText = { [weak self] text in
@@ -914,25 +922,9 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// v4：聚合面板中被收纳按钮的动作转发（复用既有处理链路，含反馈音效）
-    private func handleOverflowTrigger(_ id: ToolbarButtonID) {
-        switch id {
-        case .ai: handleToolbarAction(.toggleAI)
-        case .translate: handleToolbarAction(.toggleTranslateMode)
-        case .clipboard: handleToolbarAction(.toggleClipboard)
-        case .emoji: handleToolbarAction(.toggleEmoji)
-        case .edit: handleToolbarAction(.toggleTextEditing)
-        case .layout: handleToolbarAction(.toggleLayoutQuick)
-        case .settings: handleToolbarAction(.toggleQuickSettings)
-        case .undo: handleToolbarAction(.undoDelete)
-        }
-    }
-
     private func handleToolbarAction(_ action: TopToolbarView.Action) {
         feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
         switch action {
-        case .overflowTrigger(let id):
-            handleOverflowTrigger(id)
         case .toggleAI:
             if activePanel == .ai {
                 aiPromptDraft = nil
@@ -959,15 +951,6 @@ final class KeyboardViewController: UIInputViewController {
             commitTranslateSourceOutput()
         case .toggleClipboard:
             switchToPanel(activePanel == .clipboard ? .letters : .clipboard)
-        case .toggleEmoji:
-            if isEmojiSearchMode {
-                exitEmojiSearchMode(openLetters: true)
-            } else {
-                switchToPanel(activePanel == .symbolsEmoji ? .letters : .symbolsEmoji)
-            }
-        case .toggleTextEditing:
-            commitRawIfNeeded()
-            switchToPanel(activePanel == .textEditing ? .letters : .textEditing)
         case .toggleQuickSettings:
             switchToPanel(activePanel == .quickSettings ? .letters : .quickSettings)
         case .toggleLayoutQuick:
@@ -1313,6 +1296,8 @@ final class KeyboardViewController: UIInputViewController {
         // 退格重选：紧接上屏后点按 ⌫，撤销已上屏词条、回退误学记录，并恢复原拼音/编码重选
         if !isRepeat, let selUndo = lastSelectionUndo, !selUndo.isExpired {
             lastSelectionUndo = nil
+            sessionDeleteCount += 1
+            sessionUndoLearnCount += 1
             if let rec = selUndo.learnRecord {
                 engine?.userLexicon.undoLearn(rec)
             }
@@ -1770,6 +1755,18 @@ final class KeyboardViewController: UIInputViewController {
                 self.textDocumentProxy.unmarkText()
             }
         }
+        if isLastInputFromGlide {
+            sessionGlideWords += 1
+        }
+        if currentCorrectedHint != nil {
+            sessionTypoCorrectedCount += 1
+        }
+        if settings.inputScheme == .quanpin && !prevRaw.isEmpty && !cand.py.isEmpty {
+            let detected = TypingHabitTracker.detectPinyinConfusions(rawInput: prevRaw, resolvedPinyin: cand.py)
+            for (k, v) in detected where v > 0 {
+                sessionConfusionCounts[k, default: 0] += v
+            }
+        }
         let actualInserted = insertFinalText(outputWord, checkPairing: false)
 
         // 若用户选择了带 Emoji 的推荐候选（如「今天好开心😊」或独立「😊」），同步记入 RecentEmojiStore
@@ -1969,13 +1966,49 @@ final class KeyboardViewController: UIInputViewController {
 
             self.textDocumentProxy.insertText(text)
         }
-        // 打字统计（WowType 借鉴）：仅统计真实上屏文本；密码/邮箱/网址等隐私框不统计
-        if self.settings.typingStatsEnabled,
-           self.shouldAllowPanguSpace,
-           !inserted.isEmpty {
-            TypingStatsStore.shared.recordCommit(text: inserted)
+        // 打字统计与实时习惯画像采样：仅统计真实上屏文本；密码/邮箱/网址等隐私框不统计
+        if self.shouldAllowPanguSpace, !inserted.isEmpty {
+            if self.settings.typingStatsEnabled {
+                TypingStatsStore.shared.recordCommit(text: inserted)
+            }
+            if self.sessionHabitStartedAt == nil {
+                self.sessionHabitStartedAt = Date()
+            }
+            self.sessionCommittedChars += inserted.count
+            self.sessionCommittedWords += 1
+            if self.sessionCommittedChars >= 24 {
+                self.flushTypingHabitSessionIfNeeded()
+            }
         }
         return inserted
+    }
+
+    private func flushTypingHabitSessionIfNeeded() {
+        guard sessionCommittedChars > 0 else { return }
+        let start = sessionHabitStartedAt ?? Date()
+        let dur = max(1, min(300, Int(Date().timeIntervalSince(start))))
+        let event = TypingHabitEventPayload(
+            startedAt: Int(start.timeIntervalSince1970),
+            durationSeconds: dur,
+            committedChars: sessionCommittedChars,
+            committedWords: max(1, sessionCommittedWords),
+            deleteCount: sessionDeleteCount,
+            undoLearnCount: sessionUndoLearnCount,
+            glideWords: sessionGlideWords,
+            typoCorrectedCount: sessionTypoCorrectedCount,
+            schemeID: settings.inputScheme.rawValue,
+            layoutID: settings.layoutMode.rawValue,
+            confusionCounts: sessionConfusionCounts
+        )
+        _ = TypingHabitTracker.shared.recordTypingEvent(event)
+        sessionHabitStartedAt = nil
+        sessionCommittedChars = 0
+        sessionCommittedWords = 0
+        sessionDeleteCount = 0
+        sessionUndoLearnCount = 0
+        sessionGlideWords = 0
+        sessionTypoCorrectedCount = 0
+        sessionConfusionCounts = [:]
     }
 
     private func insertDirectlyIntoHost(_ text: String) {
@@ -1992,116 +2025,6 @@ final class KeyboardViewController: UIInputViewController {
             } else {
                 self.textDocumentProxy.insertText(text)
             }
-        }
-    }
-
-    // MARK: - 文本编辑与光标精控面板处理
-
-    private func handleTextEditingAction(_ action: TextEditingPanelView.Action) {
-        feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
-        lastSelectionUndo = nil
-        switch action {
-        case .moveLeft:
-            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1) }
-        case .moveRight:
-            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1) }
-        case .moveUp:
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let lines = before.components(separatedBy: "\n")
-            if lines.count >= 2 {
-                let curCol = lines.last?.count ?? 0
-                let prevLineLen = lines[lines.count - 2].count
-                let targetCol = min(curCol, prevLineLen)
-                let delta = -(curCol + 1 + (prevLineLen - targetCol))
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: delta) }
-            } else if !before.isEmpty {
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -before.count) }
-            }
-        case .moveDown:
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            let curCol = before.components(separatedBy: "\n").last?.count ?? 0
-            let afterLines = after.components(separatedBy: "\n")
-            if afterLines.count >= 2 {
-                let toEndOfCurLine = afterLines[0].count
-                let nextLineLen = afterLines[1].count
-                let targetCol = min(curCol, nextLineLen)
-                let delta = toEndOfCurLine + 1 + targetCol
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: delta) }
-            } else if !after.isEmpty {
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: after.count) }
-            }
-        case .moveLineStart:
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let curCol = before.components(separatedBy: "\n").last?.count ?? 0
-            if curCol > 0 {
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -curCol) }
-            }
-            textEditingPanel.showStatusToast("⇤ 已跳至当前行首")
-        case .moveLineEnd:
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            let rem = after.components(separatedBy: "\n").first?.count ?? 0
-            if rem > 0 {
-                performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: rem) }
-            }
-            textEditingPanel.showStatusToast("已跳至当前行尾 ⇥")
-        case .deleteBackward:
-            performEdit { self.textDocumentProxy.deleteBackward() }
-        case .deleteForward:
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            guard !after.isEmpty else { return }
-            performEdit {
-                self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
-                self.textDocumentProxy.deleteBackward()
-            }
-        case .copyContext:
-            let selected = textDocumentProxy.selectedText ?? ""
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            let target = !selected.isEmpty ? selected : (before + after)
-            guard !target.isEmpty else {
-                textEditingPanel.showStatusToast("当前输入框为空")
-                return
-            }
-            _ = ClipboardStore.record(target)
-            if hasFullAccess {
-                UIPasteboard.general.string = target
-            }
-            textEditingPanel.showStatusToast("✓ 已复制 \(target.count) 字到剪贴板")
-        case .pasteClipboard:
-            var textToPaste: String?
-            if hasFullAccess, let sys = UIPasteboard.general.string, !sys.isEmpty {
-                textToPaste = sys
-            } else if let latest = ClipboardStore.items().first?.text, !latest.isEmpty {
-                textToPaste = latest
-            }
-            guard let text = textToPaste else {
-                textEditingPanel.showStatusToast("剪贴板暂无可粘贴内容")
-                return
-            }
-            insertFinalText(text, checkPairing: false)
-            textEditingPanel.showStatusToast("✓ 已粘贴 \(text.count) 字")
-        case .clearCurrentLine:
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            let leftPart = before.components(separatedBy: "\n").last ?? ""
-            let rightPart = after.components(separatedBy: "\n").first ?? ""
-            let totalLine = leftPart + rightPart
-            guard !totalLine.isEmpty else { return }
-            performEdit {
-                if !rightPart.isEmpty {
-                    self.textDocumentProxy.adjustTextPosition(byCharacterOffset: rightPart.count)
-                }
-                for _ in 0..<totalLine.count {
-                    self.textDocumentProxy.deleteBackward()
-                }
-            }
-            setUndoBuffer(text: totalLine, wasComposing: false)
-            textEditingPanel.showStatusToast("🧹 已清空本行（可点顶部撤销）")
-        case .insertNewline:
-            insertFinalText("\n", checkPairing: false)
-        case .close:
-            switchToPanel(.letters)
         }
     }
 
@@ -2274,7 +2197,8 @@ final class KeyboardViewController: UIInputViewController {
                 for try await chunk in self.translateClient.streamText(
                     prompt: sourceSnapshot,
                     systemInstruction: system,
-                    config: cfg
+                    config: cfg,
+                    featureTag: "live_translate"
                 ) {
                     try Task.checkCancellation()
                     accumulated += chunk
@@ -2473,8 +2397,6 @@ final class KeyboardViewController: UIInputViewController {
                 theme: resolvedTheme,
                 activeFontStyle: StylishFontStyle(rawValue: settings.stylishFontID) ?? .normal
             )
-        case .textEditing:
-            textEditingPanel.apply(theme: resolvedTheme)
         case .quickSettings:
             quickSettingsPanel.configure(theme: resolvedTheme, settings: settings, customization: themeCustomization)
         case .symbolsEmoji:
@@ -2499,7 +2421,6 @@ final class KeyboardViewController: UIInputViewController {
             numberPad.isHidden = true
             symbolEmojiPanel.isHidden = false
             clipboardPanel.isHidden = true
-            textEditingPanel.isHidden = true
             aiPanel.isHidden = true
             quickSettingsPanel.isHidden = true
             return
@@ -2516,7 +2437,6 @@ final class KeyboardViewController: UIInputViewController {
         numberPad.isHidden = (activePanel != .numbers)
         symbolEmojiPanel.isHidden = (activePanel != .symbolsEmoji)
         clipboardPanel.isHidden = (activePanel != .clipboard)
-        textEditingPanel.isHidden = (activePanel != .textEditing)
         aiPanel.isHidden = (activePanel != .ai)
         quickSettingsPanel.isHidden = (activePanel != .quickSettings)
     }
@@ -2531,7 +2451,6 @@ final class KeyboardViewController: UIInputViewController {
         let (retTitle, _) = returnKeyAppearance()
         numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
         symbolEmojiPanel.apply(theme: resolvedTheme)
-        textEditingPanel.apply(theme: resolvedTheme)
         if activePanel == .quickSettings {
             quickSettingsPanel.updateTheme(resolvedTheme)
         }
@@ -2582,9 +2501,16 @@ final class KeyboardViewController: UIInputViewController {
             )
             : nil
 
+        // 当用户未在主动拼写 (rawComposing 与 englishComposing 均为空) 且存在未处理的「新复制内容 / 短信验证码」时，
+        // 顶栏优先展示全栏剪贴板/验证码接管胶囊，暂不展示闲置下一词联想，确保复制即见！
+        let isActivelyComposing = !rawComposing.isEmpty || !englishComposing.isEmpty
+        let effectiveCandidates = (!isActivelyComposing && pasteMonitor.bannerState != .hidden)
+            ? []
+            : currentCandidates
+
         toolbarView.update(
             composingDisplay: composingDisplay,
-            candidates: currentCandidates,
+            candidates: effectiveCandidates,
             expanded: isCandidatesExpanded,
             showUndo: undoBuffer != nil,
             bannerState: pasteMonitor.bannerState,

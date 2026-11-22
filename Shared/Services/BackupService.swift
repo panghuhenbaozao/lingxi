@@ -49,7 +49,12 @@ enum LingxiBackup {
         "lingxi_custom_words.json",
         "lingxi_phrases.json",
         "lingxi_recent_emojis.json",
-        "typing_stats.json"
+        "typing_stats.json",
+        "lingxi_typing_habits.json",
+        "lingxi_consent_ledger.json",
+        "lingxi_community_subscriptions.json",
+        "lingxi_community_custom_packs.json",
+        "lingxi_relay_config.json"
     ]
 
     /// 个人词库（SQLite，WAL 模式，备份前需 checkpoint 合并日志）

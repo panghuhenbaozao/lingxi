@@ -51,4 +51,30 @@ public enum SyncCrypto {
         }
         return plain
     }
+
+    /// L2 移动端高速认证加密：ChaCha20-Poly1305（与 AES-256-GCM 同为 256 位 AEAD，在无 AES 硬件加速路径下更稳更快）
+    public static func sealChaChaPoly(_ value: Data, key: SymmetricKey) throws -> Data {
+        guard let combined = try? ChaChaPoly.seal(value, using: key).combined,
+              !combined.isEmpty else {
+            throw CryptoError.sealFailed
+        }
+        return combined
+    }
+
+    public static func openChaChaPoly(_ ciphertext: Data, key: SymmetricKey) throws -> Data {
+        guard let box = try? ChaChaPoly.SealedBox(combined: ciphertext),
+              let plain = try? ChaChaPoly.open(box, using: key) else {
+            throw CryptoError.decryptFailed
+        }
+        return plain
+    }
+
+    /// L3 传输防重放签名：HMAC-SHA256(body || "|" || ts || "|" || nonce)
+    public static func signRequest(body: Data, timestamp: Int, nonce: String, secret: String) -> String {
+        let suffix = Data("|\(timestamp)|\(nonce)".utf8)
+        let message = body + suffix
+        let symKey = SymmetricKey(data: Data(secret.utf8))
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: symKey)
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
 }
