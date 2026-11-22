@@ -6,6 +6,7 @@ import UIKit
 /// 重构为 6 个分类入口，每类一屏，词库管理独立成页。
 struct DictionarySettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @AppStorage("lastBackupExportAt") private var lastBackupExportAt: Double = 0
 
     var body: some View {
         NavigationStack {
@@ -42,6 +43,14 @@ struct DictionarySettingsView: View {
                                  subtitle: "自定义短语 \(appState.customWords.count) · 个人词库 \(appState.userWords.count)") {
                         LexiconSettingsView()
                     }
+                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计",
+                                 subtitle: "今日 \(TypingStatsStore.shared.summary().todayChars) 字 · 近 30 天趋势") {
+                        TypingStatsView()
+                    }
+                    settingsLink(icon: "externaldrive", tint: Design.Palette.ink, title: "备份与恢复",
+                                 subtitle: backupSubtitle) {
+                        BackupSettingsView()
+                    }
                 }
             }
             .navigationTitle("设置")
@@ -50,6 +59,14 @@ struct DictionarySettingsView: View {
 
     private var stylishFontName: String {
         StylishFontStyle(rawValue: appState.settings.stylishFontID)?.displayName ?? "常规"
+    }
+
+    private var backupSubtitle: String {
+        guard lastBackupExportAt > 0 else { return "加密备份 · 从未导出" }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .short
+        fmt.timeStyle = .short
+        return "上次备份 " + fmt.string(from: Date(timeIntervalSince1970: lastBackupExportAt))
     }
 
     private func settingsLink<Destination: View>(icon: String, tint: UIColor, title: String, subtitle: String, @ViewBuilder destination: () -> Destination) -> some View {
@@ -177,7 +194,6 @@ private struct KeyboardFeelSettingsView: View {
 
 private struct SmartInputSettingsView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var statsRefresh = 0
 
     var body: some View {
         Form {
@@ -216,17 +232,15 @@ private struct SmartInputSettingsView: View {
                 Toggle("自动读取剪贴板预览（需允许系统授权）", isOn: $appState.settings.autoReadClipboardPreview)
             }
             Section {
-                Toggle("打字统计（仅本机按天计数）", isOn: $appState.settings.typingStatsEnabled)
-                if appState.settings.typingStatsEnabled {
-                    let _ = statsRefresh
-                    let summary = TypingStatsStore.shared.summary()
-                    LabeledContent("今日字数", value: "\(summary.todayChars)")
-                    LabeledContent("累计字数", value: "\(summary.totalChars)")
-                    LabeledContent("平均速度", value: String(format: "%.1f 字/分", summary.averageCharsPerMinute))
-                    LabeledContent("连续打字", value: "\(summary.streakDays) 天")
-                    Button("清除全部统计数据", role: .destructive) {
-                        TypingStatsStore.shared.clearAll()
-                        statsRefresh += 1
+                NavigationLink {
+                    TypingStatsView()
+                } label: {
+                    HStack {
+                        Text("打字统计")
+                        Spacer()
+                        Text("总览 · 趋势")
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.stone))
                     }
                 }
             } header: {

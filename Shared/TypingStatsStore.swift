@@ -9,6 +9,13 @@ struct TypingDailyStat: Codable, Equatable {
     /// 活跃打字时长（秒）：两次上屏间隔 ≤30 秒才计入，防止挂后台虚增
     var activeSeconds: TimeInterval = 0
 }
+
+/// 趋势图单日数据点（仅含实际有记录的天）。
+struct TypingDailyEntry: Identifiable {
+    let day: String
+    let chars: Int
+    var id: String { day }
+}
 final class TypingStatsStore {
     static let shared = TypingStatsStore()
     private static let fileName = "typing_stats.json"
@@ -98,6 +105,20 @@ final class TypingStatsStore {
             dayCount: days.count
         )
     }
+    /// 最近 N 天窗口内有记录的数据点（按日期升序），供趋势图展示。
+    func recentDays(limit: Int, now: Date = Date()) -> [TypingDailyEntry] {
+        queue.sync {
+            let cutoffDay = Self.dayKey(
+                for: Calendar.current.date(byAdding: .day, value: -(limit - 1), to: now) ?? now
+            )
+            return days
+                .filter { $0.key >= cutoffDay }
+                .sorted { $0.key < $1.key }
+                .prefix(limit)
+                .map { TypingDailyEntry(day: $0.key, chars: $0.value.chars) }
+        }
+    }
+
     /// 清除全部统计数据（设置页「清除统计」按钮调用）。
     func clearAll() {
         queue.sync {

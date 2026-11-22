@@ -593,4 +593,93 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(clampedLow.candidateBarHeight, 44, accuracy: 0.001)
         XCTAssertEqual(clampedLow.candidateFontSize, 22, accuracy: 0.001)
     }
+
+    // MARK: - M1.5 加密备份
+
+    func testBackupEncryptDecryptRoundtrip() throws {
+        let createdAt = Date(timeIntervalSince1970: 1_760_000_000)
+        let payload = LingxiBackup.Payload(
+            schemaVersion: LingxiBackup.currentSchemaVersion,
+            createdAt: createdAt,
+            files: [
+                "lingxi_settings.json": Data("{\"candidateBarHeight\":50}".utf8),
+                "user_dict.sqlite": Data([0x53, 0x51, 0x4C, 0x69, 0x74, 0x65])
+            ]
+        )
+        let data = try LingxiBackup.encrypt(
+            password: "correct-horse-8",
+            payload: payload,
+            appVersion: "2.3.0",
+            now: createdAt
+        )
+        let decoded = try LingxiBackup.decrypt(data: data, password: "correct-horse-8")
+        XCTAssertEqual(decoded.files, payload.files)
+        XCTAssertEqual(decoded.schemaVersion, payload.schemaVersion)
+        XCTAssertEqual(decoded.createdAt, createdAt)
+    }
+
+    func testBackupWrongPasswordAndTamperDetection() throws {
+        let payload = LingxiBackup.Payload(
+            schemaVersion: 1,
+            createdAt: Date(timeIntervalSince1970: 1_760_000_000),
+            files: ["lingxi_phrases.json": Data("[]".utf8)]
+        )
+        let data = try LingxiBackup.encrypt(password: "password-123", payload: payload)
+
+        // 错误密码：GCM 认证失败，统一归类为密码错误或损坏
+        XCTAssertThrowsError(try LingxiBackup.decrypt(data: data, password: "password-124")) { error in
+            XCTAssertEqual(error as? LingxiBackup.BackupError, .wrongPasswordOrCorrupted)
+        }
+
+        // 篡改密文尾部字节后必须解密失败（防篡改）
+        var tampered = data
+        tampered[tampered.count - 3] ^= 0xFF
+        XCTAssertThrowsError(try LingxiBackup.decrypt(data: tampered, password: "password-123"))
+    }
+
+    func testBackupWeakPasswordAndInvalidFormat() throws {
+        let payload = LingxiBackup.Payload(schemaVersion: 1, createdAt: Date(), files: [:])
+        XCTAssertThrowsError(
+            try LingxiBackup.encrypt(password: "short", payload: payload)
+        ) { error in
+            XCTAssertEqual(error as? LingxiBackup.BackupError, .weakPassword)
+        }
+        XCTAssertNil(LingxiBackup.peekMetadata(from: Data("not a backup".utf8)))
+    }
+
+    func testBackupPeekMetadataWithoutDecrypting() throws {
+        let payload = LingxiBackup.Payload(
+            schemaVersion: 1,
+            createdAt: Date(timeIntervalSince1970: 1_760_000_123),
+            files: [:]
+        )
+        let data = try LingxiBackup.encrypt(password: "password-123", payload: payload, appVersion: "2.4.0")
+        let meta = try XCTUnwrap(LingxiBackup.peekMetadata(from: data))
+        XCTAssertEqual(meta.format, "LINGXI-BACKUP")
+        XCTAssertEqual(meta.schemaVersion, LingxiBackup.currentSchemaVersion)
+        XCTAssertEqual(meta.appVersion, "2.4.0")
+        XCTAssertEqual(meta.kdf, "PBKDF2-HMAC-SHA256")
+        XCTAssertEqual(meta.kdfRounds, LingxiBackup.kdfRounds)
+    }
+
+    // MARK: - M1.5 打字统计趋势窗口
+
+    func testTypingStatsRecentDaysWindow() {
+        // 测试使用独立实例（不与 shared 单例串状态）；先清空再构造确定性数据
+        let store = TypingStatsStore()
+        store.clearAll()
+        let now = Date()
+        let day: TimeInterval = 86400
+        store.recordCommit(text: "三天前写的", at: now.addingTimeInterval(-3 * day))
+        store.recordCommit(text: "四十天前写的", at: now.addingTimeInterval(-40 * day))
+        store.recordCommit(text: "今天写的", at: now)
+
+        let entries = store.recentDays(limit: 30, now: now)
+        XCTAssertEqual(entries.count, 2, "40 天前的记录不应出现在 30 天窗口内")
+        XCTAssertEqual(entries.first?.chars, 5)
+        XCTAssertEqual(entries.last?.chars, 4)
+        XCTAssertLessThan(entries[0].day, entries[1].day, "趋势数据必须按日期升序")
+
+        store.clearAll()
+    }
 }

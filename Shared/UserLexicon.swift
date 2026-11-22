@@ -490,4 +490,40 @@ final class UserLexicon {
             )
         }
     }
+
+    // MARK: - 备份与恢复（M1.5）
+
+    /// 备份前将 WAL 日志合并进主库文件，确保随后读取 user_dict.sqlite 拿到完整最新状态。
+    func checkpointForBackup() {
+        queue.sync {
+            guard let db else { return }
+            sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+        }
+    }
+
+    /// 用备份中的 SQLite 数据整体替换当前词库：关旧连接 → 清理 WAL/SHM 残留 → 原子写盘 → 重开连接。
+    /// 注意：键盘扩展等其他进程的旧连接仍指向被替换前的文件，恢复后需重启键盘才读到新词库。
+    /// - Parameter data: 备份内的 user_dict.sqlite 字节
+    /// - Throws: 写盘失败或重开数据库失败时抛出（调用方据此提示恢复失败）
+    func restore(data: Data) throws {
+        try queue.sync {
+            if let db {
+                sqlite3_close(db)
+                self.db = nil
+            }
+            let url = AppGroup.fileURL(Self.dbFileName)
+            // WAL/SHM 残留会在重开后覆盖恢复的数据，必须先清除
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + "-wal"))
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + "-shm"))
+            try data.write(to: url, options: [.atomic])
+            openDatabase()
+            guard db != nil else {
+                throw NSError(
+                    domain: "com.lingxi.userlexicon",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "恢复词库后无法重新打开数据库"]
+                )
+            }
+        }
+    }
 }
