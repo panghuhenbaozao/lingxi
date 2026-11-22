@@ -749,18 +749,15 @@ final class TopToolbarView: UIView {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
             if let code = item.extractedCode {
-                // 模式 A：短信/通知验证码全栏独占提醒
+                // 模式 A：短信/通知验证码全栏独占提醒（支持左右滑动浏览完整短信内容）
                 let badge = makeTagBadge(icon: "message.badge.filled.fill", text: "验证码", theme: theme)
 
-                let codePreviewBtn = ActionClosureButton(type: .system)
-                codePreviewBtn.setTitle("\(code)  ·  \(singleLine)", for: .normal)
-                codePreviewBtn.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-                codePreviewBtn.titleLabel?.lineBreakMode = .byTruncatingTail
-                codePreviewBtn.setTitleColor(theme.keyText, for: .normal)
-                codePreviewBtn.contentHorizontalAlignment = .leading
-                codePreviewBtn.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                codePreviewBtn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                codePreviewBtn.actionHandler = { [weak self] in
+                let codePreviewView = ScrollableBannerTextView(
+                    text: "\(code)  ·  \(singleLine)",
+                    font: .monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
+                    textColor: theme.keyText,
+                    accessibilityLabel: "验证码 \(code)，左右滑动查看完整短信，点按填入"
+                ) { [weak self] in
                     self?.onAction?(.insertOTP(code))
                 }
 
@@ -773,7 +770,7 @@ final class TopToolbarView: UIView {
                 }
 
                 bannerStack.addArrangedSubview(badge)
-                bannerStack.addArrangedSubview(codePreviewBtn)
+                bannerStack.addArrangedSubview(codePreviewView)
                 bannerStack.addArrangedSubview(fillBtn)
 
                 if singleLine.count > code.count + 4 {
@@ -788,7 +785,7 @@ final class TopToolbarView: UIView {
                 }
                 bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
             } else {
-                // 模式 B：刚复制的内容全栏独占预览与一键粘贴
+                // 模式 B：刚复制的内容全栏独占预览与一键粘贴（支持左右滑动查看完整复制文字）
                 let (icon, tagTitle): (String, String) = {
                     switch item.category {
                     case .url: return ("link", "新链接")
@@ -799,16 +796,12 @@ final class TopToolbarView: UIView {
                 }()
                 let badge = makeTagBadge(icon: icon, text: tagTitle, theme: theme)
 
-                let contentBtn = ActionClosureButton(type: .system)
-                contentBtn.setTitle(singleLine, for: .normal)
-                contentBtn.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
-                contentBtn.titleLabel?.lineBreakMode = .byTruncatingTail
-                contentBtn.setTitleColor(theme.keyText, for: .normal)
-                contentBtn.contentHorizontalAlignment = .leading
-                contentBtn.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                contentBtn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                contentBtn.accessibilityLabel = "刚复制的内容：\(singleLine)，点按直接粘贴"
-                contentBtn.actionHandler = { [weak self] in
+                let contentView = ScrollableBannerTextView(
+                    text: singleLine,
+                    font: .systemFont(ofSize: 13, weight: .medium),
+                    textColor: theme.keyText,
+                    accessibilityLabel: "刚复制的内容：\(singleLine)，左右滑动查看全文，点按直接粘贴"
+                ) { [weak self] in
                     self?.onAction?(.pasteCaptured(item.text))
                 }
 
@@ -821,7 +814,7 @@ final class TopToolbarView: UIView {
                 }
 
                 bannerStack.addArrangedSubview(badge)
-                bannerStack.addArrangedSubview(contentBtn)
+                bannerStack.addArrangedSubview(contentView)
                 bannerStack.addArrangedSubview(pasteBtn)
                 bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
             }
@@ -895,5 +888,51 @@ final class ActionClosureButton: UIButton {
 
     @objc private func trigger() {
         actionHandler?()
+    }
+}
+
+/// 顶栏可左右横向滑动的复制文本 / 短信预览组件：长文本不再截断，支持手指左右顺滑滚动查看全文并点按粘贴。
+private final class ScrollableBannerTextView: UIView {
+    private let scrollView = UIScrollView()
+    private let textButton = ActionClosureButton(type: .system)
+
+    init(text: String, font: UIFont, textColor: UIColor, accessibilityLabel: String, onTap: @escaping () -> Void) {
+        super.init(frame: .zero)
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.alwaysBounceHorizontal = true
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
+        addSubview(scrollView)
+
+        textButton.setTitle(text, for: .normal)
+        textButton.titleLabel?.font = font
+        textButton.titleLabel?.lineBreakMode = .byClipping
+        textButton.setTitleColor(textColor, for: .normal)
+        textButton.contentHorizontalAlignment = .leading
+        textButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 8)
+        textButton.accessibilityLabel = accessibilityLabel
+        textButton.actionHandler = onTap
+        scrollView.addSubview(textButton)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: 30)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scrollView.frame = bounds
+        let fit = textButton.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: max(28, bounds.height)))
+        let contentW = max(bounds.width, ceil(fit.width) + 4)
+        textButton.frame = CGRect(x: 0, y: 0, width: contentW, height: bounds.height)
+        scrollView.contentSize = CGSize(width: contentW, height: bounds.height)
     }
 }

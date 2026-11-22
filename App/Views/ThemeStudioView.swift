@@ -13,6 +13,23 @@ extension Color {
             opacity: c.a * opacityScale
         )
     }
+
+    func toHexRGBString() -> String {
+        let ui = UIColor(self)
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        if ui.getRed(&r, green: &g, blue: &b, alpha: &a) {
+            return String(
+                format: "#%02X%02X%02X",
+                Int((max(0, min(1, r)) * 255).rounded()),
+                Int((max(0, min(1, g)) * 255).rounded()),
+                Int((max(0, min(1, b)) * 255).rounded())
+            )
+        }
+        return "#FFFFFF"
+    }
 }
 
 struct ThemeStudioView: View {
@@ -34,6 +51,7 @@ struct ThemeStudioView: View {
                     previewStateSelector
                     previewCard
                     presetGrid
+                    customColorPaletteSection
                     customBackgroundSection
                     keyAppearanceSection
                     communityThemeShareSection
@@ -75,11 +93,8 @@ struct ThemeStudioView: View {
             .pickerStyle(.segmented)
             .onChange(of: appState.theme.appearanceMode) { newMode in
                 appState.theme.adaptiveDarkMode = (newMode == .followSystem)
-                if newMode == .alwaysLight {
-                    appState.theme.selectedThemeID = "lingxi_pure"
-                }
             }
-            Text("「跟随系统」在浅色模式下展示苹果质感纯白圆角键帽，夜间自动切换为暗夜石墨；也可手动锁定「始终纯白」或「始终深色」。")
+            Text("「跟随系统」在浅色模式下展示苹果质感纯白圆角键帽，夜间自动切换为暗夜石墨；点击任意预设主题或自由调色也会立即生效。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -250,9 +265,23 @@ struct ThemeStudioView: View {
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 ForEach(KeyboardThemePreset.presets) { preset in
-                    let isSelected = (appState.theme.selectedThemeID == preset.id)
+                    let isSelected = (activePreset.id == preset.id && !appState.theme.hasCustomColorOverrides)
                     Button {
                         appState.theme.selectedThemeID = preset.id
+                        appState.theme.clearCustomColors()
+                        if preset.isDark {
+                            appState.theme.darkThemeID = preset.id
+                            if appState.theme.appearanceMode == .alwaysLight || (appState.theme.appearanceMode == .followSystem && colorScheme != .dark) {
+                                appState.theme.appearanceMode = .alwaysDark
+                                appState.theme.adaptiveDarkMode = false
+                            }
+                        } else {
+                            appState.theme.lightThemeID = preset.id
+                            if appState.theme.appearanceMode == .alwaysDark || (appState.theme.appearanceMode == .followSystem && colorScheme == .dark) {
+                                appState.theme.appearanceMode = .alwaysLight
+                                appState.theme.adaptiveDarkMode = false
+                            }
+                        }
                     } label: {
                         HStack(spacing: 10) {
                             ZStack {
@@ -299,6 +328,82 @@ struct ThemeStudioView: View {
         }
     }
 
+    // MARK: - 自由调色板（实时联动上方预览与真机键盘）
+
+    private var customColorPaletteSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("自由调色板", systemImage: "eyedropper.halffull")
+                    .font(.headline)
+                Spacer()
+                if appState.theme.hasCustomColorOverrides {
+                    Button("恢复预设原色") {
+                        appState.theme.clearCustomColors()
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(Design.Palette.ink))
+                }
+            }
+
+            ColorPicker("键盘底板颜色", selection: hexColorBinding(\.customCanvasHex, fallback: activePreset.canvasTop), supportsOpacity: false)
+            ColorPicker("字母键帽颜色", selection: hexColorBinding(\.customKeyFillHex, fallback: activePreset.keyFill), supportsOpacity: false)
+            ColorPicker("按键文字颜色", selection: hexColorBinding(\.customKeyTextHex, fallback: activePreset.keyText), supportsOpacity: false)
+            ColorPicker("发送键与强调色", selection: hexColorBinding(\.customAccentHex, fallback: activePreset.accentFill), supportsOpacity: false)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    quickColorSwatch("苹果纯白", canvas: "#E8EAEF", key: "#FFFFFF", text: "#0A0A0A", accent: "#0A0A0A")
+                    quickColorSwatch("晴空蓝", canvas: "#E5EEF8", key: "#FFFFFF", text: "#111827", accent: "#007AFF")
+                    quickColorSwatch("樱花粉", canvas: "#F9E6EE", key: "#FFFFFF", text: "#432333", accent: "#E85D93")
+                    quickColorSwatch("松烟绿", canvas: "#E3ECE6", key: "#FAFDFB", text: "#1E3129", accent: "#2F7D5A")
+                    quickColorSwatch("深邃墨玉", canvas: "#181A20", key: "#2C313D", text: "#F3F4F6", accent: "#4F8BFF")
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func hexColorBinding(_ keyPath: WritableKeyPath<ThemeCustomization, String?>, fallback: HexColor) -> Binding<Color> {
+        Binding<Color>(
+            get: {
+                if let hex = appState.theme[keyPath: keyPath] {
+                    return Color(hexColor: HexColor(hex))
+                }
+                return Color(hexColor: fallback)
+            },
+            set: { newColor in
+                appState.theme[keyPath: keyPath] = newColor.toHexRGBString()
+            }
+        )
+    }
+
+    private func quickColorSwatch(_ title: String, canvas: String, key: String, text: String, accent: String) -> some View {
+        Button {
+            appState.theme.customCanvasHex = canvas
+            appState.theme.customKeyFillHex = key
+            appState.theme.customKeyTextHex = text
+            appState.theme.customAccentHex = accent
+        } label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(Color(hexColor: HexColor(accent)))
+                    .frame(width: 12, height: 12)
+                Text(title)
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(Design.Palette.ink))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color(Design.Palette.surface))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - 相册自定义背景
 
     private var customBackgroundSection: some View {
@@ -339,18 +444,22 @@ struct ThemeStudioView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 按键几何与深色模式联动
+    // MARK: - 按键几何与深浅色配对
 
     private var keyAppearanceSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("细节精调")
+            Text("键帽圆角与跟随系统配对")
                 .font(.headline)
             sliderRow(title: "按键圆角", value: $appState.theme.keyCornerRadius, range: 2...14, format: "%.0f pt")
 
             Toggle("键帽加粗字体", isOn: $appState.theme.boldKeyLabel)
-            Toggle("跟随系统深色模式自动切换暗色主题", isOn: $appState.theme.adaptiveDarkMode)
 
-            if appState.theme.adaptiveDarkMode {
+            if appState.theme.appearanceMode == .followSystem {
+                Picker("浅色模式配对主题", selection: $appState.theme.lightThemeID) {
+                    ForEach(KeyboardThemePreset.presets.filter { !$0.isDark }) { preset in
+                        Text(preset.name).tag(preset.id)
+                    }
+                }
                 Picker("深色模式配对主题", selection: $appState.theme.darkThemeID) {
                     ForEach(KeyboardThemePreset.presets.filter(\.isDark)) { preset in
                         Text(preset.name).tag(preset.id)

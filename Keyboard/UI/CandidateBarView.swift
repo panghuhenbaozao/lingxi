@@ -66,9 +66,16 @@ final class CandidateBarView: UIView {
         let expandWidth: CGFloat = 34
         expandButton.frame = CGRect(x: bounds.width - expandWidth - 2, y: 0, width: expandWidth, height: bounds.height)
         scrollView.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - expandWidth - 4), height: bounds.height)
-        let targetWidth = max(scrollView.bounds.width, stackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+        let measuredWidth = stackView.arrangedSubviews
+            .filter { !$0.isHidden }
+            .reduce(CGFloat(0)) { acc, v in
+                let w = v.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: scrollView.bounds.height)).width
+                return acc + max(32, ceil(w)) + stackView.spacing
+            }
+        let fitWidth = stackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
+        let targetWidth = max(scrollView.bounds.width, max(measuredWidth, fitWidth))
         stackView.frame = CGRect(x: 6, y: 0, width: targetWidth, height: scrollView.bounds.height)
-        scrollView.contentSize = CGSize(width: stackView.frame.maxX + 8, height: scrollView.bounds.height)
+        scrollView.contentSize = CGSize(width: stackView.frame.maxX + 10, height: scrollView.bounds.height)
     }
 
     func apply(theme: ResolvedTheme) {

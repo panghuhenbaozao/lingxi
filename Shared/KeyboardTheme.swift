@@ -219,7 +219,7 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
     }
 }
 
-/// 键盘外观明暗策略（支持跟随系统自动切换，或手动锁定纯白/深色）。
+/// 键盘外观明暗策略（支持跟随系统自动切换，或手动锁定浅色/深色）。
 enum KeyboardAppearanceMode: String, Codable, CaseIterable, Identifiable {
     case followSystem = "follow_system"
     case alwaysLight = "always_light"
@@ -230,18 +230,23 @@ enum KeyboardAppearanceMode: String, Codable, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .followSystem: return "跟随系统"
-        case .alwaysLight: return "始终纯白"
-        case .alwaysDark: return "始终深色"
+        case .alwaysLight: return "浅色主题"
+        case .alwaysDark: return "深色主题"
         }
     }
 }
 
-/// 用户皮肤自定义配置。
+/// 用户皮肤自定义配置（支持预设切换、跟随系统自动配对，以及自由调色板自定义色值）。
 struct ThemeCustomization: Codable, Equatable {
     var selectedThemeID: String = "lingxi_pure"
+    var lightThemeID: String = "lingxi_pure"
     var darkThemeID: String = "midnight_geek"
     var adaptiveDarkMode: Bool = true
     var appearanceMode: KeyboardAppearanceMode = .followSystem
+    var customCanvasHex: String? = nil
+    var customKeyFillHex: String? = nil
+    var customKeyTextHex: String? = nil
+    var customAccentHex: String? = nil
     var customBackgroundFileName: String? = nil
     var backgroundBlurRadius: Double = 8.0
     var backgroundDimOpacity: Double = 0.25
@@ -260,16 +265,38 @@ struct ThemeCustomization: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         selectedThemeID = try c.decodeIfPresent(String.self, forKey: .selectedThemeID) ?? "lingxi_pure"
+        let decodedLight = try c.decodeIfPresent(String.self, forKey: .lightThemeID)
+        if let decodedLight {
+            lightThemeID = decodedLight
+        } else {
+            let sel = KeyboardThemePreset.find(id: selectedThemeID)
+            lightThemeID = sel.isDark ? "lingxi_pure" : sel.id
+        }
         darkThemeID = try c.decodeIfPresent(String.self, forKey: .darkThemeID) ?? "midnight_geek"
         adaptiveDarkMode = try c.decodeIfPresent(Bool.self, forKey: .adaptiveDarkMode) ?? true
         appearanceMode = try c.decodeIfPresent(KeyboardAppearanceMode.self, forKey: .appearanceMode)
             ?? (adaptiveDarkMode ? .followSystem : .alwaysLight)
+        customCanvasHex = try c.decodeIfPresent(String.self, forKey: .customCanvasHex)
+        customKeyFillHex = try c.decodeIfPresent(String.self, forKey: .customKeyFillHex)
+        customKeyTextHex = try c.decodeIfPresent(String.self, forKey: .customKeyTextHex)
+        customAccentHex = try c.decodeIfPresent(String.self, forKey: .customAccentHex)
         customBackgroundFileName = try c.decodeIfPresent(String.self, forKey: .customBackgroundFileName)
         backgroundBlurRadius = try c.decodeIfPresent(Double.self, forKey: .backgroundBlurRadius) ?? 8.0
         backgroundDimOpacity = try c.decodeIfPresent(Double.self, forKey: .backgroundDimOpacity) ?? 0.25
         keyOpacity = try c.decodeIfPresent(Double.self, forKey: .keyOpacity) ?? 0.96
         keyCornerRadius = try c.decodeIfPresent(Double.self, forKey: .keyCornerRadius) ?? 8.0
         boldKeyLabel = try c.decodeIfPresent(Bool.self, forKey: .boldKeyLabel) ?? false
+    }
+
+    var hasCustomColorOverrides: Bool {
+        customCanvasHex != nil || customKeyFillHex != nil || customKeyTextHex != nil || customAccentHex != nil
+    }
+
+    mutating func clearCustomColors() {
+        customCanvasHex = nil
+        customKeyFillHex = nil
+        customKeyTextHex = nil
+        customAccentHex = nil
     }
 
     static func load(force: Bool = false) -> ThemeCustomization {
@@ -292,28 +319,51 @@ struct ThemeCustomization: Codable, Equatable {
     }
 
     func activePreset(isSystemDark: Bool) -> KeyboardThemePreset {
-        let chosen = KeyboardThemePreset.find(id: selectedThemeID)
-        let darkPreset: KeyboardThemePreset = {
-            if chosen.isDark { return chosen }
-            let d = KeyboardThemePreset.find(id: darkThemeID)
-            return d.isDark ? d : (KeyboardThemePreset.presets.first(where: { $0.isDark }) ?? d)
-        }()
-        let lightPreset: KeyboardThemePreset = {
-            if !chosen.isDark { return chosen }
-            return KeyboardThemePreset.find(id: "lingxi_pure")
-        }()
-
+        let base: KeyboardThemePreset
         switch appearanceMode {
         case .followSystem:
-            if adaptiveDarkMode && isSystemDark {
-                return darkPreset
+            if isSystemDark {
+                let d = KeyboardThemePreset.find(id: darkThemeID)
+                base = d.isDark ? d : KeyboardThemePreset.find(id: "midnight_geek")
+            } else {
+                let l = KeyboardThemePreset.find(id: lightThemeID)
+                base = !l.isDark ? l : KeyboardThemePreset.find(id: "lingxi_pure")
             }
-            return lightPreset
         case .alwaysLight:
-            return lightPreset
+            let sel = KeyboardThemePreset.find(id: selectedThemeID)
+            base = !sel.isDark ? sel : KeyboardThemePreset.find(id: lightThemeID)
         case .alwaysDark:
-            return darkPreset
+            let sel = KeyboardThemePreset.find(id: selectedThemeID)
+            base = sel.isDark ? sel : KeyboardThemePreset.find(id: darkThemeID)
         }
+
+        guard hasCustomColorOverrides else { return base }
+        let canvas = customCanvasHex.map { HexColor($0) }
+        let keyFill = customKeyFillHex.map { HexColor($0) }
+        let keyText = customKeyTextHex.map { HexColor($0) }
+        let accent = customAccentHex.map { HexColor($0) }
+        return KeyboardThemePreset(
+            id: base.id,
+            name: base.name,
+            subtitle: base.subtitle,
+            isDark: base.isDark,
+            canvasTop: canvas ?? base.canvasTop,
+            canvasBottom: canvas ?? base.canvasBottom,
+            toolbarBackground: canvas ?? base.toolbarBackground,
+            keyFill: keyFill ?? base.keyFill,
+            keyPressedFill: base.keyPressedFill,
+            specialKeyFill: base.specialKeyFill,
+            specialKeyPressedFill: base.specialKeyPressedFill,
+            accentFill: accent ?? base.accentFill,
+            accentPressedFill: accent ?? base.accentPressedFill,
+            keyText: keyText ?? base.keyText,
+            keyHintText: base.keyHintText,
+            accentText: base.accentText,
+            candidateText: keyText ?? base.candidateText,
+            candidateHighlight: accent ?? base.candidateHighlight,
+            keyShadowHex: base.keyShadowHex,
+            keyShadowOpacity: base.keyShadowOpacity
+        )
     }
 
     var customBackgroundURL: URL? {
