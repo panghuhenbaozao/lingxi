@@ -364,7 +364,7 @@ final class AIAssistantPanelView: UIView {
             guard let self else { return }
             do {
                 var accumulated = ""
-                let featureTag = self.lastCustomPrompt != nil ? "ai_ask" : (self.lastAction?.rawValue ?? "ai_polish")
+                let featureTag = self.lastCustomPrompt != nil ? "ai_ask" : self.lastAction.rawValue
                 for try await delta in client.streamText(
                     prompt: prompt,
                     systemInstruction: systemInstruction,
