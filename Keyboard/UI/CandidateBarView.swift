@@ -84,16 +84,16 @@ final class CandidateBarView: UIView {
         let expandWidth: CGFloat = 34
         expandButton.frame = CGRect(x: bounds.width - expandWidth - 2, y: 0, width: expandWidth, height: bounds.height)
         scrollView.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - expandWidth - 4), height: bounds.height)
-        let measuredWidth = stackView.arrangedSubviews
-            .filter { !$0.isHidden }
-            .reduce(CGFloat(0)) { acc, v in
-                let w = v.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: scrollView.bounds.height)).width
-                return acc + max(32, ceil(w)) + stackView.spacing
-            }
-        let fitWidth = stackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
-        let targetWidth = max(scrollView.bounds.width, max(measuredWidth, fitWidth))
+        let visibleButtons = stackView.arrangedSubviews.filter { !$0.isHidden }
+        let measuredWidth = visibleButtons.reduce(CGFloat(0)) { acc, v in
+            let w = v.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: scrollView.bounds.height)).width
+            return acc + max(32, ceil(w))
+        } + CGFloat(max(0, visibleButtons.count - 1)) * stackView.spacing
+        let fitWidth = ceil(stackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+        // 绝不把 UIStackView 的 frame 强行拉宽到 scrollView.bounds.width，防止少量候选词被横向扯散
+        let targetWidth = max(measuredWidth, fitWidth)
         stackView.frame = CGRect(x: 6, y: 0, width: targetWidth, height: scrollView.bounds.height)
-        scrollView.contentSize = CGSize(width: stackView.frame.maxX + 10, height: scrollView.bounds.height)
+        scrollView.contentSize = CGSize(width: max(scrollView.bounds.width, stackView.frame.maxX + 10), height: scrollView.bounds.height)
     }
 
     func apply(theme: ResolvedTheme) {
@@ -145,6 +145,8 @@ final class CandidateBarView: UIView {
             let btn = UIButton(type: .custom)
             btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
             btn.layer.cornerRadius = 8
+            btn.setContentHuggingPriority(.required, for: .horizontal)
+            btn.setContentCompressionResistancePriority(.required, for: .horizontal)
             btn.addTarget(self, action: #selector(handleCandidateTap(_:)), for: .touchUpInside)
 
             let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))

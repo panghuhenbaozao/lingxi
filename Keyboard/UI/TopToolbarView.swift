@@ -57,7 +57,8 @@ final class TopToolbarView: UIView {
     private let bottomHairline = UIView()
     private let composingScrollView = ToolbarHorizontalScrollView()
     private let composingLabel = UILabel()
-    private let composingSyllableStack = UIStackView()
+    private let composingChipContainer = UIView()
+    private var composingChipItems: [(view: UIView, width: CGFloat)] = []
     private var lastSyllableSignature = ""
     private var activeEditingSyllableIdx: Int?
     let candidateBar = CandidateBarView()
@@ -146,18 +147,17 @@ final class TopToolbarView: UIView {
         composingScrollView.showsHorizontalScrollIndicator = false
         composingScrollView.showsVerticalScrollIndicator = false
         composingScrollView.alwaysBounceHorizontal = true
+        composingScrollView.clipsToBounds = true
         composingScrollView.isHidden = true
         addSubview(composingScrollView)
 
-        composingLabel.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        composingLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
         composingLabel.lineBreakMode = .byClipping
         composingScrollView.addSubview(composingLabel)
 
-        composingSyllableStack.axis = .horizontal
-        composingSyllableStack.alignment = .center
-        composingSyllableStack.spacing = 2
-        composingSyllableStack.isHidden = true
-        composingScrollView.addSubview(composingSyllableStack)
+        composingChipContainer.isHidden = true
+        composingChipContainer.clipsToBounds = false
+        composingScrollView.addSubview(composingChipContainer)
 
         candidateBar.isHidden = true
         candidateBar.onSelectCandidate = { [weak self] idx in
@@ -468,26 +468,34 @@ final class TopToolbarView: UIView {
         bottomHairline.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
 
         if hasCandidates {
-            let showComposing = !(composingLabel.text ?? "").isEmpty || !composingSyllableStack.isHidden
+            let showComposing = !(composingLabel.text ?? "").isEmpty || !composingChipContainer.isHidden
             composingScrollView.isHidden = !showComposing
             if showComposing {
-                composingScrollView.frame = CGRect(x: 12, y: 2, width: max(0, bounds.width - 24), height: 17)
-                if !composingSyllableStack.isHidden {
-                    let stackW = max(composingScrollView.bounds.width, ceil(composingSyllableStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width) + 6)
-                    composingSyllableStack.frame = CGRect(x: 0, y: 0, width: stackW, height: 17)
-                    composingScrollView.contentSize = CGSize(width: stackW, height: 17)
+                let stripH: CGFloat = 18
+                composingScrollView.frame = CGRect(x: 12, y: 1, width: max(0, bounds.width - 24), height: stripH)
+                let contentW: CGFloat
+                if !composingChipContainer.isHidden {
+                    let widths: [Double] = composingChipItems.map { Double($0.width) }
+                    let layout = ComposingSyllableLayout.computeHorizontalFrames(itemWidths: widths, spacing: 0.5)
+                    for (idx, item) in composingChipItems.enumerated() where idx < layout.rects.count {
+                        let r = layout.rects[idx]
+                        item.view.frame = CGRect(x: CGFloat(r.x), y: 0, width: CGFloat(r.width), height: stripH)
+                    }
+                    let totalW = CGFloat(layout.totalWidth)
+                    composingChipContainer.frame = CGRect(x: 0, y: 0, width: totalW, height: stripH)
+                    contentW = totalW + 8
                 } else {
-                    let fitW = ceil(composingLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 17)).width) + 6
-                    let contentW = max(composingScrollView.bounds.width, fitW)
-                    composingLabel.frame = CGRect(x: 0, y: 0, width: contentW, height: 17)
-                    composingScrollView.contentSize = CGSize(width: contentW, height: 17)
+                    let fitW = ceil(composingLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: stripH)).width) + 6
+                    composingLabel.frame = CGRect(x: 0, y: 0, width: fitW, height: stripH)
+                    contentW = fitW
                 }
-                if composingScrollView.contentSize.width > composingScrollView.bounds.width {
-                    composingScrollView.contentOffset = CGPoint(x: composingScrollView.contentSize.width - composingScrollView.bounds.width, y: 0)
+                composingScrollView.contentSize = CGSize(width: max(composingScrollView.bounds.width, contentW), height: stripH)
+                if contentW > composingScrollView.bounds.width + 1 {
+                    composingScrollView.contentOffset = CGPoint(x: contentW - composingScrollView.bounds.width, y: 0)
                 } else {
                     composingScrollView.contentOffset = .zero
                 }
-                candidateBar.frame = CGRect(x: 0, y: 17, width: bounds.width, height: max(28, bounds.height - 17))
+                candidateBar.frame = CGRect(x: 0, y: stripH + 1, width: bounds.width, height: max(28, bounds.height - (stripH + 1)))
             } else {
                 candidateBar.frame = bounds
             }
@@ -512,9 +520,9 @@ final class TopToolbarView: UIView {
 
         if !selectionMagicScroll.isHidden {
             selectionMagicScroll.frame = bounds
-            let sw = max(bounds.width - 20, ceil(selectionMagicStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width) + 16)
-            selectionMagicStack.frame = CGRect(x: 10, y: pillY, width: sw, height: pillH)
-            selectionMagicScroll.contentSize = CGSize(width: sw + 16, height: bounds.height)
+            let naturalW = ceil(selectionMagicStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+            selectionMagicStack.frame = CGRect(x: 10, y: pillY, width: naturalW, height: pillH)
+            selectionMagicScroll.contentSize = CGSize(width: max(bounds.width, naturalW + 20), height: bounds.height)
         }
 
         if !inlineAICommandBar.isHidden {
@@ -614,6 +622,7 @@ final class TopToolbarView: UIView {
         translateCloseBtn.tintColor = theme.keyText
 
         candidateBar.apply(theme: theme)
+        lastSyllableSignature = ""
         rebuildBanner(force: true)
     }
 
@@ -723,10 +732,10 @@ final class TopToolbarView: UIView {
         if showComposingStrip && composingSyllables.count >= 2 {
             composingLabel.text = ""
             composingLabel.isHidden = true
-            composingSyllableStack.isHidden = false
+            composingChipContainer.isHidden = false
             rebuildSyllableChips(composingSyllables, activeIndex: activeSyllableIndex)
         } else {
-            composingSyllableStack.isHidden = true
+            composingChipContainer.isHidden = true
             composingLabel.isHidden = false
             composingLabel.text = showComposingStrip ? composingDisplay : ""
         }
@@ -734,17 +743,9 @@ final class TopToolbarView: UIView {
         idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
-        // 当剪贴板新内容或短信验证码胶囊激活，或者宿主输入框存在选中文字触发「框选即改」/ `@ai` 指令时，切换顶栏展示
-        let isBannerTakeoverActive = (currentBannerState != .hidden)
-        let isInlineAIActive = (activeInlineCommand != nil)
         if let cmd = activeInlineCommand {
             inlineAICommandBtn.setTitle("✨ 点此执行 AI：\(cmd.command)", for: .normal)
         }
-        inlineAICommandBar.isHidden = !isInlineAIActive
-        selectionMagicScroll.isHidden = !isSelectionMagicActive
-        leftClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
-        rightClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
-        idleScrollView.isHidden = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
 
         if let theme {
             stylePrimaryButtons(theme: theme, aiActive: aiPanelActive, translateActive: isTranslateBarActive)
@@ -754,7 +755,19 @@ final class TopToolbarView: UIView {
             candidateBar.updateCandidates(candidates, expanded: expanded)
         }
         rebuildBanner()
+        updateIdleOverlayVisibility()
         setNeedsLayout()
+    }
+
+    private func updateIdleOverlayVisibility() {
+        let isBannerTakeoverActive = (currentBannerState != .hidden)
+        let isInlineAIActive = (activeInlineCommand != nil)
+        inlineAICommandBar.isHidden = !isInlineAIActive
+        selectionMagicScroll.isHidden = !isSelectionMagicActive
+        let hideStandardIdle = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
+        leftClusterStack.isHidden = hideStandardIdle
+        rightClusterStack.isHidden = hideStandardIdle
+        idleScrollView.isHidden = hideStandardIdle
     }
 
     func showWordActionBar(word: String, py: String, isPinned: Bool) {
@@ -841,9 +854,7 @@ final class TopToolbarView: UIView {
         guard let theme else { return }
 
         let wasHidden = bannerContainer.isHidden
-        let isTakeover = (currentBannerState != .hidden)
-        leftClusterStack.isHidden = isTakeover
-        rightClusterStack.isHidden = isTakeover
+        updateIdleOverlayVisibility()
 
         switch currentBannerState {
         case .hidden:
@@ -1055,31 +1066,46 @@ final class TopToolbarView: UIView {
         let sig = "\(syllables.joined(separator: "'"))|\(activeIndex ?? -1)|\(theme?.preset.id ?? "")"
         guard sig != lastSyllableSignature else { return }
         lastSyllableSignature = sig
-        composingSyllableStack.arrangedSubviews.forEach {
-            composingSyllableStack.removeArrangedSubview($0)
-            $0.removeFromSuperview()
-        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        composingChipItems.forEach { $0.view.removeFromSuperview() }
+        composingChipItems.removeAll(keepingCapacity: true)
         guard let theme else { return }
+
+        let sepFont = UIFont.systemFont(ofSize: 12, weight: .medium)
+        let sepWidth = ceil(("'" as NSString).size(withAttributes: [.font: sepFont]).width) + 1.0
+
         for (idx, syl) in syllables.enumerated() {
             if idx > 0 {
                 let sep = UILabel()
                 sep.text = "'"
-                sep.font = .systemFont(ofSize: 11, weight: .medium)
+                sep.font = sepFont
                 sep.textColor = theme.keyHintText
-                composingSyllableStack.addArrangedSubview(sep)
+                sep.textAlignment = .center
+                composingChipContainer.addSubview(sep)
+                composingChipItems.append((sep, sepWidth))
             }
             let btn = ActionClosureButton(type: .custom)
             let isSelected = (activeIndex == idx)
+            let font = UIFont.systemFont(ofSize: 12.5, weight: isSelected ? .bold : .semibold)
+            let hPad: CGFloat = isSelected ? 4.0 : 1.0
+            let exactW = ceil((syl as NSString).size(withAttributes: [.font: font]).width) + hPad * 2
             btn.setTitle(syl, for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: isSelected ? .bold : .semibold)
+            btn.titleLabel?.font = font
+            btn.titleLabel?.lineBreakMode = .byClipping
             btn.setTitleColor(isSelected ? theme.accentText : theme.candidateHighlight, for: .normal)
             btn.backgroundColor = isSelected ? theme.accentFill : .clear
             btn.layer.cornerRadius = 4
-            btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: isSelected ? 4 : 1, bottom: 0, right: isSelected ? 4 : 1)
+            btn.layer.cornerCurve = .continuous
+            btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: hPad, bottom: 0, right: hPad)
             btn.actionHandler = { [weak self] in
                 self?.onAction?(.tapComposingSyllable(idx))
             }
-            composingSyllableStack.addArrangedSubview(btn)
+            composingChipContainer.addSubview(btn)
+            composingChipItems.append((btn, exactW))
         }
     }
 

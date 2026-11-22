@@ -241,12 +241,6 @@ final class PinyinEngine {
             }
             return false
         }()
-        if effectiveScheme == .quanpin && (hasInvalid || hasNonCompleteCluster) && lower.count >= 4,
-           let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
-            let mixedWords = Set(mixed.candidates.map(\.word))
-            out = mixed.candidates + out.filter { !mixedWords.contains($0.word) }
-            return (bestSeg, Array(out.prefix(limit)), nil)
-        }
         let allInitials = !bestSeg.isEmpty && bestSeg.allSatisfy { $0.raw.count == 1 }
         let allComplete = !bestSeg.isEmpty && bestSeg.allSatisfy { $0.kind == .complete }
         let hasAwkwardPartial = bestSeg.count >= 2 && !allInitials && bestSeg.contains { $0.kind == .partial }
@@ -346,9 +340,16 @@ final class PinyinEngine {
             out.insert(enCand, at: min(5, out.count))
         }
 
-        // 5. 实时地理位置与周边 POI 动态提权（当前所在城市/区县/街道/商圈/车站一键命中）
+        // 4.5 中英内嵌缩写混输（如 fayigepdfgeiwo -> 发一个PDF给我）：放在常规纠错之后，不劫持正常中文错拼纠错
+        if effectiveScheme == .quanpin && (hasInvalid || hasNonCompleteCluster) && lower.count >= 5 && correctedHint == nil,
+           let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
+            let mixedWords = Set(mixed.candidates.map(\.word))
+            out = mixed.candidates + out.filter { !mixedWords.contains($0.word) }
+        }
+
+        // 5. 实时地理位置与周边 POI 动态提权（当前所在城市/区县/街道/商圈/车站精准命中，不劫持日常短词）
         if settings.geoLocationBoostEnabled && effectiveScheme == .quanpin && !lower.hasPrefix("v") {
-            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: lower, isT9: false, limit: 4)
+            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: lower, isT9: false, limit: 3)
             if !geoHits.isEmpty {
                 let cleanLower = lower.replacingOccurrences(of: "'", with: "")
                 var promotedTop: [PinyinCandidate] = []
@@ -356,6 +357,7 @@ final class PinyinEngine {
                 for entry in geoHits {
                     let flatPy = entry.pinyin.replacingOccurrences(of: "'", with: "")
                     let isFullExact = (flatPy == cleanLower)
+                    let isLongAbbrExact = (entry.abbr == cleanLower && cleanLower.count >= 4)
                     let cand = PinyinCandidate(
                         word: entry.word,
                         py: entry.pinyin,
@@ -364,7 +366,7 @@ final class PinyinEngine {
                         isExact: isFullExact,
                         source: .userLearned
                     )
-                    if isFullExact || (entry.abbr == cleanLower && cleanLower.count >= 3) {
+                    if isFullExact || isLongAbbrExact {
                         promotedTop.append(cand)
                     } else {
                         promotedSecondary.append(cand)
@@ -376,7 +378,7 @@ final class PinyinEngine {
                     out = promotedTop + out
                 }
                 if !promotedSecondary.isEmpty {
-                    let insertIdx = min(promotedTop.count + 1, out.count)
+                    let insertIdx = min(max(2, promotedTop.count + 1), out.count)
                     out.insert(contentsOf: promotedSecondary, at: insertIdx)
                 }
             }
@@ -387,6 +389,7 @@ final class PinyinEngine {
 
     // MARK: - 引擎 3.0：中英数混输直出 & 点击任意音节局部单字反查
 
+    // 仅收录 3 字母以上无歧义英文缩写，彻底避免 2 字母词（ai/ui/ok/hr/pm/pr）误切正常中文拼音
     private static let embeddedEnglishTokens: [(lower: String, display: String)] = [
         ("iphone", "iPhone"), ("github", "GitHub"), ("wechat", "WeChat"), ("deepseek", "DeepSeek"),
         ("chatgpt", "ChatGPT"), ("gemini", "Gemini"), ("swift", "Swift"), ("python", "Python"),
@@ -394,7 +397,6 @@ final class PinyinEngine {
         ("pdf", "PDF"), ("ppt", "PPT"), ("vip", "VIP"), ("api", "API"), ("app", "App"),
         ("bug", "Bug"), ("ios", "iOS"), ("mac", "Mac"), ("sql", "SQL"), ("llm", "LLM"),
         ("ipa", "IPA"), ("url", "URL"), ("ceo", "CEO"), ("kpi", "KPI"), ("okr", "OKR"),
-        ("hr", "HR"), ("ok", "OK"), ("ai", "AI"), ("pm", "PM"), ("pr", "PR"), ("ui", "UI"),
     ]
 
     /// 当拼音串中包含阿拉伯数字（如 `mingtian3dianjian`）或嵌入高频英文缩写（如 `fayigepdfgeiwo`）时，
@@ -466,37 +468,58 @@ final class PinyinEngine {
 
         guard foundMixedLiteral else { return nil }
 
-        var assembledWords: [String] = []
+        var pieceOptions: [[String]] = []
         var assembledTokens: [PinyinToken] = []
         var cursorOffset = 0
         for p in refined {
             switch p {
             case .literal(let lit):
-                assembledWords.append(lit)
+                pieceOptions.append([lit])
                 assembledTokens.append(PinyinToken(text: lit, raw: lit, kind: .complete, end: cursorOffset + lit.count))
                 cursorOffset += lit.count
             case .py(let pyPart):
                 let segs = segmenter.segmentations(raw: pyPart, scheme: .quanpin)
-                let (subSeg, subCands) = evaluateSegmentations(segs, isT9: false, settings: settings, contextMap: [:], limit: 4)
-                guard let top = subCands.first else { return nil }
-                assembledWords.append(top.word)
+                let (subSeg, subCands) = evaluateSegmentations(segs, isT9: false, settings: settings, contextMap: [:], limit: 5)
+                guard !subCands.isEmpty else { return nil }
+                pieceOptions.append(Array(subCands.prefix(4).map(\.word)))
                 for t in subSeg {
                     assembledTokens.append(PinyinToken(text: t.text, raw: t.raw, kind: t.kind, end: cursorOffset + t.end))
                 }
                 cursorOffset += pyPart.count
             }
         }
-        let joined = assembledWords.joined()
-        guard !joined.isEmpty else { return nil }
-        let mixedCand = PinyinCandidate(
-            word: joined,
-            py: "",
-            lp: 12.0,
-            consumed: raw.count,
-            isExact: true,
-            source: .dictionary
-        )
-        return (assembledTokens, [mixedCand])
+        let primaryJoined = pieceOptions.compactMap(\.first).joined()
+        guard !primaryJoined.isEmpty else { return nil }
+        var outCands: [PinyinCandidate] = [
+            PinyinCandidate(
+                word: primaryJoined,
+                py: "",
+                lp: 12.0,
+                consumed: raw.count,
+                isExact: true,
+                source: .dictionary
+            )
+        ]
+        var seen = Set<String>([primaryJoined])
+        // 为主中文分片补充次选组合，避免中数混输时候选栏只剩唯一孤词
+        if let varyIdx = pieceOptions.lastIndex(where: { $0.count > 1 }) {
+            for alt in pieceOptions[varyIdx].dropFirst() {
+                var parts = pieceOptions.compactMap(\.first)
+                parts[varyIdx] = alt
+                let word = parts.joined()
+                if seen.insert(word).inserted {
+                    outCands.append(PinyinCandidate(
+                        word: word,
+                        py: "",
+                        lp: 11.0 - Double(outCands.count) * 0.2,
+                        consumed: raw.count,
+                        isExact: false,
+                        source: .dictionary
+                    ))
+                }
+            }
+        }
+        return (assembledTokens, outCands)
     }
 
     /// 针对长句中用户点选的任意单个音节，快速返回其全部同音单字，用于「免退格回溯改字」。
@@ -839,8 +862,8 @@ final class PinyinEngine {
             limit: limit
         )
         var out = rawOut
-        if settings.geoLocationBoostEnabled && digits.count >= 3 {
-            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: digits, isT9: true, limit: 3)
+        if settings.geoLocationBoostEnabled && digits.count >= 4 {
+            let geoHits = GeoLocationContext.load().matchCandidates(rawInput: digits, isT9: true, limit: 2)
             if !geoHits.isEmpty {
                 let geoCands = geoHits.map { entry in
                     PinyinCandidate(

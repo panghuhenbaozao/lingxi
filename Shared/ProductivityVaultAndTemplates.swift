@@ -369,3 +369,29 @@ enum PinyinToneClassifier {
         return 0
     }
 }
+
+// MARK: - 6. 拼音音节条确定性左对齐紧凑布局引擎（杜绝 UIStackView 拉宽导致音节满屏乱跑）
+
+struct ComposingSyllableRect: Equatable {
+    let x: Double
+    let width: Double
+}
+
+enum ComposingSyllableLayout {
+    /// 纯确定性从左向右紧凑排版：绝不随容器宽度拉伸音节或分隔符，确保拼音在任意字数下都紧贴左侧稳定显示。
+    static func computeHorizontalFrames(
+        itemWidths: [Double],
+        spacing: Double = 1.0
+    ) -> (rects: [ComposingSyllableRect], totalWidth: Double) {
+        var rects: [ComposingSyllableRect] = []
+        rects.reserveCapacity(itemWidths.count)
+        var cursor = 0.0
+        for (idx, rawW) in itemWidths.enumerated() {
+            let w = max(1.0, ceil(rawW))
+            if idx > 0 { cursor += spacing }
+            rects.append(ComposingSyllableRect(x: cursor, width: w))
+            cursor += w
+        }
+        return (rects, cursor)
+    }
+}

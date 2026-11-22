@@ -287,9 +287,9 @@ final class AIAssistantPanelView: UIView {
         let closeW: CGFloat = 46
         closeButton.frame = CGRect(x: bounds.width - pad - closeW, y: 6, width: closeW, height: 28)
         topScroll.frame = CGRect(x: pad, y: 6, width: max(80, closeButton.frame.minX - pad - 6), height: 28)
-        let topFitW = max(topScroll.bounds.width, ceil(topBar.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width) + 4)
-        topBar.frame = CGRect(x: 0, y: 0, width: topFitW, height: 28)
-        topScroll.contentSize = CGSize(width: topFitW, height: 28)
+        let topNaturalW = ceil(topBar.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+        topBar.frame = CGRect(x: 0, y: 0, width: topNaturalW, height: 28)
+        topScroll.contentSize = CGSize(width: max(topScroll.bounds.width, topNaturalW + 4), height: 28)
 
         let sourceRect = CGRect(x: pad + 2, y: topScroll.frame.maxY + 4, width: bounds.width - pad * 2 - 4, height: 16)
         sourceScroll.frame = sourceRect
@@ -300,9 +300,9 @@ final class AIAssistantPanelView: UIView {
 
         let actY = sourceScroll.frame.maxY + 5
         actionsScroll.frame = CGRect(x: 0, y: actY, width: bounds.width, height: 32)
-        let stackW = max(bounds.width - pad * 2, actionsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
-        actionsStack.frame = CGRect(x: pad, y: 0, width: stackW, height: 32)
-        actionsScroll.contentSize = CGSize(width: stackW + pad * 2, height: 32)
+        let actionsNaturalW = ceil(actionsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+        actionsStack.frame = CGRect(x: pad, y: 0, width: actionsNaturalW, height: 32)
+        actionsScroll.contentSize = CGSize(width: max(bounds.width, actionsNaturalW + pad * 2), height: 32)
 
         let bottomH: CGFloat = 34
         bottomBar.frame = CGRect(x: pad, y: bounds.height - bottomH - 6, width: bounds.width - pad * 2, height: bottomH)
@@ -310,9 +310,9 @@ final class AIAssistantPanelView: UIView {
         let refineH: CGFloat = refineScroll.isHidden ? 0 : 28
         if !refineScroll.isHidden {
             refineScroll.frame = CGRect(x: 0, y: bottomBar.frame.minY - refineH - 4, width: bounds.width, height: refineH)
-            let rw = max(bounds.width - pad * 2, refineStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+            let rw = ceil(refineStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
             refineStack.frame = CGRect(x: pad, y: 0, width: rw, height: refineH)
-            refineScroll.contentSize = CGSize(width: rw + pad * 2, height: refineH)
+            refineScroll.contentSize = CGSize(width: max(bounds.width, rw + pad * 2), height: refineH)
         }
 
         var contentY = actionsScroll.frame.maxY + 5

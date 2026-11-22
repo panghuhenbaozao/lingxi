@@ -111,8 +111,10 @@ struct GeoLocationContext: Codable, Equatable {
         cachedMTime = nil
     }
 
-    /// 在键盘打字热路径中，快速匹配当前城市/区县/街道与周边 POI（支持全拼、简拼、混合前缀与 T9 九宫格）。
-    func matchCandidates(rawInput: String, isT9: Bool, limit: Int = 6) -> [GeoPOIEntry] {
+    /// 在键盘打字热路径中，精准匹配当前城市/区县/街道与周边 POI：
+    /// - 全拼模式：优先匹配完整全拼与 4 字以上简拼；2~3 字简拼仅在次选提示；前缀匹配要求至少 5 字符且最多 1 条，绝不抢占常见汉字。
+    /// - T9 九宫格模式：仅匹配完整 T9 全拼（>=4位）或 4+ 位 T9 简拼，彻底杜绝短数字前缀劫持日常高频词（如 546/742）。
+    func matchCandidates(rawInput: String, isT9: Bool, limit: Int = 4) -> [GeoPOIEntry] {
         guard !pois.isEmpty else { return [] }
         let clean = rawInput.lowercased().replacingOccurrences(of: "'", with: "")
         guard clean.count >= 2 else { return [] }
@@ -124,12 +126,10 @@ struct GeoLocationContext: Codable, Equatable {
         for entry in pois {
             guard !seen.contains(entry.word) else { continue }
             if isT9 {
+                guard clean.count >= 4 else { continue }
                 let fullT9 = GeoPinyinConverter.toT9(entry.pinyin.replacingOccurrences(of: "'", with: ""))
-                if fullT9 == clean || (clean.count >= 2 && entry.t9Abbr == clean) {
+                if fullT9 == clean || entry.t9Abbr == clean {
                     exactHits.append(entry)
-                    seen.insert(entry.word)
-                } else if clean.count >= 3 && (fullT9.hasPrefix(clean) || entry.t9Abbr.hasPrefix(clean)) {
-                    prefixHits.append(entry)
                     seen.insert(entry.word)
                 }
             } else {
@@ -137,7 +137,7 @@ struct GeoLocationContext: Codable, Equatable {
                 if flatPy == clean || (clean.count >= 2 && entry.abbr == clean) {
                     exactHits.append(entry)
                     seen.insert(entry.word)
-                } else if clean.count >= 3 && (flatPy.hasPrefix(clean) || entry.abbr.hasPrefix(clean)) {
+                } else if clean.count >= 5 && flatPy.hasPrefix(clean) {
                     prefixHits.append(entry)
                     seen.insert(entry.word)
                 }
@@ -145,7 +145,7 @@ struct GeoLocationContext: Codable, Equatable {
         }
 
         let sortedExact = exactHits.sorted { $0.boostScore > $1.boostScore }
-        let sortedPrefix = prefixHits.sorted { $0.boostScore > $1.boostScore }
+        let sortedPrefix = Array(prefixHits.sorted { $0.boostScore > $1.boostScore }.prefix(1))
         return Array((sortedExact + sortedPrefix).prefix(limit))
     }
 

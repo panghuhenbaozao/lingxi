@@ -1612,4 +1612,84 @@ final class LingxiTests: XCTestCase {
         XCTAssertFalse(AIPresetAction.polish.prefersAppendInsert)
         XCTAssertTrue(AIPresetAction.allCases.contains(.proofread))
     }
+
+    func testV511PinyinStabilityLayoutAndNoHijack() throws {
+        // 1. 拼音音节条确定性紧凑排版：2/3/6/10 音节必须严格从 x=0 连续紧贴，绝不横向拉宽乱跑
+        let sampleWidths: [Double] = [14, 4, 24, 4, 18, 4, 28, 4, 16]
+        let layout = ComposingSyllableLayout.computeHorizontalFrames(itemWidths: sampleWidths, spacing: 0.5)
+        XCTAssertEqual(layout.rects.count, sampleWidths.count)
+        XCTAssertEqual(layout.rects.first?.x ?? -1, 0.0, accuracy: 0.001)
+        for i in 0..<(layout.rects.count - 1) {
+            let curEnd = layout.rects[i].x + layout.rects[i].width
+            let nextStart = layout.rects[i + 1].x
+            XCTAssertGreaterThanOrEqual(nextStart, curEnd, "音节芯片不得重叠")
+            XCTAssertEqual(nextStart - curEnd, 0.5, accuracy: 0.001, "音节间距必须恒定 0.5pt，严禁随容器拉伸")
+        }
+        XCTAssertLessThan(layout.totalWidth, 160.0, "5 音节总宽应保持紧凑自然宽度，绝不拉伸到整屏 366pt")
+
+        // 2. 激活本地位置上下文（临沂/兰山/山东/泰盛广场），验证全拼与 T9 绝不劫持日常短词与前缀
+        let prevGeo = GeoLocationContext.load(force: true)
+        defer {
+            if prevGeo.isPopulated {
+                prevGeo.save()
+            } else {
+                GeoLocationContext.clear()
+            }
+        }
+        var geo = GeoLocationContext()
+        geo.province = "山东省"
+        geo.city = "临沂市"
+        geo.district = "兰山区"
+        geo.pois = [
+            GeoPinyinConverter.makeEntry(word: "临沂", category: "城市", boostScore: 15.0),
+            GeoPinyinConverter.makeEntry(word: "山东", category: "省份", boostScore: 12.2),
+            GeoPinyinConverter.makeEntry(word: "兰山", category: "区县", boostScore: 13.8),
+            GeoPinyinConverter.makeEntry(word: "泰盛广场", category: "商圈", boostScore: 11.5),
+            GeoPinyinConverter.makeEntry(word: "临沂北站", category: "交通", boostScore: 11.8),
+        ].compactMap { $0 }
+        geo.save()
+
+        guard let dbURL = findTestDBURL() else {
+            throw XCTSkip("未找到测试词库 pinyin.sqlite")
+        }
+        let engine = PinyinEngine(databaseURL: dbURL)
+        var settings = LingxiSettings()
+        settings.userLearningEnabled = false
+        settings.geoLocationBoostEnabled = true
+
+        // 2a. 全拼逐字连打：2字/3字/6字中间态与完整态均稳定输出中文，绝不被 2 字母英文(ok/ai/ui)或地名前缀劫持
+        let stepInputs = ["w", "wo", "wox", "woxi", "woxia", "woxian", "woxiang", "woxiangq", "woxiangqu"]
+        for s in stepInputs {
+            let r = engine.query(raw: s, settings: settings)
+            XCTAssertFalse(r.candidates.isEmpty, "中间输入 \(s) 不得为空")
+            XCTAssertFalse(r.candidates.first?.word.contains("OK") ?? false)
+            XCTAssertFalse(r.candidates.first?.word.contains("AI") ?? false)
+        }
+        XCTAssertEqual(engine.query(raw: "woxiangqu", settings: settings).candidates.first?.word, "我想去")
+        XCTAssertEqual(engine.query(raw: "haokan", settings: settings).candidates.first?.word, "好看")
+        XCTAssertFalse(engine.query(raw: "haokxi", settings: settings).candidates.first?.word.contains("OK") ?? false)
+        XCTAssertFalse(engine.query(raw: "woshuijiao", settings: settings).candidates.first?.word.contains("UI") ?? false)
+        XCTAssertEqual(engine.query(raw: "woshuijiao", settings: settings).candidates.first?.word, "我睡觉")
+
+        // 2b. 3字母拼音 lin 不得被 临沂/临沂北站 抢占首位；完整 linyi 与 4字简拼 tsgc 精准首选
+        let linTop = engine.query(raw: "lin", settings: settings).candidates.first?.word ?? ""
+        XCTAssertEqual(linTop.count, 1, "单音节 lin 首选应为单字（林/临），不得被临沂前缀劫持")
+        XCTAssertEqual(engine.query(raw: "linyi", settings: settings).candidates.first?.word, "临沂")
+        XCTAssertEqual(engine.query(raw: "tsgc", settings: settings).candidates.first?.word, "泰盛广场")
+
+        // 2c. 中英数混输依然精准可用且保持多候选
+        let pdfRes = engine.query(raw: "fayigepdfgeiwo", settings: settings)
+        XCTAssertTrue(pdfRes.candidates.contains(where: { $0.word.contains("PDF") }))
+        let numRes = engine.query(raw: "mingtian3dianjian", settings: settings)
+        XCTAssertEqual(numRes.candidates.first?.word, "明天3点见")
+        XCTAssertGreaterThanOrEqual(numRes.candidates.count, 2, "中数混输应保留多个次选避免孤词")
+
+        // 2d. T9 九宫格短数字前缀（546 / 742）绝不被 临沂(54694) / 山东(74263664) 劫持；完整 T9 54694 仍精准出 临沂
+        let t9_546 = engine.queryT9(digits: "546", lockedSyllables: [], settings: settings)
+        XCTAssertNotEqual(t9_546.candidates.first?.word, "临沂", "T9 三位前缀 546 不得被 临沂 劫持")
+        let t9_742 = engine.queryT9(digits: "742", lockedSyllables: [], settings: settings)
+        XCTAssertNotEqual(t9_742.candidates.first?.word, "山东", "T9 三位前缀 742 不得被 山东 劫持")
+        let t9_linyi = engine.queryT9(digits: "54694", lockedSyllables: [], settings: settings)
+        XCTAssertEqual(t9_linyi.candidates.first?.word, "临沂", "T9 完整编码 54694 应精准命中 临沂")
+    }
 }

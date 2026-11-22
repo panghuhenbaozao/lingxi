@@ -197,7 +197,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        let isExternalChange = (CACurrentMediaTime() - lastInternalEditTime) >= 0.22
+        let isExternalChange = (CACurrentMediaTime() - lastInternalEditTime) >= 0.28
         if isExternalChange && aiPromptDraft == nil {
             lastSelectionUndo = nil
             hasActiveMarkedText = false
@@ -1114,8 +1114,8 @@ final class KeyboardViewController: UIInputViewController {
                 recomputeCandidates()
                 return
             }
-            // 中英数零切换混输：全拼拼音串中直接敲数字（如 mingtian3dianjian -> 明天3点见）保持组合态
-            if settings.inputScheme == .quanpin && !isUsingT9Layout && ch.count == 1 && ch.allSatisfy(\.isNumber) && !isVToolHead {
+            // 中英数零切换混输：全拼拼音串（>=2 字母）中直接敲数字（如 mingtian3dianjian -> 明天3点见）保持组合态
+            if settings.inputScheme == .quanpin && !isUsingT9Layout && ch.count == 1 && ch.allSatisfy(\.isNumber) && !isVToolHead && rawComposing.count >= 2 && rawComposing.contains(where: \.isLetter) {
                 rawComposing.append(ch)
                 recomputeCandidates()
                 return
@@ -1450,6 +1450,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func recomputeCandidates(allowWubiAutoCommit: Bool = false) {
+        // 每次输入或退格重算候选时，必须退出音节局部回改态，避免旧句缓存污染新候选选词
+        editingSyllableIndex = nil
+        savedSentenceCandidatesBeforeEdit = []
         guard !rawComposing.isEmpty else {
             wubiEmptyCode = false
             wubiDisplayBuffer = nil
@@ -1725,6 +1728,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func commitCandidate(_ cand: PinyinCandidate) {
         isCandidatesExpanded = false
+        editingSyllableIndex = nil
+        savedSentenceCandidatesBeforeEdit = []
         clearUndoBuffer()
         let isBareVTool = (rawComposing.lowercased() == "v" && settings.inputScheme == .quanpin)
             || (rawComposing == "V" && settings.inputScheme != .quanpin)
@@ -2458,8 +2463,9 @@ final class KeyboardViewController: UIInputViewController {
             ? []
             : currentCandidates
 
-        let composingSyllables: [String] = (!rawComposing.isEmpty && !isUsingT9Layout && currentCorrectedHint == nil && wubiDisplayBuffer == nil && uModeDisplayBuffer == nil && currentTokens.count >= 2)
-            ? currentTokens.map(\.text)
+        let isVToolActive = !rawComposing.isEmpty && !isEnglishMode && !isUsingT9Layout && SmartCandidateHelper.isVToolQuery(rawComposing, scheme: settings.inputScheme)
+        let composingSyllables: [String] = (!rawComposing.isEmpty && !isUsingT9Layout && !isVToolActive && !settings.traditionalChineseEnabled && currentCorrectedHint == nil && wubiDisplayBuffer == nil && uModeDisplayBuffer == nil && currentTokens.count >= 2 && currentTokens.allSatisfy({ !($0.lockedSyllable ?? $0.text).isEmpty }))
+            ? currentTokens.map { $0.lockedSyllable ?? $0.text }
             : []
         let activeSelectedText: String? = (settings.selectionMagicEnabled && !isSecureField) ? textDocumentProxy.selectedText : nil
         let inlineAICmd: InlineAICommandMatch? = (!isSecureField && !isActivelyComposing && activePanel == .letters)
