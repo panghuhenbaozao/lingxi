@@ -1106,7 +1106,7 @@ final class LingxiTests: XCTestCase {
         var theme = ThemeCustomization()
         let lightDefault = theme.activePreset(isSystemDark: false)
         XCTAssertEqual(lightDefault.id, "lingxi_pure")
-        XCTAssertEqual(lightDefault.keyFill.rawValue.uppercased(), "#FFFFFF")
+        XCTAssertEqual(lightDefault.keyFill.hex.uppercased(), "#FFFFFF")
         XCTAssertFalse(lightDefault.isDark)
         let darkDefault = theme.activePreset(isSystemDark: true)
         XCTAssertTrue(darkDefault.isDark)
@@ -1127,21 +1127,21 @@ final class LingxiTests: XCTestCase {
         theme.customAccentHex = "#FACC15"
         let customActive = theme.activePreset(isSystemDark: false)
         XCTAssertTrue(customActive.isDark, "深色自定义底色应自动推导为深色模式")
-        XCTAssertEqual(customActive.keyFill.rawValue.uppercased(), "#1E293B")
-        XCTAssertEqual(customActive.keyText.rawValue.uppercased(), "#F8FAFC")
-        XCTAssertEqual(customActive.accentText.rawValue.uppercased(), "#0A0A0A", "亮黄色强调色应自动配深色文字")
+        XCTAssertEqual(customActive.keyFill.hex.uppercased(), "#1E293B")
+        XCTAssertEqual(customActive.keyText.hex.uppercased(), "#F8FAFC")
+        XCTAssertEqual(customActive.accentText.hex.uppercased(), "#0A0A0A", "亮黄色强调色应自动配深色文字")
         XCTAssertNotEqual(customActive.keyPressedFill, customActive.keyFill, "按键按下态色值应自动推导且与默认态有区分")
 
         // 4b. 从深色自定义调色一键切回浅色模式，应自动清除冲突暗色并恢复纯白键帽
         theme.applyAppearanceMode(.alwaysLight)
         XCTAssertFalse(theme.hasCustomColorOverrides)
-        XCTAssertEqual(theme.activePreset(isSystemDark: true).keyFill.rawValue.uppercased(), "#FFFFFF")
+        XCTAssertEqual(theme.activePreset(isSystemDark: true).keyFill.hex.uppercased(), "#FFFFFF")
         XCTAssertFalse(theme.activePreset(isSystemDark: true).isDark)
 
         // 5. 旧版 JSON 兼容解码
-        let legacyJSON = Data("{\"selectedThemeID\":\"sakura_blossom\",\"adaptiveDarkMode\":false}".utf8)
+        let legacyJSON = Data("{\"selectedThemeID\":\"sakura_mist\",\"adaptiveDarkMode\":false}".utf8)
         let decoded = try JSONDecoder().decode(ThemeCustomization.self, from: legacyJSON)
-        XCTAssertEqual(decoded.lightThemeID, "sakura_blossom")
+        XCTAssertEqual(decoded.lightThemeID, "sakura_mist")
         XCTAssertEqual(decoded.appearanceMode, .alwaysLight)
     }
 
