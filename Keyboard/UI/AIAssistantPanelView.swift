@@ -1,6 +1,10 @@
 import UIKit
 
-/// 内嵌 AI 灵犀写作面板（流式响应、上下文改写、回复剪贴板、趣味文风）。
+/// 内嵌 AI 灵犀写作面板 v5.0：
+/// - 流式思考过程独立折叠（绝不把 <think> 草稿插入输入框）
+/// - 顶部一键切换思考模式与对话场景人设（领导/同事/密友/社交/学术）
+/// - 博弈军师三策略气泡墙（一眼看破潜台词 + 3 种立场一键上屏）
+/// - 语境自动识别置顶推荐提示词 + 用户自定义提示词库实时同步
 final class AIAssistantPanelView: UIView {
     enum SourceMode: Int {
         case inputContext = 0
@@ -26,10 +30,16 @@ final class AIAssistantPanelView: UIView {
     private var cachedCustomPrompts: [CustomAIPromptTemplate] = []
     private var currentRecommendation: SmartContextRecommendation?
     private var generatedText = ""
+    private var thinkingText = ""
+    private var isThinkingExpanded = false
+    private var strategistResult: NegotiationStrategistResult?
+    private var lastCustomPrompt: (prompt: String, sys: String)?
 
     // UI
     private let topBar = UIStackView()
-    private let contextSegmented = UISegmentedControl(items: ["当前输入", "剪贴板"])
+    private let contextSegmented = UISegmentedControl(items: ["输入", "剪贴板"])
+    private let sceneButton = ActionClosureButton(type: .system)
+    private let thinkingButton = ActionClosureButton(type: .system)
     private let askFreeButton = ActionClosureButton(type: .system)
     private let closeButton = ActionClosureButton(type: .system)
 
@@ -37,7 +47,18 @@ final class AIAssistantPanelView: UIView {
     private let sourceLabel = UILabel()
     private let actionsScroll = LingxiScrollView()
     private let actionsStack = UIStackView()
+
+    // 思考过程独立折叠区
+    private let thoughtToggleButton = ActionClosureButton(type: .system)
+    private let thoughtTextView = UITextView()
+
+    // 常规流式正文输出区
     private let outputTextView = UITextView()
+
+    // 博弈军师三策略卡片区
+    private let strategistScroll = LingxiScrollView()
+    private let strategistStack = UIStackView()
+
     private let refineScroll = LingxiScrollView()
     private let refineStack = UIStackView()
     private let bottomBar = UIStackView()
@@ -60,7 +81,7 @@ final class AIAssistantPanelView: UIView {
 
     private func setupViews() {
         topBar.axis = .horizontal
-        topBar.spacing = 8
+        topBar.spacing = 5
         topBar.alignment = .center
         addSubview(topBar)
 
@@ -68,9 +89,23 @@ final class AIAssistantPanelView: UIView {
         contextSegmented.addTarget(self, action: #selector(sourceChanged), for: .valueChanged)
         topBar.addArrangedSubview(contextSegmented)
 
-        askFreeButton.setTitle("💬自由问", for: .normal)
-        askFreeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        askFreeButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
+        sceneButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        sceneButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 7, bottom: 4, right: 7)
+        sceneButton.layer.cornerRadius = 8
+        sceneButton.layer.cornerCurve = .continuous
+        sceneButton.actionHandler = { [weak self] in self?.cycleScenePersona() }
+        topBar.addArrangedSubview(sceneButton)
+
+        thinkingButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        thinkingButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 7, bottom: 4, right: 7)
+        thinkingButton.layer.cornerRadius = 8
+        thinkingButton.layer.cornerCurve = .continuous
+        thinkingButton.actionHandler = { [weak self] in self?.cycleThinkingMode() }
+        topBar.addArrangedSubview(thinkingButton)
+
+        askFreeButton.setTitle("💬问", for: .normal)
+        askFreeButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        askFreeButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 7, bottom: 4, right: 7)
         askFreeButton.layer.cornerRadius = 8
         askFreeButton.layer.cornerCurve = .continuous
         askFreeButton.actionHandler = { [weak self] in
@@ -80,8 +115,8 @@ final class AIAssistantPanelView: UIView {
         topBar.addArrangedSubview(askFreeButton)
 
         closeButton.setTitle("返回", for: .normal)
-        closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        closeButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+        closeButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        closeButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         closeButton.layer.cornerRadius = 8
         closeButton.layer.cornerCurve = .continuous
         closeButton.actionHandler = { [weak self] in
@@ -107,12 +142,42 @@ final class AIAssistantPanelView: UIView {
         actionsStack.alignment = .center
         actionsScroll.addSubview(actionsStack)
 
+        thoughtToggleButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        thoughtToggleButton.contentHorizontalAlignment = .leading
+        thoughtToggleButton.contentEdgeInsets = UIEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+        thoughtToggleButton.layer.cornerRadius = 7
+        thoughtToggleButton.layer.cornerCurve = .continuous
+        thoughtToggleButton.isHidden = true
+        thoughtToggleButton.actionHandler = { [weak self] in
+            guard let self else { return }
+            self.isThinkingExpanded.toggle()
+            self.updateThoughtHeader()
+            self.setNeedsLayout()
+        }
+        addSubview(thoughtToggleButton)
+
+        thoughtTextView.isEditable = false
+        thoughtTextView.font = .systemFont(ofSize: 11.5, weight: .regular)
+        thoughtTextView.layer.cornerRadius = 8
+        thoughtTextView.layer.cornerCurve = .continuous
+        thoughtTextView.textContainerInset = UIEdgeInsets(top: 5, left: 7, bottom: 5, right: 7)
+        thoughtTextView.isHidden = true
+        addSubview(thoughtTextView)
+
         outputTextView.isEditable = false
         outputTextView.font = .systemFont(ofSize: 14, weight: .regular)
         outputTextView.layer.cornerRadius = 10
         outputTextView.layer.cornerCurve = .continuous
         outputTextView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         addSubview(outputTextView)
+
+        strategistScroll.showsVerticalScrollIndicator = true
+        strategistScroll.isHidden = true
+        addSubview(strategistScroll)
+        strategistStack.axis = .vertical
+        strategistStack.spacing = 6
+        strategistStack.alignment = .fill
+        strategistScroll.addSubview(strategistStack)
 
         refineScroll.showsHorizontalScrollIndicator = false
         refineScroll.isHidden = true
@@ -192,9 +257,38 @@ final class AIAssistantPanelView: UIView {
             refineScroll.contentSize = CGSize(width: rw + pad * 2, height: refineH)
         }
 
-        let outY = actionsScroll.frame.maxY + 6
-        let outBottom = refineScroll.isHidden ? bottomBar.frame.minY : refineScroll.frame.minY
-        outputTextView.frame = CGRect(x: pad, y: outY, width: bounds.width - pad * 2, height: max(36, outBottom - outY - 6))
+        var contentY = actionsScroll.frame.maxY + 5
+        let contentBottom = refineScroll.isHidden ? bottomBar.frame.minY : refineScroll.frame.minY
+
+        if !thoughtToggleButton.isHidden {
+            thoughtToggleButton.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: 22)
+            contentY = thoughtToggleButton.frame.maxY + 3
+            if isThinkingExpanded {
+                thoughtTextView.isHidden = false
+                let thH = min(56, max(32, (contentBottom - contentY) * 0.36))
+                thoughtTextView.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: thH)
+                contentY = thoughtTextView.frame.maxY + 4
+            } else {
+                thoughtTextView.isHidden = true
+            }
+        } else {
+            thoughtTextView.isHidden = true
+        }
+
+        let contentRect = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: max(36, contentBottom - contentY - 6))
+        outputTextView.frame = contentRect
+
+        if !strategistScroll.isHidden {
+            strategistScroll.frame = contentRect
+            let sw = max(80, contentRect.width)
+            let fit = strategistStack.systemLayoutSizeFitting(
+                CGSize(width: sw, height: UIView.layoutFittingCompressedSize.height),
+                withHorizontalFittingPriority: .required,
+                verticalFittingPriority: .fittingSizeLevel
+            )
+            strategistStack.frame = CGRect(x: 0, y: 0, width: sw, height: fit.height)
+            strategistScroll.contentSize = CGSize(width: sw, height: fit.height + 6)
+        }
     }
 
     func prepare(
@@ -208,12 +302,11 @@ final class AIAssistantPanelView: UIView {
         self.hasFullAccess = hasFullAccess
         let nonLeading = String(beforeCursor.drop(while: { $0.isWhitespace }))
         self.beforeCursorText = nonLeading.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 替换计数只算到剥除尾部空白后的文本，不吞用户的尾随空格
         self.beforeCursorReplaceCount = self.beforeCursorText.count
         self.clipboardText = (clipboardText ?? ClipboardStore.items().first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let preferredAction {
-            if preferredAction == .replyClipboard && !self.clipboardText.isEmpty {
+            if preferredAction.needsClipboardFallback && !self.clipboardText.isEmpty {
                 sourceMode = .clipboard
             } else {
                 sourceMode = self.beforeCursorText.isEmpty && !self.clipboardText.isEmpty ? .clipboard : .inputContext
@@ -224,6 +317,7 @@ final class AIAssistantPanelView: UIView {
             contextSegmented.selectedSegmentIndex = sourceMode.rawValue
         }
 
+        refreshTopQuickPills()
         applyTheme(theme)
         reloadPromptsAndRecommendation()
         rebuildActionButtons(theme: theme)
@@ -231,9 +325,72 @@ final class AIAssistantPanelView: UIView {
 
         if let preferredAction {
             runAction(preferredAction)
-        } else if generatedText.isEmpty {
+        } else if generatedText.isEmpty && strategistResult == nil {
             showIdleGuidance()
         }
+    }
+
+    /// 供「框选即改」或「剪贴板意图胶囊」直接注入自定义指令并立即流式运行。
+    func runDirectInstruction(
+        title: String,
+        instruction: String,
+        sourceText: String,
+        replaceCount: Int,
+        theme: ResolvedTheme,
+        hasFullAccess: Bool
+    ) {
+        self.theme = theme
+        self.hasFullAccess = hasFullAccess
+        self.beforeCursorText = sourceText
+        self.beforeCursorReplaceCount = replaceCount
+        self.sourceMode = replaceCount > 0 ? .inputContext : .clipboard
+        contextSegmented.selectedSegmentIndex = sourceMode.rawValue
+
+        refreshTopQuickPills()
+        applyTheme(theme)
+        reloadPromptsAndRecommendation()
+        rebuildActionButtons(theme: theme)
+        sourceLabel.text = "⚡ \(title)  |  \(sourceText.replacingOccurrences(of: "\n", with: " "))"
+        lastCustomTemplateID = nil
+        lastCustomPrompt = (sourceText, instruction)
+        streamPrompt(prompt: sourceText, systemInstruction: instruction, preferFast: true)
+    }
+
+    private func refreshTopQuickPills() {
+        let cfg = AIConfig.load()
+        let sceneShort = cfg.activeScenePersona == .auto ? "场景" : String(cfg.activeScenePersona.shortTitle.prefix(4))
+        sceneButton.setTitle(sceneShort, for: .normal)
+        thinkingButton.setTitle("🧠\(cfg.thinkingMode.shortBadge)", for: .normal)
+    }
+
+    private func cycleScenePersona() {
+        var cfg = AIConfig.load()
+        let all = AIScenePersona.allCases
+        if let idx = all.firstIndex(of: cfg.activeScenePersona) {
+            cfg.activeScenePersona = all[(idx + 1) % all.count]
+        } else {
+            cfg.activeScenePersona = .bossClient
+        }
+        cfg.save()
+        refreshTopQuickPills()
+        if let theme { applyTheme(theme) }
+        sourceLabel.text = "✨ 已切换沟通对象：\(cfg.activeScenePersona.shortTitle)"
+        setNeedsLayout()
+    }
+
+    private func cycleThinkingMode() {
+        var cfg = AIConfig.load()
+        let modes: [AIThinkingMode] = [.off, .auto, .low, .medium, .high]
+        if let idx = modes.firstIndex(of: cfg.thinkingMode) {
+            cfg.thinkingMode = modes[(idx + 1) % modes.count]
+        } else {
+            cfg.thinkingMode = .medium
+        }
+        cfg.save()
+        refreshTopQuickPills()
+        if let theme { applyTheme(theme) }
+        sourceLabel.text = "🧠 思考模式已切换：\(cfg.thinkingMode.displayName)"
+        setNeedsLayout()
     }
 
     private func reloadPromptsAndRecommendation() {
@@ -252,18 +409,31 @@ final class AIAssistantPanelView: UIView {
     }
 
     private func applyTheme(_ theme: ResolvedTheme) {
-        backgroundColor = theme.canvasTop.withAlphaComponent(0.96)
+        backgroundColor = theme.canvasTop.withAlphaComponent(0.98)
         contextSegmented.selectedSegmentTintColor = theme.accentFill
         contextSegmented.backgroundColor = theme.specialKeyFill
-        contextSegmented.setTitleTextAttributes([.foregroundColor: theme.accentText], for: .selected)
-        contextSegmented.setTitleTextAttributes([.foregroundColor: theme.keyText], for: .normal)
+        contextSegmented.setTitleTextAttributes([.foregroundColor: theme.accentText, .font: UIFont.systemFont(ofSize: 11.5, weight: .semibold)], for: .selected)
+        contextSegmented.setTitleTextAttributes([.foregroundColor: theme.keyText, .font: UIFont.systemFont(ofSize: 11.5, weight: .medium)], for: .normal)
+
+        let cfg = AIConfig.load()
+        sceneButton.backgroundColor = cfg.activeScenePersona == .auto ? theme.specialKeyFill : theme.accentFill.withAlphaComponent(0.22)
+        sceneButton.setTitleColor(cfg.activeScenePersona == .auto ? theme.keyText : theme.candidateHighlight, for: .normal)
+
+        thinkingButton.backgroundColor = cfg.thinkingMode.isEnabled ? theme.accentFill.withAlphaComponent(0.22) : theme.specialKeyFill
+        thinkingButton.setTitleColor(cfg.thinkingMode.isEnabled ? theme.candidateHighlight : theme.keyHintText, for: .normal)
+
         askFreeButton.backgroundColor = theme.accentFill.withAlphaComponent(0.18)
         askFreeButton.setTitleColor(theme.candidateHighlight, for: .normal)
         closeButton.backgroundColor = theme.specialKeyFill
         closeButton.setTitleColor(theme.keyText, for: .normal)
         sourceLabel.textColor = theme.keyHintText
 
-        outputTextView.backgroundColor = theme.keyFill.withAlphaComponent(0.9)
+        thoughtToggleButton.backgroundColor = theme.specialKeyFill.withAlphaComponent(0.85)
+        thoughtToggleButton.setTitleColor(theme.keyHintText, for: .normal)
+        thoughtTextView.backgroundColor = theme.specialKeyFill.withAlphaComponent(0.55)
+        thoughtTextView.textColor = theme.keyHintText
+
+        outputTextView.backgroundColor = theme.keyFill.withAlphaComponent(0.95)
         outputTextView.textColor = theme.keyText
 
         for sub in refineStack.arrangedSubviews {
@@ -294,7 +464,6 @@ final class AIAssistantPanelView: UIView {
         let recCustomSet = Set(recCustomIDs)
         let recPresetSet = Set(recPresets)
 
-        // 1. 语境智能推荐的自定义提示词优先置顶
         var orderedCustom: [CustomAIPromptTemplate] = []
         var seenCustom = Set<String>()
         for id in recCustomIDs {
@@ -302,7 +471,6 @@ final class AIAssistantPanelView: UIView {
                 orderedCustom.append(tpl)
             }
         }
-        // 2. 其余置顶/AI 定制提示词
         for tpl in cachedCustomPrompts where (tpl.isPinned || tpl.isAIGenerated) && seenCustom.insert(tpl.id).inserted {
             orderedCustom.append(tpl)
         }
@@ -310,7 +478,6 @@ final class AIAssistantPanelView: UIView {
             orderedCustom.append(tpl)
         }
 
-        // 3. 语境智能推荐的内置预设技能放前排，其余内置技能紧随其后
         var orderedPresets: [AIPresetAction] = []
         var seenPresets = Set<AIPresetAction>()
         for act in recPresets where seenPresets.insert(act).inserted {
@@ -327,13 +494,16 @@ final class AIAssistantPanelView: UIView {
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
             btn.backgroundColor = isSelected
                 ? theme.accentFill
-                : (isRecommended ? theme.accentFill.withAlphaComponent(0.22) : theme.accentFill.withAlphaComponent(0.12))
-            btn.setTitleColor(isSelected ? theme.accentText : theme.candidateHighlight, for: .normal)
+                : (isRecommended ? theme.accentFill.withAlphaComponent(0.22) : theme.keyFill)
+            btn.setTitleColor(isSelected ? theme.accentText : (isRecommended ? theme.candidateHighlight : theme.keyText), for: .normal)
             btn.layer.cornerRadius = 14
             btn.layer.cornerCurve = .continuous
             if isRecommended && !isSelected {
                 btn.layer.borderWidth = 0.8
-                btn.layer.borderColor = theme.accentFill.withAlphaComponent(0.45).cgColor
+                btn.layer.borderColor = theme.accentFill.withAlphaComponent(0.55).cgColor
+            } else if !isSelected {
+                btn.layer.borderWidth = 0.5
+                btn.layer.borderColor = theme.keyBorder.cgColor
             } else {
                 btn.layer.borderWidth = 0
             }
@@ -342,44 +512,23 @@ final class AIAssistantPanelView: UIView {
             actionsStack.addArrangedSubview(btn)
         }
 
-        // 先放语境推荐的内置 Top-2 与推荐自定义提示词，再放其余自定义与内置技能，兼顾顺手与发现性
         for tpl in orderedCustom where recCustomSet.contains(tpl.id) {
-            makeSkillPill(
-                title: tpl.title,
-                isSelected: lastCustomTemplateID == tpl.id,
-                isRecommended: true,
-                isCustom: true
-            ) { [weak self] in
+            makeSkillPill(title: tpl.title, isSelected: lastCustomTemplateID == tpl.id, isRecommended: true, isCustom: true) { [weak self] in
                 self?.runCustomTemplate(tpl)
             }
         }
         for action in orderedPresets where recPresetSet.contains(action) {
-            makeSkillPill(
-                title: action.title,
-                isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil,
-                isRecommended: true,
-                isCustom: false
-            ) { [weak self] in
+            makeSkillPill(title: action.title, isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil, isRecommended: true, isCustom: false) { [weak self] in
                 self?.runAction(action)
             }
         }
         for tpl in orderedCustom where !recCustomSet.contains(tpl.id) {
-            makeSkillPill(
-                title: tpl.title,
-                isSelected: lastCustomTemplateID == tpl.id,
-                isRecommended: false,
-                isCustom: true
-            ) { [weak self] in
+            makeSkillPill(title: tpl.title, isSelected: lastCustomTemplateID == tpl.id, isRecommended: false, isCustom: true) { [weak self] in
                 self?.runCustomTemplate(tpl)
             }
         }
         for action in orderedPresets where !recPresetSet.contains(action) {
-            makeSkillPill(
-                title: action.title,
-                isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil,
-                isRecommended: false,
-                isCustom: false
-            ) { [weak self] in
+            makeSkillPill(title: action.title, isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil, isRecommended: false, isCustom: false) { [weak self] in
                 self?.runAction(action)
             }
         }
@@ -414,14 +563,18 @@ final class AIAssistantPanelView: UIView {
 
     private func showIdleGuidance() {
         let config = AIConfig.load()
+        strategistScroll.isHidden = true
+        outputTextView.isHidden = false
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
         if !hasFullAccess {
             outputTextView.text = "⚠️ 请前往 系统设置 -> 通用 -> 键盘 -> 灵犀输入法 开启「允许完全访问」，键盘扩展才可联网请求 AI。"
         } else if !config.isConfigured {
-            outputTextView.text = "✨ 尚未配置 API Key。请打开主 App「灵犀输入法 -> AI 助手」，填入 Gemini API Key 或 DeepSeek 等兼容接口密钥。"
+            outputTextView.text = "✨ 尚未配置 API Key。请打开主 App「灵犀输入法 -> AI 智脑」，支持一键拉取模型或手动填写，并可配置思考模式。"
         } else {
             let customCount = config.customPrompts.count
             let recNote = currentRecommendation.map { "（\($0.badgeTitle)）" } ?? ""
-            outputTextView.text = "点击上方带「✦」的智能推荐技能或你的 \(customCount) 个专属提示词，即可实时流式生成并一键上屏\(recNote)。"
+            outputTextView.text = "点击上方带「✦」的智能推荐技能、「博弈军师」三策略回复，或你的 \(customCount) 个专属提示词即可实时流式生成\(recNote)。顶部可随时切换沟通对象与思考模式。"
         }
         updateActionButtonsEnabled()
     }
@@ -437,6 +590,7 @@ final class AIAssistantPanelView: UIView {
         let nonLeading = String(beforeCursor.drop(while: { $0.isWhitespace }))
         self.beforeCursorText = nonLeading.trimmingCharacters(in: .whitespacesAndNewlines)
         self.beforeCursorReplaceCount = self.beforeCursorText.count
+        refreshTopQuickPills()
         applyTheme(theme)
         reloadPromptsAndRecommendation()
         rebuildActionButtons(theme: theme)
@@ -451,13 +605,9 @@ final class AIAssistantPanelView: UIView {
         streamPrompt(prompt: fullPrompt, systemInstruction: sysPrompt)
     }
 
-    private var lastCustomPrompt: (prompt: String, sys: String)?
-
     private func runCustomTemplate(_ template: CustomAIPromptTemplate) {
         lastCustomTemplateID = template.id
-        if let theme {
-            rebuildActionButtons(theme: theme)
-        }
+        if let theme { rebuildActionButtons(theme: theme) }
         let source: String
         switch sourceMode {
         case .inputContext:
@@ -466,30 +616,132 @@ final class AIAssistantPanelView: UIView {
             source = clipboardText.isEmpty ? beforeCursorText : clipboardText
         }
         guard !source.isEmpty else {
+            strategistScroll.isHidden = true
+            outputTextView.isHidden = false
             outputTextView.text = "请先在输入框中写几句话，或先复制一段内容，再点上方「\(template.title)」提示词技能。"
             return
         }
         let sys = template.effectiveSystemPrompt
         lastCustomPrompt = (source, sys)
-        streamPrompt(prompt: source, systemInstruction: sys)
+        streamPrompt(prompt: source, systemInstruction: sys, preferDeep: template.useDeepModel)
     }
 
     private func runAction(_ action: AIPresetAction) {
         lastAction = action
         lastCustomTemplateID = nil
         lastCustomPrompt = nil
-        if let theme {
-            rebuildActionButtons(theme: theme)
-        }
+        if let theme { rebuildActionButtons(theme: theme) }
         let source = activeSourceText(for: action)
         guard !source.isEmpty else {
+            strategistScroll.isHidden = true
+            outputTextView.isHidden = false
             outputTextView.text = "请先在输入框中写几句话，或先复制一段内容，再点上方 AI 技能。"
             return
         }
-        streamPrompt(prompt: source, systemInstruction: action.systemPrompt)
+        if action == .strategist {
+            runStrategistMode(message: source)
+            return
+        }
+        streamPrompt(prompt: source, systemInstruction: action.systemPrompt, preferFast: !action.prefersDeepModel, preferDeep: action.prefersDeepModel)
     }
 
-    private func streamPrompt(prompt: String, systemInstruction: String) {
+    private func runStrategistMode(message: String) {
+        streamTask?.cancel()
+        guard hasFullAccess else {
+            outputTextView.text = "⚠️ 需要开启「允许完全访问」才可调用博弈军师。"
+            return
+        }
+        let config = AIConfig.load()
+        guard config.isConfigured else {
+            outputTextView.text = "⚠️ 请先在主 App「AI 智脑」配置模型与 API Key。"
+            return
+        }
+
+        strategistResult = nil
+        strategistScroll.isHidden = true
+        outputTextView.isHidden = false
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        generatedText = ""
+        outputTextView.text = "🧠 博弈军师正在洞察对方潜台词并拟定 3 套策略回复…"
+        stopOrRetryButton.setTitle("停止生成", for: .normal)
+        updateActionButtonsEnabled()
+
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let res = try await AIAutoInsightService.runNegotiationStrategist(message: message, config: config, client: self.client)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.strategistResult = res
+                    self.renderStrategistCards(res)
+                    self.stopOrRetryButton.setTitle("换三套策略", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            } catch {
+                await MainActor.run {
+                    self.strategistScroll.isHidden = true
+                    self.outputTextView.isHidden = false
+                    self.outputTextView.text = "博弈军师生成失败：\(error.localizedDescription)"
+                    self.stopOrRetryButton.setTitle("重试", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            }
+        }
+    }
+
+    private func renderStrategistCards(_ res: NegotiationStrategistResult) {
+        guard let theme else { return }
+        strategistStack.arrangedSubviews.forEach {
+            strategistStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        let insightLbl = UILabel()
+        insightLbl.text = "🔍 潜台词洞察：\(res.subtext)"
+        insightLbl.font = .systemFont(ofSize: 12, weight: .semibold)
+        insightLbl.textColor = theme.candidateHighlight
+        insightLbl.numberOfLines = 0
+        strategistStack.addArrangedSubview(insightLbl)
+
+        for opt in res.options {
+            let card = ActionClosureButton(type: .custom)
+            card.backgroundColor = theme.keyFill.withAlphaComponent(0.95)
+            card.layer.cornerRadius = 10
+            card.layer.cornerCurve = .continuous
+            card.layer.borderWidth = 0.6
+            card.layer.borderColor = theme.keyBorder.cgColor
+            card.contentEdgeInsets = UIEdgeInsets(top: 7, left: 10, bottom: 7, right: 10)
+            card.contentHorizontalAlignment = .leading
+            card.titleLabel?.numberOfLines = 0
+            card.titleLabel?.lineBreakMode = .byWordWrapping
+
+            let attr = NSMutableAttributedString(
+                string: "\(opt.tag) · \(opt.toneLabel)\n",
+                attributes: [.font: UIFont.systemFont(ofSize: 11.5, weight: .bold), .foregroundColor: theme.candidateHighlight]
+            )
+            attr.append(NSAttributedString(
+                string: opt.reply,
+                attributes: [.font: UIFont.systemFont(ofSize: 13.5, weight: .regular), .foregroundColor: theme.keyText]
+            ))
+            card.setAttributedTitle(attr, for: .normal)
+            card.actionHandler = { [weak self] in
+                self?.onInsertText?(opt.reply)
+            }
+            strategistStack.addArrangedSubview(card)
+        }
+
+        outputTextView.isHidden = true
+        strategistScroll.isHidden = false
+        setNeedsLayout()
+    }
+
+    private func updateThoughtHeader() {
+        let arrow = isThinkingExpanded ? "▾" : "▸"
+        thoughtToggleButton.setTitle("💭 思考过程（\(thinkingText.count) 字 · 点击\(isThinkingExpanded ? "收起" : "展开")）\(arrow)", for: .normal)
+    }
+
+    private func streamPrompt(prompt: String, systemInstruction: String, preferFast: Bool = false, preferDeep: Bool = false) {
         streamTask?.cancel()
 
         guard hasFullAccess else {
@@ -499,38 +751,66 @@ final class AIAssistantPanelView: UIView {
 
         let config = AIConfig.load()
         guard config.isConfigured else {
-            outputTextView.text = "⚠️ 请先在「灵犀输入法 App -> AI 助手」配置 API Key。"
+            outputTextView.text = "⚠️ 请先在「灵犀输入法 App -> AI 智脑」配置 API Key。"
             return
         }
 
+        strategistResult = nil
+        strategistScroll.isHidden = true
+        outputTextView.isHidden = false
         generatedText = ""
-        outputTextView.text = "✨ 灵犀正在思考…"
+        thinkingText = ""
+        isThinkingExpanded = false
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        thoughtTextView.text = ""
+        outputTextView.text = config.thinkingMode.isEnabled ? "🧠 灵犀正在思考中…" : "✨ 灵犀正在生成…"
         stopOrRetryButton.setTitle("停止生成", for: .normal)
         updateActionButtonsEnabled()
 
         streamTask = Task { [weak self] in
             guard let self else { return }
             do {
-                var accumulated = ""
+                var accumulatedAnswer = ""
+                var accumulatedThought = ""
                 let featureTag = self.lastCustomPrompt != nil ? "ai_ask" : self.lastAction.rawValue
-                for try await delta in client.streamText(
+                for try await event in client.streamEvents(
                     prompt: prompt,
                     systemInstruction: systemInstruction,
                     config: config,
-                    featureTag: featureTag
+                    featureTag: featureTag,
+                    preferFast: preferFast,
+                    preferDeep: preferDeep
                 ) {
                     if Task.isCancelled { break }
-                    accumulated += delta
-                    await MainActor.run {
-                        self.generatedText = accumulated
-                        self.outputTextView.text = accumulated
-                        let end = NSRange(location: max(0, accumulated.utf16.count - 1), length: 0)
-                        self.outputTextView.scrollRangeToVisible(end)
+                    switch event {
+                    case .thought(let delta):
+                        accumulatedThought += delta
+                        if config.showThinkingProcess {
+                            await MainActor.run {
+                                self.thinkingText = accumulatedThought
+                                self.thoughtToggleButton.isHidden = false
+                                self.updateThoughtHeader()
+                                self.thoughtTextView.text = accumulatedThought
+                                if self.generatedText.isEmpty {
+                                    self.outputTextView.text = "🧠 深度思考中（已推演 \(accumulatedThought.count) 字，点上方可展开过程）…"
+                                }
+                                self.setNeedsLayout()
+                            }
+                        }
+                    case .answer(let delta):
+                        accumulatedAnswer += delta
+                        await MainActor.run {
+                            self.generatedText = accumulatedAnswer
+                            self.outputTextView.text = accumulatedAnswer
+                            let end = NSRange(location: max(0, accumulatedAnswer.utf16.count - 1), length: 0)
+                            self.outputTextView.scrollRangeToVisible(end)
+                        }
                     }
                 }
                 await MainActor.run {
                     if self.generatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.outputTextView.text = "⚠️ 模型未返回有效内容，请检查模型配置或重试"
+                        self.outputTextView.text = "⚠️ 模型未返回有效正文，请检查模型或思考模式设置后重试"
                     }
                     self.stopOrRetryButton.setTitle("换个说法", for: .normal)
                     self.updateActionButtonsEnabled()
@@ -549,12 +829,12 @@ final class AIAssistantPanelView: UIView {
         let current = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return }
         lastCustomPrompt = (current, instruction)
-        streamPrompt(prompt: current, systemInstruction: instruction)
+        streamPrompt(prompt: current, systemInstruction: instruction, preferFast: true)
     }
 
     private func updateActionButtonsEnabled() {
         let ready = !generatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        refineScroll.isHidden = !ready
+        refineScroll.isHidden = !ready || !strategistScroll.isHidden
         setNeedsLayout()
         insertButton.isEnabled = ready
         insertButton.alpha = ready ? 1.0 : 0.48
@@ -566,9 +846,7 @@ final class AIAssistantPanelView: UIView {
     @objc private func sourceChanged() {
         sourceMode = SourceMode(rawValue: contextSegmented.selectedSegmentIndex) ?? .inputContext
         reloadPromptsAndRecommendation()
-        if let theme {
-            rebuildActionButtons(theme: theme)
-        }
+        if let theme { rebuildActionButtons(theme: theme) }
         refreshContextPreview()
         updateActionButtonsEnabled()
     }

@@ -51,6 +51,10 @@ enum Design {
         static let muted = dynamic(light: "#A8AAB2", dark: "#6C6C70")
         static let success = dynamic(light: "#17976A", dark: "#34C77B")
         static let error = dynamic(light: "#C94A4A", dark: "#FF6B6B")
+        static let warning = dynamic(light: "#D97706", dark: "#FFB340")
+        static let accent = dynamic(light: "#007AFF", dark: "#0A84FF")
+        static let accentSoft = dynamic(light: "#EBF4FF", dark: "#172A45")
+        static let accentText = UIColor(hex: "#FFFFFF")
         static let keyPressed = dynamic(light: "#E5E7EB", dark: "#3A3A3C")
 
         /// 键盘卡面固定纯白：暗色系统下也保持白键盘（DESIGN.md §8）。

@@ -49,10 +49,11 @@ enum SmartCandidateHelper {
             ))
         }
 
-        // 0. 用户自定义短语 / custom.tsv（最高优先级置顶）
+        // 0. 用户自定义短语 / custom.tsv（最高优先级置顶，支持 {{日期}}/{{时间}}/{{剪贴板}} 动态变量实时展开）
         let customMatches = CustomWordStore.match(rawInput: raw)
         for (idx, entry) in customMatches.enumerated() {
-            appendCandidate(entry.expandedWord, lp: 15.0 - Double(idx) * 0.1, isExact: true, source: .smartHelper)
+            let expanded = DynamicTemplateEngine.render(entry.expandedWord)
+            appendCandidate(expanded, lp: 15.0 - Double(idx) * 0.1, isExact: true, source: .smartHelper)
         }
 
         // 0.5 v/V 万能工具模式（WowType 同款：全拼用小写 `v`，双拼与五笔用大写 `V`，绝不与声母 v=zh 或五笔 v 键冲突）
@@ -61,6 +62,24 @@ enum SmartCandidateHelper {
         if isVModePrefix && raw.count >= 2 {
             let body = String(raw.dropFirst())
             let lowerBody = body.lowercased()
+
+            // 支持 v12800rmb -> 壹万贰仟捌佰元整 财务大写直出
+            if lowerBody.hasSuffix("rmb"), let amt = Double(String(lowerBody.dropLast(3))) {
+                let cap = TextFormatterToolbox.amountToChineseCapital(amt)
+                if !cap.isEmpty {
+                    appendCandidate(cap, lp: 14.5, isExact: true, source: .smartHelper)
+                }
+            }
+
+            // 支持 v1280/4 -> 320 & 人均 ¥320.00 AA 制算账直出
+            if let slashIdx = body.firstIndex(of: "/"),
+               let total = Double(String(body[..<slashIdx])),
+               let people = Double(String(body[body.index(after: slashIdx)...])),
+               people > 0 {
+                let avg = total / people
+                let avgStr = String(format: "%.2f", avg).replacingOccurrences(of: ".00", with: "")
+                appendCandidate("人均 ¥\(avgStr)", lp: 13.8, isExact: false, source: .smartHelper)
+            }
 
             for (idx, calcOrNum) in InlineCalculator.candidates(forVModeBody: body).enumerated() {
                 appendCandidate(calcOrNum, lp: 14.0 - Double(idx) * 0.15, isExact: idx == 0, source: .smartHelper)
@@ -134,6 +153,7 @@ enum SmartCandidateHelper {
         if !ChineseNumberConverter.candidates(forNumericString: body).isEmpty { return true }
         if InlineCalculator.evaluateIfExpression(body) != nil { return true }
         if !DateTimeHelper.candidates(forNormalizedPinyin: lowerBody).isEmpty { return true }
+        if lowerBody.hasSuffix("rmb"), Double(String(lowerBody.dropLast(3))) != nil { return true }
         // 输入计算式中间态（如 `v1+` 或 `V12*` 或 `v10%3`）同样保持工具模式
         if body.allSatisfy({ $0.isNumber || "+-*/%^().".contains($0) }) { return true }
         return false

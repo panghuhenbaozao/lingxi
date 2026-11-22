@@ -1,6 +1,6 @@
 import { DASHBOARD_HTML } from "./dashboard.js";
 
-const VERSION = "4.3.0";
+const VERSION = "5.0.0";
 const ACCESS_TTL_SEC = 86400;
 const REFRESH_TTL_SEC = 86400 * 30;
 const PBKDF2_ITERATIONS = 100000;
@@ -70,6 +70,129 @@ const eqSafe = (a, b) => {
 };
 const sha256 = async (t) => toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(t))));
 const nowSec = () => Math.floor(Date.now() / 1000);
+
+function derToP1363(der) {
+  if (der.length === 64) return der;
+  let offset = 0;
+  if (der[offset++] !== 0x30) throw new Error("Invalid DER sequence");
+  let seqLen = der[offset++];
+  if (seqLen & 0x80) offset += (seqLen & 0x7f);
+  if (der[offset++] !== 0x02) throw new Error("Invalid DER R");
+  const rLen = der[offset++];
+  const rBytes = der.slice(offset, offset + rLen);
+  offset += rLen;
+  if (der[offset++] !== 0x02) throw new Error("Invalid DER S");
+  const sLen = der[offset++];
+  const sBytes = der.slice(offset, offset + sLen);
+  const out = new Uint8Array(64);
+  const rTrim = rBytes.length > 32 ? rBytes.slice(rBytes.length - 32) : rBytes;
+  const sTrim = sBytes.length > 32 ? sBytes.slice(sBytes.length - 32) : sBytes;
+  out.set(rTrim, 32 - rTrim.length);
+  out.set(sTrim, 64 - sTrim.length);
+  return out;
+}
+
+async function ensurePasskeyTables(env) {
+  await env.DB.prepare(
+    "CREATE TABLE IF NOT EXISTS passkey_credentials (cred_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, public_key_spki_b64 TEXT NOT NULL, label TEXT DEFAULT '', created_at INTEGER NOT NULL)"
+  ).run();
+  await env.DB.prepare(
+    "CREATE TABLE IF NOT EXISTS passkey_challenges (id TEXT PRIMARY KEY, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)"
+  ).run();
+}
+
+function renderApplePasskeyHTML(rpId, defaultDevId) {
+  return `<!DOCTYPE html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>通过 Apple 通行密钥登录灵犀</title>
+<style>
+:root{color-scheme:light dark;--bg:#F2F2F7;--card:#FFFFFF;--ink:#000;--mut:#6E6E73;--blue:#007AFF;--btn:#000;--btnt:#FFF;--bd:#E5E5EA}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#1C1C1E;--ink:#FFF;--mut:#98989D;--blue:#0A84FF;--btn:#FFF;--btnt:#000;--bd:#38383A}}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC",sans-serif}
+.card{width:100%;max-width:400px;background:var(--card);border:1px solid var(--bd);border-radius:22px;padding:26px 22px;box-shadow:0 12px 32px rgba(0,0,0,.12)}
+.logo{font-size:38px;text-align:center;margin-bottom:8px}h1{margin:0 0 8px;font-size:22px;text-align:center}
+p{margin:0 0 18px;font-size:13.5px;color:var(--mut);text-align:center;line-height:1.5}
+.in{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--bd);background:var(--bg);color:var(--ink);font-size:15px;margin-bottom:12px}
+.btn{width:100%;padding:14px;border:none;border-radius:13px;font-size:16px;font-weight:600;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-apple{background:var(--btn);color:var(--btnt)}.btn-sub{background:var(--blue);color:#FFF}
+.msg{margin-top:8px;font-size:13px;text-align:center;min-height:20px;color:var(--mut)}.err{color:#FF453A}.ok{color:#30D158}
+</style></head><body><div class="card">
+<div class="logo"></div>
+<h1>Apple iCloud 通行密钥登录</h1>
+<p>凭证通过 iOS 系统面容 ID 加密保存于您的 Apple ID iCloud 钥匙串，跨 iPhone / iPad / Mac 自动同步，并直连灵犀 Cloudflare 云端词库。</p>
+<input id="nick" class="in" placeholder="昵称（首次创建时可选填，如：我的 iPhone）" maxlength="24"/>
+<button class="btn btn-apple" onclick="doLogin()"> 刷面容 ID 登录已有通行密钥</button>
+<button class="btn btn-sub" onclick="doRegister()">✨ 首次使用：用 Apple ID 创建通行密钥</button>
+<div id="st" class="msg">请选择上方按钮触发系统面容 ID</div>
+</div><script>
+const RP_ID = ${JSON.stringify(rpId)};
+const DEV_ID = ${JSON.stringify(defaultDevId)};
+const st = (m, cls='') => { const e=document.getElementById('st'); e.textContent=m; e.className='msg '+cls; };
+const b64uToBuf = s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((s.length+3)%4)), c=>c.charCodeAt(0));
+const bufToB64u = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+
+async function doRegister() {
+  try {
+    st('正在拉起系统面容 ID 与 iCloud 钥匙串…');
+    const nick = (document.getElementById('nick').value || '').trim() || 'Apple 用户';
+    const chRes = await fetch('/api/v1/auth/passkey/challenge', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ mode:'register', username:nick }) });
+    const ch = await chRes.json();
+    if (!chRes.ok) throw new Error(ch?.error?.message || '获取挑战失败');
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        rp: { name: '灵犀输入法 (Lingxi Cloud)', id: RP_ID },
+        user: { id: b64uToBuf(ch.userHandle), name: nick + ' (Apple iCloud)', displayName: nick },
+        challenge: b64uToBuf(ch.challenge),
+        pubKeyCredParams: [{ type:'public-key', alg:-7 }],
+        authenticatorSelection: { authenticatorAttachment:'platform', residentKey:'required', userVerification:'required' },
+        timeout: 60000, attestation: 'none'
+      }
+    });
+    const spki = cred.response.getPublicKey ? cred.response.getPublicKey() : null;
+    if (!spki) throw new Error('当前浏览器不支持导出通行密钥公钥');
+    const regRes = await fetch('/api/v1/auth/passkey/register', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        challengeID: ch.challengeID,
+        credentialID: cred.id,
+        publicKeySPKI: bufToB64u(spki),
+        username: nick,
+        deviceID: DEV_ID
+      })
+    });
+    const out = await regRes.json();
+    if (!regRes.ok) throw new Error(out?.error?.message || '注册失败');
+    st('✓ 通行密钥已绑定 iCloud，正在返回灵犀 App…', 'ok');
+    location.href = 'lingxi://auth-callback?payload=' + encodeURIComponent(out.callbackPayload);
+  } catch (e) { st('提示：' + (e.message || e), 'err'); }
+}
+
+async function doLogin() {
+  try {
+    st('正在拉起系统面容 ID 验证通行密钥…');
+    const chRes = await fetch('/api/v1/auth/passkey/challenge', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ mode:'login' }) });
+    const ch = await chRes.json();
+    if (!chRes.ok) throw new Error(ch?.error?.message || '获取挑战失败');
+    const assertion = await navigator.credentials.get({
+      publicKey: { rpId: RP_ID, challenge: b64uToBuf(ch.challenge), userVerification:'required', timeout: 60000 }
+    });
+    const verRes = await fetch('/api/v1/auth/passkey/verify', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        challengeID: ch.challengeID,
+        credentialID: assertion.id,
+        clientDataJSON: bufToB64u(assertion.response.clientDataJSON),
+        authenticatorData: bufToB64u(assertion.response.authenticatorData),
+        signature: bufToB64u(assertion.response.signature),
+        deviceID: DEV_ID
+      })
+    });
+    const out = await verRes.json();
+    if (!verRes.ok) throw new Error(out?.error?.message || '验签失败');
+    st('✓ 面容 ID 验证通过，正在返回灵犀 App…', 'ok');
+    location.href = 'lingxi://auth-callback?payload=' + encodeURIComponent(out.callbackPayload);
+  } catch (e) { st('提示：' + (e.message || e), 'err'); }
+}
+</script></body></html>`;
+}
 
 async function hashPw(pw, salt = randHex(16)) {
   const k = await crypto.subtle.importKey("raw", enc.encode(pw), "PBKDF2", false, ["deriveBits"]);
@@ -470,7 +593,134 @@ export default {
         return jres({ ok: true, deleted: packId });
       }
 
-      // 4. Auth Endpoints
+      // 4. Auth Endpoints (含真 Apple iCloud 通行密钥 WebAuthn Passkey + 原生 Face ID 硬件公钥签名登录)
+      if (m === "GET" && path === "/auth/apple-passkey") {
+        const devId = (url.searchParams.get("deviceID") || "ios-passkey").slice(0, 64);
+        return new Response(renderApplePasskeyHTML(url.hostname, devId), {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+        });
+      }
+
+      if (m === "POST" && path === "/api/v1/auth/passkey/challenge") {
+        await ensurePasskeyTables(env);
+        const now = nowSec();
+        await env.DB.prepare("DELETE FROM passkey_challenges WHERE expires_at < ?").bind(now).run();
+        const cid = crypto.randomUUID();
+        const chBytes = new Uint8Array(32);
+        crypto.getRandomValues(chBytes);
+        const challenge = b64uEnc(chBytes);
+        const uhBytes = new Uint8Array(16);
+        crypto.getRandomValues(uhBytes);
+        await env.DB.prepare("INSERT INTO passkey_challenges (id, challenge, expires_at) VALUES (?, ?, ?)").bind(cid, challenge, now + 300).run();
+        return jres({ challengeID: cid, challenge, userHandle: b64uEnc(uhBytes) });
+      }
+
+      if (m === "POST" && path === "/api/v1/auth/passkey/register") {
+        await ensurePasskeyTables(env);
+        const b = await rjson(request);
+        const chRow = await env.DB.prepare("SELECT * FROM passkey_challenges WHERE id = ? AND expires_at >= ?").bind(String(b.challengeID || ""), nowSec()).first();
+        if (!chRow) return eres(400, "EXPIRED_CHALLENGE", "认证已过期，请重试");
+        await env.DB.prepare("DELETE FROM passkey_challenges WHERE id = ?").bind(chRow.id).run();
+        const credId = String(b.credentialID || "").trim();
+        const pubSpki = String(b.publicKeySPKI || "").trim();
+        if (!credId || !pubSpki) return eres(400, "BAD_REQUEST", "缺少通行密钥公钥凭证");
+
+        const now = nowSec(), uid = crypto.randomUUID(), rawKey = `lx_live_${randHex(20)}`, salt = randHex(32);
+        const uname = String(b.username || "Apple 用户").trim() || "Apple 用户";
+        const pseudoEmail = `apple_${randHex(5)}@icloud.lingxi.ime`;
+        await env.DB.prepare(
+          "INSERT INTO users (id,email,username,password_hash,api_key_hash,api_key_prefix,e2ee_salt,analytics_opt_in,opt_in_at,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)"
+        ).bind(uid, pseudoEmail, uname, await hashPw(randHex(16)), await sha256(rawKey), rawKey.slice(0, 14) + "...", salt, now, now, now, now).run();
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO passkey_credentials (cred_id, user_id, public_key_spki_b64, label, created_at) VALUES (?, ?, ?, ?, ?)"
+        ).bind(credId, uid, pubSpki, "Apple iCloud Passkey", now).run();
+
+        const u = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(uid).first();
+        const sessionObj = await issueSession(env, u, String(b.deviceID || "ios-passkey"), rawKey);
+        const callbackPayload = b64uEnc(enc.encode(JSON.stringify(sessionObj)));
+        return jres({ ...sessionObj, callbackPayload }, 201);
+      }
+
+      if (m === "POST" && path === "/api/v1/auth/passkey/verify") {
+        await ensurePasskeyTables(env);
+        const b = await rjson(request);
+        const chRow = await env.DB.prepare("SELECT * FROM passkey_challenges WHERE id = ? AND expires_at >= ?").bind(String(b.challengeID || ""), nowSec()).first();
+        if (!chRow) return eres(400, "EXPIRED_CHALLENGE", "认证挑战已过期，请重新刷面容 ID");
+        await env.DB.prepare("DELETE FROM passkey_challenges WHERE id = ?").bind(chRow.id).run();
+
+        const credRow = await env.DB.prepare("SELECT * FROM passkey_credentials WHERE cred_id = ?").bind(String(b.credentialID || "")).first();
+        if (!credRow) return eres(404, "PASSKEY_NOT_FOUND", "云端未找到该通行密钥，请先点下方「首次使用创建通行密钥」");
+
+        const clientDataBytes = b64uDec(String(b.clientDataJSON || ""));
+        const clientData = JSON.parse(dec.decode(clientDataBytes));
+        if (clientData.challenge !== chRow.challenge) return eres(401, "CHALLENGE_MISMATCH", "挑战校验失败");
+
+        const authData = b64uDec(String(b.authenticatorData || ""));
+        const sigRaw = derToP1363(b64uDec(String(b.signature || "")));
+        const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", clientDataBytes));
+        const signed = new Uint8Array(authData.length + clientHash.length);
+        signed.set(authData, 0);
+        signed.set(clientHash, authData.length);
+
+        const pubKey = await crypto.subtle.importKey(
+          "spki",
+          b64uDec(credRow.public_key_spki_b64),
+          { name: "ECDSA", namedCurve: "P-256" },
+          false,
+          ["verify"]
+        );
+        const valid = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pubKey, sigRaw, signed);
+        if (!valid) return eres(401, "INVALID_SIGNATURE", "Apple 通行密钥验签失败");
+
+        const u = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(credRow.user_id).first();
+        if (!u) return eres(404, "USER_NOT_FOUND", "对应账号不存在");
+        await env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(nowSec(), u.id).run();
+        const sessionObj = await issueSession(env, u, String(b.deviceID || "ios-passkey"));
+        const callbackPayload = b64uEnc(enc.encode(JSON.stringify(sessionObj)));
+        return jres({ ...sessionObj, callbackPayload });
+      }
+
+      if (m === "POST" && path === "/api/v1/auth/apple-device") {
+        await ensurePasskeyTables(env);
+        const b = await rjson(request);
+        const hwId = String(b.hardwareID || "").trim();
+        const pubB64 = String(b.publicKeyRawB64 || "").trim();
+        const sigB64 = String(b.signatureB64 || "").trim();
+        const ts = Number(b.timestamp || 0);
+        if (!hwId || !pubB64 || !sigB64 || Math.abs(nowSec() - ts) > 600) {
+          return eres(400, "BAD_REQUEST", "Apple Face ID 硬件凭证无效或已过期");
+        }
+        const pubBytes = b64uDec(pubB64);
+        const sigBytes = derToP1363(b64uDec(sigB64));
+        const msgBytes = enc.encode(`${hwId}|${ts}`);
+        const keyFmt = pubBytes.length === 65 ? "raw" : "spki";
+        const pubKey = await crypto.subtle.importKey(keyFmt, pubBytes, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+        const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pubKey, sigBytes, msgBytes);
+        if (!ok) return eres(401, "INVALID_SIGNATURE", "Face ID 安全隔区硬件签名校验失败");
+
+        const credKey = `apple_hw_${hwId}`;
+        const existingCred = await env.DB.prepare("SELECT * FROM passkey_credentials WHERE cred_id = ?").bind(credKey).first();
+        let u = existingCred ? await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(existingCred.user_id).first() : null;
+        let rawKey = null;
+        if (!u) {
+          const now = nowSec(), uid = crypto.randomUUID(), salt = randHex(32);
+          rawKey = `lx_live_${randHex(20)}`;
+          const uname = String(b.username || "Apple 用户").trim() || "Apple 用户";
+          const email = String(b.email || "").trim().toLowerCase() || `apple_${hwId.slice(0, 8)}@icloud.lingxi.ime`;
+          await env.DB.prepare(
+            "INSERT INTO users (id,email,username,password_hash,api_key_hash,api_key_prefix,e2ee_salt,analytics_opt_in,opt_in_at,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)"
+          ).bind(uid, email, uname, await hashPw(randHex(16)), await sha256(rawKey), rawKey.slice(0, 14) + "...", salt, now, now, now, now).run();
+          await env.DB.prepare(
+            "INSERT OR REPLACE INTO passkey_credentials (cred_id, user_id, public_key_spki_b64, label, created_at) VALUES (?, ?, ?, ?, ?)"
+          ).bind(credKey, uid, pubB64, "Apple Face ID Hardware Key", now).run();
+          u = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(uid).first();
+        } else {
+          await env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(nowSec(), u.id).run();
+        }
+        return jres(await issueSession(env, u, String(b.deviceID || "ios-faceid"), rawKey));
+      }
+
       if (m === "POST" && path === "/api/v1/auth/register") {
         const b = await rjson(request);
         const email = (b.email || "").trim().toLowerCase();
@@ -586,7 +836,9 @@ export default {
       if (m === "POST" && path === "/api/v1/analytics/typing-events") {
         const a = await resolveAuth(request, env);
         if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
-        const b = await rjson(request), evs = Array.isArray(b.events) ? b.events : [], now = nowSec();
+        const b = await rjson(request);
+        const evs = Array.isArray(b.events) ? b.events : (Array.isArray(b.digests) ? b.digests : []);
+        const now = nowSec();
         for (const e of evs) {
           await env.DB.prepare("INSERT INTO typing_habit_events (user_id,device_id,started_at,duration_seconds,committed_chars,committed_words,delete_count,undo_learn_count,glide_words,typo_corrected_count,ai_invocations,translate_chars,scheme_id,layout_id,active_hour,confusion_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(a.user.id, String(e.deviceID || a.deviceId), Number(e.startedAt || now), Math.max(1, Number(e.durationSeconds || 1)), Number(e.committedChars || 0), Number(e.committedWords || 0), Number(e.deleteCount || 0), Number(e.undoLearnCount || 0), Number(e.glideWords || 0), Number(e.typoCorrectedCount || 0), Number(e.aiInvocations || 0), Number(e.translateChars || 0), String(e.schemeID || "quanpin"), String(e.layoutID || "qwerty26"), Number(e.activeHour ?? 12), JSON.stringify(e.confusionCounts || {}), now).run();
@@ -610,15 +862,42 @@ export default {
         const a = await resolveAuth(request, env);
         if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
         const b = await rjson(request);
+        let daObj = b;
+        if (Array.isArray(b.words)) {
+          const domKeywords = {
+            "科技与研发": ["代码", "接口", "部署", "服务器", "数据库", "算法", "模型", "前端", "后端", "架构", "测试", "编译", "函数", "并发", "灵犀"],
+            "商务与职场": ["收到", "会议", "汇报", "方案", "进度", "合作", "排期", "辛苦", "确认", "合同", "客户", "需求", "复盘", "对齐"],
+            "日常与社交": ["哈哈", "吃饭", "开心", "下班", "火锅", "奶茶", "周末", "晚安", "摸鱼", "快递", "朋友", "明天", "休息"],
+            "学术与创作": ["研究", "分析", "论文", "文献", "逻辑", "结构", "实验", "论证", "摘要", "引用", "叙事", "章节"]
+          };
+          const cleaned = b.words.map((w) => String(w || "").trim()).filter(Boolean);
+          const scores = {};
+          for (const w of cleaned) {
+            for (const [dom, kws] of Object.entries(domKeywords)) {
+              if (kws.some((k) => w.includes(k))) scores[dom] = (scores[dom] || 0) + 1;
+            }
+          }
+          const primary = Object.entries(scores).sort((x, y) => y[1] - x[1])[0]?.[0] || "综合通用";
+          const avgLen = cleaned.length ? Number((cleaned.reduce((s, w) => s + w.length, 0) / cleaned.length).toFixed(2)) : 0;
+          daObj = {
+            primaryDomain: primary,
+            domainScores: scores,
+            analyzedWordCount: cleaned.length,
+            avgLexiconWordLength: avgLen,
+            preferredTone: String(b.preferredTone || "自然流畅"),
+            topTerms: cleaned.slice(0, 12)
+          };
+        }
         await recomputeProfile(env, a.user.id);
-        await env.DB.prepare("UPDATE user_typing_profiles SET domain_affinity_json=?, updated_at=? WHERE user_id=?").bind(JSON.stringify(b), nowSec(), a.user.id).run();
+        await env.DB.prepare("UPDATE user_typing_profiles SET domain_affinity_json=?, updated_at=? WHERE user_id=?").bind(JSON.stringify(daObj), nowSec(), a.user.id).run();
         return jres({ ok: true, profile: await recomputeProfile(env, a.user.id) });
       }
 
       if (m === "GET" && path === "/api/v1/analytics/habits") {
         const a = await resolveAuth(request, env);
         if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
-        return jres({ profile: await recomputeProfile(env, a.user.id) });
+        const prof = await recomputeProfile(env, a.user.id);
+        return jres({ ...prof, profile: prof });
       }
 
       if (m === "DELETE" && path === "/api/v1/analytics/habits") {
@@ -671,7 +950,8 @@ export default {
         const a = await resolveAuth(request, env);
         if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
         const u = a.user.id;
-        for (const t of ["auth_sessions", "sync_records", "sync_state", "typing_habit_events", "ai_api_usage_logs", "user_typing_profiles", "consent_records", "devices"]) {
+        await ensurePasskeyTables(env);
+        for (const t of ["auth_sessions", "passkey_credentials", "sync_records", "sync_state", "typing_habit_events", "ai_api_usage_logs", "user_typing_profiles", "consent_records", "devices"]) {
           await env.DB.prepare("DELETE FROM " + t + " WHERE user_id=?").bind(u).run();
         }
         await env.DB.prepare("DELETE FROM users WHERE id=?").bind(u).run();

@@ -270,12 +270,15 @@ final class ExpandedCandidatesView: UIView {
     var onClose: (() -> Void)?
 
     private let filterControl = UISegmentedControl(items: Filter.allCases.map(\.title))
+    private let toneControl = UISegmentedControl(items: MandarinTone.allCases.map(\.label))
     private let closeButton = ActionClosureButton(type: .system)
     private let scrollView = LingxiScrollView()
     private let gridContainer = UIView()
+    private let emptyHintLabel = UILabel()
     private var allCandidates: [PinyinCandidate] = []
     private var visibleIndices: [Int] = []
     private var currentFilter: Filter = .all
+    private var currentTone: MandarinTone = .all
     private var theme: ResolvedTheme?
     /// 候选词主字号（与单行候选条联动，默认 16.5）
     private var candidateFontSize: CGFloat = 16.5
@@ -288,6 +291,11 @@ final class ExpandedCandidatesView: UIView {
         filterControl.addTarget(self, action: #selector(filterChanged), for: .valueChanged)
         addSubview(filterControl)
 
+        toneControl.selectedSegmentIndex = 0
+        toneControl.isHidden = true
+        toneControl.addTarget(self, action: #selector(toneChanged), for: .valueChanged)
+        addSubview(toneControl)
+
         closeButton.setTitle("收起", for: .normal)
         closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
         closeButton.layer.cornerRadius = 8
@@ -299,6 +307,12 @@ final class ExpandedCandidatesView: UIView {
         scrollView.showsVerticalScrollIndicator = true
         addSubview(scrollView)
         scrollView.addSubview(gridContainer)
+
+        emptyHintLabel.text = "当前筛选条件下暂无候选"
+        emptyHintLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        emptyHintLabel.textAlignment = .center
+        emptyHintLabel.isHidden = true
+        scrollView.addSubview(emptyHintLabel)
     }
 
     required init?(coder: NSCoder) {
@@ -311,20 +325,30 @@ final class ExpandedCandidatesView: UIView {
         let closeW: CGFloat = 52
         closeButton.frame = CGRect(x: bounds.width - pad - closeW, y: 6, width: closeW, height: 28)
         filterControl.frame = CGRect(x: pad, y: 6, width: max(120, closeButton.frame.minX - pad - 6), height: 28)
-        let scrollY = filterControl.frame.maxY + 4
+        let showTone = (currentFilter == .singleChar)
+        toneControl.isHidden = !showTone
+        var scrollY = filterControl.frame.maxY + 4
+        if showTone {
+            toneControl.frame = CGRect(x: pad, y: filterControl.frame.maxY + 4, width: bounds.width - pad * 2, height: 26)
+            scrollY = toneControl.frame.maxY + 4
+        }
         scrollView.frame = CGRect(x: 0, y: scrollY, width: bounds.width, height: max(40, bounds.height - scrollY))
+        emptyHintLabel.frame = CGRect(x: 16, y: 18, width: max(80, bounds.width - 32), height: 24)
         layoutButtons()
     }
 
     func apply(theme: ResolvedTheme) {
         self.theme = theme
-        backgroundColor = theme.toolbarBg.withAlphaComponent(0.96)
-        filterControl.selectedSegmentTintColor = theme.accentFill
-        filterControl.backgroundColor = theme.specialKeyFill
-        filterControl.setTitleTextAttributes([.foregroundColor: theme.accentText], for: .selected)
-        filterControl.setTitleTextAttributes([.foregroundColor: theme.keyText], for: .normal)
+        backgroundColor = theme.toolbarBg.withAlphaComponent(0.98)
+        for seg in [filterControl, toneControl] {
+            seg.selectedSegmentTintColor = theme.accentFill
+            seg.backgroundColor = theme.specialKeyFill
+            seg.setTitleTextAttributes([.foregroundColor: theme.accentText, .font: UIFont.systemFont(ofSize: 12, weight: .semibold)], for: .selected)
+            seg.setTitleTextAttributes([.foregroundColor: theme.keyText, .font: UIFont.systemFont(ofSize: 12, weight: .medium)], for: .normal)
+        }
         closeButton.backgroundColor = theme.specialKeyFill
         closeButton.setTitleColor(theme.keyText, for: .normal)
+        emptyHintLabel.textColor = theme.keyHintText
         rebuildButtons()
     }
 
@@ -335,13 +359,26 @@ final class ExpandedCandidatesView: UIView {
         lastSignature = signature
         self.allCandidates = candidates
         currentFilter = .all
+        currentTone = .all
         filterControl.selectedSegmentIndex = 0
+        toneControl.selectedSegmentIndex = 0
         rebuildButtons()
         scrollView.setContentOffset(.zero, animated: false)
     }
 
     @objc private func filterChanged() {
         currentFilter = Filter(rawValue: filterControl.selectedSegmentIndex) ?? .all
+        if currentFilter != .singleChar {
+            currentTone = .all
+            toneControl.selectedSegmentIndex = 0
+        }
+        rebuildButtons()
+        setNeedsLayout()
+        scrollView.setContentOffset(.zero, animated: false)
+    }
+
+    @objc private func toneChanged() {
+        currentTone = MandarinTone(rawValue: toneControl.selectedSegmentIndex) ?? .all
         rebuildButtons()
         scrollView.setContentOffset(.zero, animated: false)
     }
@@ -365,11 +402,17 @@ final class ExpandedCandidatesView: UIView {
         visibleIndices = allCandidates.indices.filter { idx in
             let w = allCandidates[idx].word
             switch currentFilter {
-            case .all: return true
-            case .singleChar: return w.count == 1
-            case .phrases: return w.count >= 2
+            case .all:
+                return true
+            case .singleChar:
+                guard w.count == 1 else { return false }
+                if currentTone == .all { return true }
+                return PinyinToneClassifier.tone(for: w) == currentTone.rawValue
+            case .phrases:
+                return w.count >= 2
             }
         }
+        emptyHintLabel.isHidden = !visibleIndices.isEmpty
 
         for origIdx in visibleIndices {
             let cand = allCandidates[origIdx]

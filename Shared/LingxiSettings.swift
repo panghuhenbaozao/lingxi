@@ -7,6 +7,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case translate
     case clipboard
     case layout
+    case editPad
     case settings
     case undo
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "边打边译"
         case .clipboard: return "剪贴板"
         case .layout: return "九键/26键切换"
+        case .editPad: return "专业编辑台"
         case .settings: return "快捷设置"
         case .undo: return "撤销删除"
         }
@@ -26,6 +28,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "character.bubble"
         case .clipboard: return "doc.on.clipboard"
         case .layout: return "rectangle.grid.3x2"
+        case .editPad: return "cursorarrow.and.square.on.square.dashed"
         case .settings: return "slider.horizontal.3"
         case .undo: return "arrow.uturn.backward"
         }
@@ -66,7 +69,7 @@ private struct LegacyToolbarItemReader: Decodable {
 /// 极简默认布局：左侧 [灵犀 AI][译] + 右侧 [剪贴板][快捷设置][撤销事件位]，
 /// 『九键/26键切换』默认隐藏，可在 App『键盘工具栏』设置页随时开启。
 let defaultToolbarLayout: [ToolbarItemConfig] = ToolbarButtonID.allCases.enumerated().map { idx, bid in
-    let collapsedByDefault: Set<ToolbarButtonID> = [.layout]
+    let collapsedByDefault: Set<ToolbarButtonID> = [.layout, .editPad]
     return ToolbarItemConfig(buttonID: bid, isVisible: !collapsedByDefault.contains(bid), order: idx)
 }
 
@@ -308,6 +311,10 @@ struct LingxiSettings: Codable, Equatable {
     var showComposingStrip: Bool = true
     var candidateBarHeight: Double = 50
     var candidateFontSize: Double = 16.5
+    var selectionMagicEnabled: Bool = true
+    var autoFuzzyPromptEnabled: Bool = true
+    var customSwipeUpMap: [String: String] = [:]
+    var customSwipeDownMap: [String: String] = [:]
 
     /// Ensure every known toolbar button appears exactly once, preserving saved order.
     static func normalizedToolbarLayout(_ layout: [ToolbarItemConfig]) -> [ToolbarItemConfig] {
@@ -342,6 +349,7 @@ struct LingxiSettings: Codable, Equatable {
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
+        case selectionMagicEnabled, autoFuzzyPromptEnabled, customSwipeUpMap, customSwipeDownMap
     }
 
     init() {}
@@ -405,9 +413,19 @@ struct LingxiSettings: Codable, Equatable {
         candidateBarHeight = min(64, max(44, rawBarH))
         let rawFont = try c.decodeIfPresent(Double.self, forKey: .candidateFontSize) ?? d.candidateFontSize
         candidateFontSize = min(22, max(14, rawFont))
+        selectionMagicEnabled = try c.decodeIfPresent(Bool.self, forKey: .selectionMagicEnabled) ?? d.selectionMagicEnabled
+        autoFuzzyPromptEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoFuzzyPromptEnabled) ?? d.autoFuzzyPromptEnabled
+        customSwipeUpMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeUpMap) ?? d.customSwipeUpMap
+        customSwipeDownMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeDownMap) ?? d.customSwipeDownMap
+    }
+
+    private struct CustomKeymapSyncPayload: Codable {
+        let up: [String: String]
+        let down: [String: String]
     }
 
     private static let fileName = "lingxi_settings.json"
+    static let customKeymapSyncFileName = "lingxi_custom_keymap.json"
     private static var cachedValue: LingxiSettings?
     private static var cachedMTime: Date?
 
@@ -425,6 +443,9 @@ struct LingxiSettings: Codable, Equatable {
 
     @discardableResult
     func save() -> Bool {
+        if !customSwipeUpMap.isEmpty || !customSwipeDownMap.isEmpty {
+            _ = AppGroup.writeJSON(CustomKeymapSyncPayload(up: customSwipeUpMap, down: customSwipeDownMap), to: Self.customKeymapSyncFileName)
+        }
         let ok = AppGroup.writeJSON(self, to: Self.fileName)
         Self.cachedValue = self
         Self.cachedMTime = AppGroup.modificationDate(of: Self.fileName)

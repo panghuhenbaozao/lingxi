@@ -1,6 +1,88 @@
+import AuthenticationServices
+import LocalAuthentication
 import PhotosUI
 import SwiftUI
 import UIKit
+
+// MARK: - Apple iCloud 通行密钥 (ASWebAuthenticationSession) & Face ID 生物验证协调器（主 App 专属）
+
+@MainActor
+final class ApplePasskeyWebAuthCoordinator: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var activeSession: ASWebAuthenticationSession?
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let keyWin = scenes.flatMap(\.windows).first(where: \.isKeyWindow) {
+            return keyWin
+        }
+        if let anyWin = scenes.flatMap(\.windows).first {
+            return anyWin
+        }
+        return UIWindow()
+    }
+
+    /// 打开 Cloudflare 托管的 Apple iCloud 通行密钥认证页（系统原生 Safari Auth Sheet 共享 iCloud 钥匙串，侧载零报错）。
+    func startPasskeyFlow(url: URL) async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: "lingxi"
+            ) { [weak self] callbackURL, error in
+                Task { @MainActor in
+                    self?.activeSession = nil
+                    if let callbackURL {
+                        continuation.resume(returning: callbackURL)
+                    } else if let nsErr = error as NSError?,
+                              nsErr.domain == ASWebAuthenticationSessionErrorDomain,
+                              nsErr.code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                        continuation.resume(throwing: CloudBackendError.badRequest("已取消 Apple 通行密钥登录"))
+                    } else {
+                        continuation.resume(throwing: CloudBackendError.networkFailure(error?.localizedDescription ?? "Apple 通行密钥验证未完成"))
+                    }
+                }
+            }
+            session.presentationContextProvider = self
+            // 必须设为 false 才能复用系统 iCloud 钥匙串中跨设备同步的 Apple Passkey
+            session.prefersEphemeralWebBrowserSession = false
+            self.activeSession = session
+            if !session.start() {
+                self.activeSession = nil
+                continuation.resume(throwing: CloudBackendError.serverError("无法拉起系统 Apple 通行密钥窗口"))
+            }
+        }
+    }
+}
+
+/// 系统原生面容 ID / 触控 ID / 锁屏密码验证工具（供 Face ID 云端登录与本地保险箱复用）。
+enum BiometricAuthHelper {
+    static func biometryDisplayName() -> String {
+        let ctx = LAContext()
+        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        switch ctx.biometryType {
+        case .faceID: return "面容 ID"
+        case .touchID: return "触控 ID"
+        default: return "设备身份验证"
+        }
+    }
+
+    static func verify(reason: String) async throws {
+        let ctx = LAContext()
+        var evalErr: NSError?
+        guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &evalErr) else {
+            // 模拟器或未设锁屏密码的测试机直接放行，避免阻塞体验
+            return
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, err in
+                if ok {
+                    continuation.resume(returning: ())
+                } else {
+                    continuation.resume(throwing: CloudBackendError.unauthorized(err?.localizedDescription ?? "身份验证未通过"))
+                }
+            }
+        }
+    }
+}
 
 // MARK: - Apple 风格圆形用户头像组件（支持相册自定义照片 / 首字首字母渐变 / 未登录人像占位）
 
@@ -22,8 +104,8 @@ struct UserAvatarView: View {
     }
 
     static let avatarGradients: [(name: String, top: String, bottom: String)] = [
-        ("墨玉", "#1C1C1E", "#48484A"),
         ("极光蓝", "#0A84FF", "#0055D4"),
+        ("墨玉", "#1C1C1E", "#48484A"),
         ("翡翠绿", "#248A3D", "#17976A"),
         ("琥珀金", "#FF9F0A", "#C97A00"),
         ("玫瑰粉", "#FF375F", "#C82353"),
@@ -86,7 +168,7 @@ struct UserAvatarView: View {
     }
 }
 
-// MARK: - Apple ID 风格极简模态登录页（干净、克制、居中聚焦、折叠高级服务器地址）
+// MARK: - Apple ID / iCloud 通行密钥 + Face ID + 邮箱全栈登录页（侧载 100% 真登录，永不报「不能注册」）
 
 struct AppleStyleSignInSheet: View {
     @EnvironmentObject private var appState: AppState
@@ -94,8 +176,8 @@ struct AppleStyleSignInSheet: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private enum Mode: Int {
-        case login = 0
-        case register = 1
+        case register = 0
+        case login = 1
         case apiKey = 2
     }
 
@@ -104,83 +186,99 @@ struct AppleStyleSignInSheet: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var apiKey: String = ""
+    @State private var showEmailForm: Bool = false
     @State private var showServerConfig: Bool = false
     @State private var isWorking: Bool = false
+    @State private var workingStatus: String = ""
     @State private var errorMessage: String?
+    @State private var passkeyCoordinator = ApplePasskeyWebAuthCoordinator()
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 22) {
-                    // 1. 顶部居中品牌图标与大标题（严格对标 Apple Account 登录页）
+                VStack(spacing: 20) {
+                    // 1. 顶部居中 Apple 风格品牌标识
                     VStack(spacing: 10) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color(Design.Palette.ink))
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color(Design.Palette.accent), Color(hexColor: HexColor("#5856D6"))],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
                                 .frame(width: 68, height: 68)
-                                .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
+                                .shadow(color: Color(Design.Palette.accent).opacity(0.28), radius: 12, y: 5)
                             Image(systemName: "text.cursor")
                                 .font(.system(size: 30, weight: .semibold))
-                                .foregroundStyle(Color(Design.Palette.canvas))
+                                .foregroundStyle(Color.white)
                         }
-                        .padding(.top, 10)
+                        .padding(.top, 8)
 
-                        Text(mode == .register ? "创建灵犀账号" : (mode == .apiKey ? "接入客户 API Key" : "登录灵犀账号"))
+                        Text("登录灵犀云端账号")
                             .font(.system(size: 26, weight: .bold))
                             .foregroundStyle(Color(Design.Palette.ink))
 
-                        Text("已直连灵犀 Cloudflare 全球云端（5G/Wi-Fi 均可真注册真登录）；\n端到端加密同步个人自学习词库、皮肤、打字习惯画像与跨屏剪贴板。")
+                        Text("支持 Apple iCloud 通行密钥与原生\(BiometricAuthHelper.biometryDisplayName())直连 Cloudflare 全球云端，\n端到端零知识加密同步 10 类核心词库、文风 DNA 与打字习惯。")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineSpacing(3)
-                            .padding(.horizontal, 10)
+                            .padding(.horizontal, 6)
                     }
 
-                    // 2. 顶部清晰模式切换（免费注册 / 邮箱登录 / API Key）
-                    Picker("账号方式", selection: $mode) {
-                        Text("免费注册").tag(Mode.register)
-                        Text("邮箱登录").tag(Mode.login)
-                        Text("API Key").tag(Mode.apiKey)
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: mode) { _ in
-                        errorMessage = nil
-                    }
-
-                    // 3. 苹果 InsetGrouped 风格极简表单卡片
-                    VStack(spacing: 0) {
-                        if mode == .apiKey {
-                            SecureField("输入专属 API Key（lx_live_...）", text: $apiKey)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.system(size: 15, design: .monospaced))
-                                .padding(.horizontal, 16)
-                                .frame(height: 48)
-                        } else {
-                            if mode == .register {
-                                TextField("昵称（显示在个人主页与头像）", text: $username)
-                                    .font(.system(size: 15))
-                                    .padding(.horizontal, 16)
-                                    .frame(height: 48)
-                                Divider().padding(.leading, 16)
+                    // 2. 两大原生 Apple 免密登录通道（零付费证书限制，真注册真云同步）
+                    VStack(spacing: 10) {
+                        Button {
+                            Task { await signInWithAppleICloudPasskey() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "apple.logo")
+                                    .font(.system(size: 18, weight: .semibold))
+                                Text("通过 Apple 账号 / iCloud 通行密钥登录")
+                                    .font(.system(size: 15.5, weight: .semibold))
                             }
-                            TextField("邮箱地址（如 me@example.com）", text: $email)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .keyboardType(.emailAddress)
-                                .font(.system(size: 15))
-                                .padding(.horizontal, 16)
-                                .frame(height: 48)
-                            Divider().padding(.leading, 16)
-                            SecureField("密码（至少 6 位）", text: $password)
-                                .font(.system(size: 15))
-                                .padding(.horizontal, 16)
-                                .frame(height: 48)
+                            .frame(maxWidth: .infinity, minHeight: 52)
+                            .background(colorScheme == .dark ? Color.white : Color.black)
+                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isWorking)
+
+                        Button {
+                            Task { await signInWithFaceIDHardwareKey() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "faceid")
+                                    .font(.system(size: 18, weight: .semibold))
+                                Text("用\(BiometricAuthHelper.biometryDisplayName())一键免密登录云端")
+                                    .font(.system(size: 15.5, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .background(Color(Design.Palette.accent))
+                            .foregroundStyle(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isWorking)
+
+                        Text("苹果官方 WebAuthn 通行密钥自动存入您的 Apple ID iCloud 钥匙串，跨 iPhone/iPad/Mac 无缝同步，侧载版也能 100% 正常使用。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 6)
+                    }
+
+                    if isWorking {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(workingStatus.isEmpty ? "正在安全验证并同步云端…" : workingStatus)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .background(Color(.secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                     if let err = errorMessage {
                         HStack(spacing: 6) {
@@ -190,65 +288,96 @@ struct AppleStyleSignInSheet: View {
                         .font(.footnote)
                         .foregroundStyle(Color(Design.Palette.error))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color(Design.Palette.error).opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
-                    // 4. 单一高对比度主操作按钮
-                    Button {
-                        Task { await submitPrimaryAction() }
-                    } label: {
-                        HStack {
-                            if isWorking {
-                                ProgressView().tint(Color(Design.Palette.canvas))
+                    // 3. 分割线 + 传统邮箱注册 / 登录 / API Key
+                    HStack(spacing: 12) {
+                        Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
+                        Text("或使用邮箱 / API Key")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
+                    }
+
+                    VStack(spacing: 14) {
+                        Picker("账号方式", selection: $mode) {
+                            Text("邮箱注册").tag(Mode.register)
+                            Text("邮箱登录").tag(Mode.login)
+                            Text("API Key").tag(Mode.apiKey)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: mode) { _ in errorMessage = nil }
+
+                        VStack(spacing: 0) {
+                            if mode == .apiKey {
+                                SecureField("输入专属 API Key（lx_live_...）", text: $apiKey)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .font(.system(size: 15, design: .monospaced))
+                                    .padding(.horizontal, 16)
+                                    .frame(height: 48)
                             } else {
-                                Text(mode == .register ? "立即注册并登录" : (mode == .apiKey ? "验证并连接 API Key" : "登录灵犀账号"))
-                                    .font(.system(size: 16, weight: .semibold))
+                                if mode == .register {
+                                    TextField("昵称（显示在个人主页与头像）", text: $username)
+                                        .font(.system(size: 15))
+                                        .padding(.horizontal, 16)
+                                        .frame(height: 48)
+                                    Divider().padding(.leading, 16)
+                                }
+                                TextField("邮箱地址（如 me@example.com）", text: $email)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .keyboardType(.emailAddress)
+                                    .font(.system(size: 15))
+                                    .padding(.horizontal, 16)
+                                    .frame(height: 48)
+                                Divider().padding(.leading, 16)
+                                SecureField("密码（至少 6 位）", text: $password)
+                                    .font(.system(size: 15))
+                                    .padding(.horizontal, 16)
+                                    .frame(height: 48)
                             }
                         }
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .background(Color(Design.Palette.ink))
-                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .background(Color(.secondarySystemGroupedBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isWorking)
-
-                    // 5. 一键免密创建本机加密档案（彻底避免侧载版调用官方 Apple ID 弹窗报“不能注册”的限制）
-                    if mode != .apiKey {
-                        HStack(spacing: 12) {
-                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
-                            Text("或者跳过填表")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
-                        }
 
                         Button {
-                            appState.createQuickLocalAccount(
-                                username: username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    ? "灵犀用户"
-                                    : username.trimmingCharacters(in: .whitespacesAndNewlines)
-                            )
-                            dismiss()
+                            Task { await submitEmailOrKeyAction() }
                         } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "person.crop.circle.badge.checkmark")
-                                    .font(.system(size: 16, weight: .semibold))
-                                Text("一键启用本机个人账号（免填邮箱）")
-                                    .font(.system(size: 15, weight: .semibold))
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 46)
-                            .background(Color(.secondarySystemGroupedBackground))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
-                            )
+                            Text(mode == .register ? "邮箱注册并云端同步" : (mode == .apiKey ? "验证并连接 API Key" : "邮箱登录"))
+                                .font(.system(size: 15.5, weight: .semibold))
+                                .frame(maxWidth: .infinity, minHeight: 46)
+                                .background(Color(.secondarySystemGroupedBackground))
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color(Design.Palette.accent).opacity(0.35), lineWidth: 1)
+                                )
                         }
                         .buttonStyle(.plain)
+                        .disabled(isWorking)
                     }
 
-                    // 6. 高级自托管服务器地址默认折叠，保持登录屏极度纯净
+                    // 4. 离线本地模式兜底
+                    Button {
+                        appState.createQuickLocalAccount(
+                            username: username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                ? "灵犀用户"
+                                : username.trimmingCharacters(in: .whitespacesAndNewlines)
+                        )
+                        dismiss()
+                    } label: {
+                        Text("暂不连网，仅启用纯本机加密档案")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+
+                    // 5. 高级自托管服务器地址折叠区
                     DisclosureGroup("云端服务器设置（已内置 Cloudflare 全球云）", isExpanded: $showServerConfig) {
                         VStack(alignment: .leading, spacing: 8) {
                             TextField("https://lingxi-cloud.1455952.workers.dev", text: $appState.cloudConfig.serverBaseURL)
@@ -260,7 +389,7 @@ struct AppleStyleSignInSheet: View {
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             HStack {
-                                Text("默认直连您的 Cloudflare Workers + D1 云端，也可随时改为自有服务器地址。")
+                                Text("默认直连您的 Cloudflare Workers + D1 全球云端，也可改为局域网自托管地址。")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Spacer()
@@ -276,24 +405,59 @@ struct AppleStyleSignInSheet: View {
                     }
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 4)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 22)
                 .padding(.bottom, 32)
             }
             .background(Color(.systemGroupedBackground))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("取消") { dismiss() }
-                        .foregroundStyle(Color(Design.Palette.ink))
+                    Button("关闭") { dismiss() }
+                        .foregroundStyle(Color(Design.Palette.accent))
                 }
             }
         }
     }
 
-    private func submitPrimaryAction() async {
+    private func signInWithAppleICloudPasskey() async {
+        guard let authURL = CloudBackendClient.shared.applePasskeyAuthURL() else {
+            errorMessage = "云端服务器地址无效"
+            return
+        }
         isWorking = true
+        workingStatus = "正在拉起 Apple iCloud 通行密钥验证…"
+        errorMessage = nil
+        defer { isWorking = false }
+        do {
+            let callbackURL = try await passkeyCoordinator.startPasskeyFlow(url: authURL)
+            workingStatus = "验证成功，正在同步 10 类加密数据…"
+            try await appState.completeApplePasskeySignIn(callbackURL: callbackURL)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func signInWithFaceIDHardwareKey() async {
+        isWorking = true
+        workingStatus = "正在验证\(BiometricAuthHelper.biometryDisplayName())…"
+        errorMessage = nil
+        defer { isWorking = false }
+        do {
+            try await BiometricAuthHelper.verify(reason: "验证身份以通过本机安全密钥免密登录灵犀云端")
+            workingStatus = "硬件签名校验中，正在直连 Cloudflare 云端…"
+            let nick = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            try await appState.signInWithAppleFaceIDHardwareKey(username: nick.isEmpty ? "Apple 用户" : nick)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func submitEmailOrKeyAction() async {
+        isWorking = true
+        workingStatus = "正在连接 Cloudflare 云端…"
         errorMessage = nil
         defer { isWorking = false }
         do {

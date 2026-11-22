@@ -36,6 +36,6 @@ struct ContentView: View {
                 }
                 .tag(4)
         }
-        .tint(Color(Design.Palette.ink))
+        .tint(Color(Design.Palette.accent))
     }
 }

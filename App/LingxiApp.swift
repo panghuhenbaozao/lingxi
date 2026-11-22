@@ -10,6 +10,13 @@ struct LingxiApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
+                .onOpenURL { url in
+                    if url.scheme == "lingxi", url.host == "auth-callback" {
+                        Task {
+                            try? await appState.completeApplePasskeySignIn(callbackURL: url)
+                        }
+                    }
+                }
                 .onChange(of: scenePhase) { newPhase in
                     if newPhase == .active {
                         appState.refreshAll()

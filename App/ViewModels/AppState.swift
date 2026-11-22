@@ -28,6 +28,10 @@ final class AppState: ObservableObject {
     @Published var habitProfile: UserTypingHabitProfile = TypingHabitTracker.shared.currentProfile()
     @Published var aiInsightReport: AIAutoInsightReport? = AIAutoInsightService.loadCachedReport()
     @Published var isRunningAIInsight: Bool = false
+    @Published var isFetchingAIModels: Bool = false
+    @Published var isCloningStyleDNA: Bool = false
+    @Published var aiUsageLedger: [AIUsageLedgerEntry] = []
+    @Published var secureVaultItems: [SecureVaultItem] = []
     @Published var isCloudAuthenticated: Bool = false
     @Published var activeCustomerAPIKey: String = ""
     @Published var clipboardItems: [ClipboardItem] = []
@@ -67,6 +71,8 @@ final class AppState: ObservableObject {
         quickPhrases = QuickPhraseStore.load()
         customWords = CustomWordStore.load(force: true)
         userWords = lexicon.allEntries(limit: 250)
+        secureVaultItems = SecureSnippetVault.loadAll()
+        aiUsageLedger = AIUsageLedgerStore.load()
         isKeyboardEnabled = checkKeyboardEnabled()
         loadCustomBackgroundPreview()
         loadUserAvatar()
@@ -287,6 +293,68 @@ final class AppState: ObservableObject {
         _ = try await CloudBackendClient.shared.signInWithApple(identityToken: identityToken, user: user)
         refreshAll()
         _ = try? await syncCloudNow()
+    }
+
+    func completeApplePasskeySignIn(callbackURL: URL) async throws {
+        _ = try CloudBackendClient.shared.completeApplePasskeyCallback(url: callbackURL)
+        refreshAll()
+        _ = try? await syncCloudNow()
+    }
+
+    func signInWithAppleFaceIDHardwareKey(username: String = "Apple 用户") async throws {
+        _ = try await CloudBackendClient.shared.signInWithAppleHardwareKey(username: username)
+        refreshAll()
+        _ = try? await syncCloudNow()
+    }
+
+    // MARK: - AI 模型拉取、多渠道配置、文风 DNA 与上下文卡
+
+    @discardableResult
+    func fetchAvailableAIModels() async throws -> [AIModelInfo] {
+        isFetchingAIModels = true
+        defer { isFetchingAIModels = false }
+        let snapshot = aiConfig
+        let models = try await AIClient(timeout: 25).fetchModels(config: snapshot)
+        aiConfig.fetchedModels = models
+        return models
+    }
+
+    @discardableResult
+    func cloneStyleDNA(fromSamples samples: String) async -> PersonalStyleDNA {
+        isCloningStyleDNA = true
+        defer { isCloningStyleDNA = false }
+        let dna = await AIAutoInsightService.cloneStyleDNA(fromSamples: samples, config: aiConfig)
+        aiConfig.styleDNA = dna
+        return dna
+    }
+
+    func upsertContextCard(_ card: PersonalContextCard) {
+        if let idx = aiConfig.contextCards.firstIndex(where: { $0.id == card.id }) {
+            aiConfig.contextCards[idx] = card
+        } else {
+            aiConfig.contextCards.insert(card, at: 0)
+        }
+    }
+
+    func deleteContextCard(id: String) {
+        aiConfig.contextCards.removeAll { $0.id == id }
+    }
+
+    func clearAIUsageLedger() {
+        AIUsageLedgerStore.clear()
+        aiUsageLedger = []
+    }
+
+    // MARK: - 本地 Face ID 加密保险箱（绝不上云）
+
+    func upsertVaultItem(_ item: SecureVaultItem) {
+        SecureSnippetVault.upsert(item)
+        secureVaultItems = SecureSnippetVault.loadAll()
+    }
+
+    func deleteVaultItem(id: String) {
+        SecureSnippetVault.delete(id: id)
+        secureVaultItems = SecureSnippetVault.loadAll()
     }
 
     func createQuickLocalAccount(username: String = "灵犀用户") {

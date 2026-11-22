@@ -2,7 +2,7 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// Apple ID 风格「灵犀账号与云服务」管理页（原生 InsetGrouped 清晰分组，头像支持从相册更换）。
+/// Apple ID 风格「灵犀账号与云服务」管理页（原生 InsetGrouped 清晰分组，10 类数据透明上云看板 + Apple Passkey/Face ID）。
 struct CloudAccountView: View {
     @EnvironmentObject private var appState: AppState
 
@@ -12,6 +12,7 @@ struct CloudAccountView: View {
     @State private var statusBanner: String?
     @State private var errorBanner: String?
     @State private var appliedRecIDs: Set<String> = []
+    @State private var showAllNamespaces: Bool = true
 
     // 跨屏剪贴板接力 (6位码 + SSE)
     @State private var relayPairCode: String = ClipboardRelayConfig.load().pairCode
@@ -45,17 +46,29 @@ struct CloudAccountView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
 
-                            if appState.cloudConfig.isLocalOnlyAccount {
-                                Text("本机加密账号 · 无需服务器即可使用，接入自建服务端可随时云同步")
+                            HStack(spacing: 6) {
+                                Image(systemName: appState.cloudConfig.isLocalOnlyAccount ? "iphone" : "icloud.fill")
+                                    .font(.caption2)
+                                Text(appState.cloudConfig.isLocalOnlyAccount
+                                     ? "本机离线加密档案（可随时升级 Cloudflare 云同步）"
+                                     : "已连接 Cloudflare 全球云端 · E2EE 端到端加密")
                                     .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(Color(Design.Palette.surface))
-                                    .clipShape(Capsule())
+                            }
+                            .foregroundStyle(appState.cloudConfig.isLocalOnlyAccount ? Color.secondary : Color(Design.Palette.accent))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(appState.cloudConfig.isLocalOnlyAccount ? Color(Design.Palette.surface) : Color(Design.Palette.accentSoft))
+                            .clipShape(Capsule())
+
+                            if appState.cloudConfig.isLocalOnlyAccount {
+                                Button("升级为 Apple 通行密钥 / 云端账号") {
+                                    showSignInSheet = true
+                                }
+                                .font(.caption.bold())
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .padding(.top, 2)
                             }
 
-                            // 6 组苹果风格字母头像色盘快速切换
                             if appState.userAvatarImage == nil {
                                 HStack(spacing: 10) {
                                     ForEach(Array(UserAvatarView.avatarGradients.enumerated()), id: \.offset) { idx, item in
@@ -67,7 +80,7 @@ struct CloudAccountView: View {
                                                 .frame(width: 20, height: 20)
                                                 .overlay(
                                                     Circle()
-                                                        .stroke(Color(Design.Palette.ink), lineWidth: appState.cloudConfig.avatarThemeIndex == idx ? 2 : 0)
+                                                        .stroke(Color(Design.Palette.accent), lineWidth: appState.cloudConfig.avatarThemeIndex == idx ? 2 : 0)
                                                         .padding(-2)
                                                 )
                                         }
@@ -78,24 +91,27 @@ struct CloudAccountView: View {
                             }
                         }
                     } else {
-                        VStack(spacing: 6) {
-                            Text("未登录灵犀账号")
+                        VStack(spacing: 8) {
+                            Text("未登录灵犀云端账号")
                                 .font(.title3.bold())
                                 .foregroundStyle(Color(Design.Palette.ink))
-                            Text("登录以开启端到端零知识同步；未登录不影响本地全功能免费使用。")
+                            Text("支持 Apple iCloud 通行密钥、面容 ID 免密与邮箱登录，端到端加密同步 10 类核心数据。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                             Button {
                                 showSignInSheet = true
                             } label: {
-                                Text("登录或创建灵犀账号")
-                                    .font(.subheadline.weight(.semibold))
-                                    .padding(.horizontal, 22)
-                                    .padding(.vertical, 10)
-                                    .background(Color(Design.Palette.ink))
-                                    .foregroundStyle(Color(Design.Palette.canvas))
-                                    .clipShape(Capsule())
+                                HStack(spacing: 6) {
+                                    Image(systemName: "apple.logo")
+                                    Text("Apple 通行密钥 / 面容 ID 登录")
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .background(Color(Design.Palette.accent))
+                                .foregroundStyle(Color.white)
+                                .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                             .padding(.top, 4)
@@ -129,34 +145,78 @@ struct CloudAccountView: View {
                 }
             }
 
-            // 2. 端到端云同步（iCloud 风格清晰列表）
+            // 2. 10 类核心数据云端同步透明看板
             Section {
-                Toggle("变更时自动后台加密同步", isOn: $appState.cloudConfig.autoSyncEnabled)
-                LabeledContent("个人自造词库", value: "\(appState.userWords.count) 条")
-                LabeledContent("自定义编码短语", value: "\(appState.customWords.count) 条")
-                LabeledContent("常用快捷短语", value: "\(appState.quickPhrases.count) 条")
-                LabeledContent("输入方案与布局", value: "\(appState.settings.inputScheme.displayName) · \(appState.settings.layoutMode.displayName)")
-                LabeledContent("键盘外观主题", value: appState.theme.appearanceMode.displayName)
+                Toggle("数据变化时自动加密传回云端", isOn: $appState.cloudConfig.autoSyncEnabled)
+
+                let summaries = CloudBackendClient.shared.syncNamespaceDashboardSummary()
+                let syncedCount = summaries.filter(\.isSynced).count
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("已加密上云进度：\(syncedCount) / \(summaries.count) 类核心数据")
+                            .font(.subheadline.bold())
+                        if let lastAt = appState.cloudConfig.lastSyncedAt {
+                            Text("最近同步：\(lastAt, style: .relative)前 · \(appState.cloudConfig.lastSyncSummary)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("登录后点下方按钮即可将 10 类关键数据全量 E2EE 备份至 Cloudflare D1")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 2)
 
                 Button {
                     Task { await triggerSyncNow() }
                 } label: {
                     HStack {
-                        Label(isWorking ? "正在同步…" : "立即端到端同步", systemImage: "arrow.triangle.2.circlepath")
-                        Spacer()
-                        if !appState.cloudConfig.lastSyncSummary.isEmpty {
-                            Text(appState.cloudConfig.lastSyncSummary)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                        if isWorking {
+                            ProgressView().padding(.trailing, 4)
+                        } else {
+                            Image(systemName: "icloud.and.arrow.up.fill")
                         }
+                        Text(isWorking ? "正在加密同步 10 类数据与习惯…" : "立即全量端到端同步")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
                     }
+                    .foregroundStyle(Color(Design.Palette.accent))
                 }
                 .disabled(isWorking)
+
+                DisclosureGroup("展开 10 类同步数据透明明细", isExpanded: $showAllNamespaces) {
+                    ForEach(summaries) { item in
+                        HStack(spacing: 10) {
+                            Image(systemName: item.icon)
+                                .font(.subheadline)
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.subheadline.weight(.medium))
+                                Text(item.localCountLabel)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(item.isSynced ? "已上云 ✓" : "待同步")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(item.isSynced ? Color(Design.Palette.success).opacity(0.14) : Color(Design.Palette.surface))
+                                .foregroundStyle(item.isSynced ? Color(Design.Palette.success) : Color.secondary)
+                                .clipShape(Capsule())
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
             } header: {
-                Text("端到端零知识同步 (E2EE · LXE1)")
+                Text("端到端零知识同步透明看板 (E2EE · LXE1)")
             } footer: {
-                Text("词库、短语、设置与皮肤在端侧经 ChaCha20-Poly1305 / AES-256-GCM 加密后上传，服务端数学上无法解密您的内容。")
+                Text("10 类关键资产（词库/提示词/文风DNA/按键映射/设置/主题/短语/表情/统计）端侧加密后传回 Cloudflare D1；AI API 密钥与 Face ID 本地敏感保险箱永远留存本机，绝不上云。")
             }
 
             // 3. 跨设备 6 位匹配码实时剪贴板接力 (SSE)
@@ -186,7 +246,7 @@ struct CloudAccountView: View {
                     }
                     .font(.caption.bold())
                     .buttonStyle(.borderedProminent)
-                    .tint(Color(Design.Palette.ink))
+                    .tint(Color(Design.Palette.accent))
                 }
 
                 Button("立即拉取跨屏剪贴板与验证码") {
@@ -204,8 +264,8 @@ struct CloudAccountView: View {
                                     .font(.caption2.bold().monospacedDigit())
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Color(Design.Palette.ink))
-                                    .foregroundStyle(Color(Design.Palette.canvas))
+                                    .background(Color(Design.Palette.accent))
+                                    .foregroundStyle(Color.white)
                                     .clipShape(Capsule())
                             }
                         }
@@ -220,9 +280,9 @@ struct CloudAccountView: View {
                 Text("在电脑浏览器打开 Web 控制台 (\(appState.cloudConfig.normalizedBaseURL)/dashboard) 输入相同 6 位匹配码即可免登录双向秒传。")
             }
 
-            // 4. 实时打字习惯画像与隐私授权（独立开关，默认关闭）
+            // 4. 实时打字习惯画像与隐私授权（独立开关）
             Section {
-                Toggle("开启脱敏打字习惯与 API 实时分析", isOn: $appState.cloudConfig.habitAnalysisEnabled)
+                Toggle("同步脱敏打字习惯画像至云端自学习引擎", isOn: $appState.cloudConfig.habitAnalysisEnabled)
                     .onChange(of: appState.cloudConfig.habitAnalysisEnabled) { granted in
                         Task {
                             await CloudBackendClient.shared.syncConsentToServer(scope: "typing_analytics", granted: granted)
@@ -259,7 +319,7 @@ struct CloudAccountView: View {
                     }
                 }
             } header: {
-                Text("打字习惯画像分析（默认关闭 · 零原文）")
+                Text("云端打字习惯自学习（仅统计数值 · 零打字原文）")
             }
 
             // 5. 安全、API Key、自托管与 GDPR 合规
@@ -314,7 +374,7 @@ struct CloudAccountView: View {
                 Text("安全、合规与自托管网关")
             }
 
-            // 6. 退出与注销（对齐 Apple ID 底部红色退出区）
+            // 6. 退出与注销
             if appState.isCloudAuthenticated {
                 Section {
                     Button("退出登录", role: .destructive) {
@@ -365,7 +425,7 @@ struct CloudAccountView: View {
                 Task { await performCascadeAccountDeletion() }
             }
         } message: {
-            Text("将在服务端级联物理删除您的账号、全部 E2EE 密文同步库、会话与习惯画像，无法恢复。本机离线词库不受影响。")
+            Text("将在服务端级联物理删除您的账号、通行密钥凭证、全部 E2EE 密文同步库、会话与习惯画像，无法恢复。本机离线词库不受影响。")
         }
     }
 
@@ -398,8 +458,6 @@ struct CloudAccountView: View {
             }
         }
     }
-
-    // MARK: - 交互逻辑
 
     private func startSSEStream() {
         relayStreamTask?.cancel()
@@ -458,8 +516,8 @@ struct CloudAccountView: View {
         defer { isWorking = false }
         do {
             let info = try await CloudBackendClient.shared.checkServerHealth()
-            let ver = (info["version"] as? String) ?? "4.0"
-            statusBanner = "后端服务在线 (v\(ver)) · 可随时登录或使用跨屏剪贴板"
+            let ver = (info["version"] as? String) ?? "5.0.0"
+            statusBanner = "后端服务在线 (v\(ver)) · Apple Passkey 与 10 类云同步均已就绪"
         } catch {
             errorBanner = error.localizedDescription
         }

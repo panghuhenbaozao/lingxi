@@ -67,7 +67,7 @@ struct HexColor: Codable, Equatable, Hashable {
     }
 }
 
-/// 一套完整的键盘配色与外观规范。
+/// 一套完整的键盘配色与外观规范（对标 Apple iOS 原生视觉层次与 WCAG 高对比标准）。
 struct KeyboardThemePreset: Codable, Identifiable, Equatable {
     let id: String
     let name: String
@@ -91,181 +91,272 @@ struct KeyboardThemePreset: Codable, Identifiable, Equatable {
     let keyShadowOpacity: Double
 
     static let presets: [KeyboardThemePreset] = [
+        // MARK: - 浅色护眼系列（6 套）
         KeyboardThemePreset(
             id: "lingxi_pure",
-            name: "极简纯白",
-            subtitle: "苹果质感 · 纯白圆角键帽",
+            name: "苹果原生白",
+            subtitle: "iOS 原生层次 · 纯白立体键帽",
             isDark: false,
-            canvasTop: HexColor("#EAECEF"),
-            canvasBottom: HexColor("#E2E5EA"),
-            toolbarBackground: HexColor("#F7F8FA"),
+            canvasTop: HexColor("#D2D5DB"),
+            canvasBottom: HexColor("#CCD0D7"),
+            toolbarBackground: HexColor("#E5E7EC"),
             keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#DCE0E8"),
-            specialKeyFill: HexColor("#D6DBE3"),
-            specialKeyPressedFill: HexColor("#C1C8D3"),
-            accentFill: HexColor("#0A0A0A"),
-            accentPressedFill: HexColor("#222222"),
-            keyText: HexColor("#0A0A0A"),
-            keyHintText: HexColor("#6E6E73"),
-            accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#0A0A0A"),
-            candidateHighlight: HexColor("#0A0A0A"),
-            keyShadowHex: HexColor("#8C929C"),
-            keyShadowOpacity: 0.30
-        ),
-        KeyboardThemePreset(
-            id: "cloud_snow",
-            name: "雪域全白",
-            subtitle: "通体雪白 · 苹果蓝点缀",
-            isDark: false,
-            canvasTop: HexColor("#F4F5F7"),
-            canvasBottom: HexColor("#ECEEF2"),
-            toolbarBackground: HexColor("#FFFFFF"),
-            keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#E6EAF0"),
-            specialKeyFill: HexColor("#E5E8EE"),
-            specialKeyPressedFill: HexColor("#D3D8E2"),
+            keyPressedFill: HexColor("#E3E6EC"),
+            specialKeyFill: HexColor("#AEB4C0"),
+            specialKeyPressedFill: HexColor("#99A0AE"),
             accentFill: HexColor("#007AFF"),
             accentPressedFill: HexColor("#0062CC"),
-            keyText: HexColor("#111111"),
-            keyHintText: HexColor("#787C84"),
+            keyText: HexColor("#000000"),
+            keyHintText: HexColor("#5C6068"),
             accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#111111"),
+            candidateText: HexColor("#111214"),
             candidateHighlight: HexColor("#007AFF"),
-            keyShadowHex: HexColor("#949BA6"),
-            keyShadowOpacity: 0.26
-        ),
-        KeyboardThemePreset(
-            id: "lingxi_light",
-            name: "灵犀白昼",
-            subtitle: "通透磨砂 · 清晰护眼",
-            isDark: false,
-            canvasTop: HexColor("#EEF2F7"),
-            canvasBottom: HexColor("#E2E7EF"),
-            toolbarBackground: HexColor("#F7F9FC"),
-            keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#DCE4F0"),
-            specialKeyFill: HexColor("#CED6E3"),
-            specialKeyPressedFill: HexColor("#B6C2D4"),
-            accentFill: HexColor("#2F6FED"),
-            accentPressedFill: HexColor("#1E57C8"),
-            keyText: HexColor("#111827"),
-            keyHintText: HexColor("#7A869A"),
-            accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#1F2937"),
-            candidateHighlight: HexColor("#2F6FED"),
-            keyShadowHex: HexColor("#1E293B"),
-            keyShadowOpacity: 0.16
-        ),
-        KeyboardThemePreset(
-            id: "midnight_geek",
-            name: "暗夜极客",
-            subtitle: "深邃石墨 · 夜间首选",
-            isDark: true,
-            canvasTop: HexColor("#181A20"),
-            canvasBottom: HexColor("#111318"),
-            toolbarBackground: HexColor("#1E2129"),
-            keyFill: HexColor("#2B303C"),
-            keyPressedFill: HexColor("#3F4759"),
-            specialKeyFill: HexColor("#20242E"),
-            specialKeyPressedFill: HexColor("#323846"),
-            accentFill: HexColor("#4F8BFF"),
-            accentPressedFill: HexColor("#3872E0"),
-            keyText: HexColor("#F3F4F6"),
-            keyHintText: HexColor("#8E98AB"),
-            accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#E5E7EB"),
-            candidateHighlight: HexColor("#6EA1FF"),
-            keyShadowHex: HexColor("#000000"),
+            keyShadowHex: HexColor("#898A8D"),
             keyShadowOpacity: 0.42
         ),
         KeyboardThemePreset(
-            id: "sakura_mist",
-            name: "樱花微醺",
-            subtitle: "柔粉渐变 · 轻甜质感",
+            id: "cloud_snow",
+            name: "雪域轻白",
+            subtitle: "通透轻盈 · 柔和浅灰底板",
             isDark: false,
-            canvasTop: HexColor("#FDF2F6"),
-            canvasBottom: HexColor("#F8E1EC"),
-            toolbarBackground: HexColor("#FFF7FA"),
+            canvasTop: HexColor("#E9ECEF"),
+            canvasBottom: HexColor("#E1E5EA"),
+            toolbarBackground: HexColor("#F5F6F8"),
             keyFill: HexColor("#FFFFFF"),
-            keyPressedFill: HexColor("#FAD7E5"),
-            specialKeyFill: HexColor("#F2CEDD"),
-            specialKeyPressedFill: HexColor("#E7B4CA"),
-            accentFill: HexColor("#E85D93"),
-            accentPressedFill: HexColor("#CC447A"),
-            keyText: HexColor("#432333"),
-            keyHintText: HexColor("#A4798E"),
+            keyPressedFill: HexColor("#DDE2E9"),
+            specialKeyFill: HexColor("#D3D8E0"),
+            specialKeyPressedFill: HexColor("#BFC6D1"),
+            accentFill: HexColor("#007AFF"),
+            accentPressedFill: HexColor("#005EC4"),
+            keyText: HexColor("#111318"),
+            keyHintText: HexColor("#636872"),
             accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#4A2537"),
-            candidateHighlight: HexColor("#D94680"),
-            keyShadowHex: HexColor("#832B52"),
-            keyShadowOpacity: 0.14
+            candidateText: HexColor("#111318"),
+            candidateHighlight: HexColor("#007AFF"),
+            keyShadowHex: HexColor("#8D95A2"),
+            keyShadowOpacity: 0.30
+        ),
+        KeyboardThemePreset(
+            id: "warm_paper",
+            name: "暖纸护眼",
+            subtitle: "墨水屏柔和米白 · 久打不累眼",
+            isDark: false,
+            canvasTop: HexColor("#E6E1D8"),
+            canvasBottom: HexColor("#DDD7CC"),
+            toolbarBackground: HexColor("#F2EFE9"),
+            keyFill: HexColor("#FBF9F5"),
+            keyPressedFill: HexColor("#EAE3D7"),
+            specialKeyFill: HexColor("#D5CEC2"),
+            specialKeyPressedFill: HexColor("#C3BAB0"),
+            accentFill: HexColor("#B86B2B"),
+            accentPressedFill: HexColor("#995721"),
+            keyText: HexColor("#231F1B"),
+            keyHintText: HexColor("#746B61"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#231F1B"),
+            candidateHighlight: HexColor("#A85E22"),
+            keyShadowHex: HexColor("#8F8679"),
+            keyShadowOpacity: 0.32
+        ),
+        KeyboardThemePreset(
+            id: "lingxi_light",
+            name: "冰川雾蓝",
+            subtitle: "清澈蓝灰 · 精致商务风",
+            isDark: false,
+            canvasTop: HexColor("#DCE4EE"),
+            canvasBottom: HexColor("#D1DCE8"),
+            toolbarBackground: HexColor("#EDF2F8"),
+            keyFill: HexColor("#FFFFFF"),
+            keyPressedFill: HexColor("#D4E1F2"),
+            specialKeyFill: HexColor("#B8C7DA"),
+            specialKeyPressedFill: HexColor("#A2B4CC"),
+            accentFill: HexColor("#2563EB"),
+            accentPressedFill: HexColor("#1D4ED8"),
+            keyText: HexColor("#0F172A"),
+            keyHintText: HexColor("#5B6B82"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#0F172A"),
+            candidateHighlight: HexColor("#2563EB"),
+            keyShadowHex: HexColor("#7A8FA8"),
+            keyShadowOpacity: 0.32
         ),
         KeyboardThemePreset(
             id: "morandi_sage",
-            name: "莫兰迪青",
-            subtitle: "静谧松烟 · 低饱和高级感",
+            name: "抹茶松烟",
+            subtitle: "低饱和青翠 · 清新宁静",
             isDark: false,
-            canvasTop: HexColor("#E8EFEA"),
-            canvasBottom: HexColor("#D9E4DC"),
-            toolbarBackground: HexColor("#F2F6F3"),
+            canvasTop: HexColor("#DCE6DF"),
+            canvasBottom: HexColor("#D0DDD4"),
+            toolbarBackground: HexColor("#ECF2EE"),
             keyFill: HexColor("#FAFDFB"),
-            keyPressedFill: HexColor("#CFE0D5"),
-            specialKeyFill: HexColor("#C3D2C8"),
-            specialKeyPressedFill: HexColor("#ACBFB3"),
-            accentFill: HexColor("#3A7D62"),
-            accentPressedFill: HexColor("#2B624C"),
-            keyText: HexColor("#1E3129"),
-            keyHintText: HexColor("#6F877B"),
+            keyPressedFill: HexColor("#CBE0D2"),
+            specialKeyFill: HexColor("#B5C9BC"),
+            specialKeyPressedFill: HexColor("#9FB8A8"),
+            accentFill: HexColor("#2E7D5B"),
+            accentPressedFill: HexColor("#226146"),
+            keyText: HexColor("#182B22"),
+            keyHintText: HexColor("#5B7467"),
             accentText: HexColor("#FFFFFF"),
-            candidateText: HexColor("#1E3129"),
-            candidateHighlight: HexColor("#2E6F54"),
-            keyShadowHex: HexColor("#1C3429"),
-            keyShadowOpacity: 0.15
+            candidateText: HexColor("#182B22"),
+            candidateHighlight: HexColor("#246C4D"),
+            keyShadowHex: HexColor("#6F8779"),
+            keyShadowOpacity: 0.28
         ),
         KeyboardThemePreset(
-            id: "cyber_neon",
-            name: "赛博霓虹",
-            subtitle: "电光青紫 · 赛博未来",
+            id: "sakura_mist",
+            name: "柔粉樱云",
+            subtitle: "浅粉柔和 · 温润轻甜",
+            isDark: false,
+            canvasTop: HexColor("#F2DFE7"),
+            canvasBottom: HexColor("#EAD2DC"),
+            toolbarBackground: HexColor("#FAF0F4"),
+            keyFill: HexColor("#FFFFFF"),
+            keyPressedFill: HexColor("#F5D0DF"),
+            specialKeyFill: HexColor("#DFBDCB"),
+            specialKeyPressedFill: HexColor("#CFA3B5"),
+            accentFill: HexColor("#D94E86"),
+            accentPressedFill: HexColor("#BA3A6E"),
+            keyText: HexColor("#3A1D2B"),
+            keyHintText: HexColor("#8A6275"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#3A1D2B"),
+            candidateHighlight: HexColor("#C73E76"),
+            keyShadowHex: HexColor("#9A6B7F"),
+            keyShadowOpacity: 0.26
+        ),
+
+        // MARK: - 深色舒适系列（6 套 · 高对比度键帽，拒绝一团黑）
+        KeyboardThemePreset(
+            id: "midnight_geek",
+            name: "苹果原生暗",
+            subtitle: "iOS 暗黑精校 · 通透清晰不刺眼",
             isDark: true,
-            canvasTop: HexColor("#0D0F1D"),
-            canvasBottom: HexColor("#16112B"),
-            toolbarBackground: HexColor("#14162B"),
-            keyFill: HexColor("#202442"),
-            keyPressedFill: HexColor("#352C68"),
-            specialKeyFill: HexColor("#171A33"),
-            specialKeyPressedFill: HexColor("#292552"),
-            accentFill: HexColor("#00D1B2"),
-            accentPressedFill: HexColor("#00A88F"),
-            keyText: HexColor("#ECFEFF"),
-            keyHintText: HexColor("#7A88C2"),
-            accentText: HexColor("#081C1B"),
-            candidateText: HexColor("#E0F7FA"),
-            candidateHighlight: HexColor("#2CEAA3"),
-            keyShadowHex: HexColor("#04050E"),
-            keyShadowOpacity: 0.52
+            canvasTop: HexColor("#1C1C1E"),
+            canvasBottom: HexColor("#171719"),
+            toolbarBackground: HexColor("#242426"),
+            keyFill: HexColor("#56565A"),
+            keyPressedFill: HexColor("#707075"),
+            specialKeyFill: HexColor("#3A3A3E"),
+            specialKeyPressedFill: HexColor("#505056"),
+            accentFill: HexColor("#0A84FF"),
+            accentPressedFill: HexColor("#006BE0"),
+            keyText: HexColor("#FFFFFF"),
+            keyHintText: HexColor("#C2C2C8"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#F2F2F7"),
+            candidateHighlight: HexColor("#4DA3FF"),
+            keyShadowHex: HexColor("#000000"),
+            keyShadowOpacity: 0.48
+        ),
+        KeyboardThemePreset(
+            id: "true_oled",
+            name: "午夜 OLED 黑",
+            subtitle: "纯黑省电 · 浮雕灰键清晰利落",
+            isDark: true,
+            canvasTop: HexColor("#09090B"),
+            canvasBottom: HexColor("#000000"),
+            toolbarBackground: HexColor("#121215"),
+            keyFill: HexColor("#343439"),
+            keyPressedFill: HexColor("#4D4D54"),
+            specialKeyFill: HexColor("#222226"),
+            specialKeyPressedFill: HexColor("#38383F"),
+            accentFill: HexColor("#0A84FF"),
+            accentPressedFill: HexColor("#0068D6"),
+            keyText: HexColor("#FFFFFF"),
+            keyHintText: HexColor("#AEAEB5"),
+            accentText: HexColor("#FFFFFF"),
+            candidateText: HexColor("#F5F5F7"),
+            candidateHighlight: HexColor("#52A6FF"),
+            keyShadowHex: HexColor("#000000"),
+            keyShadowOpacity: 0.60
+        ),
+        KeyboardThemePreset(
+            id: "deep_ocean",
+            name: "深海青黛",
+            subtitle: "沉静靛蓝 · 夜间护眼专注",
+            isDark: true,
+            canvasTop: HexColor("#151C26"),
+            canvasBottom: HexColor("#10161F"),
+            toolbarBackground: HexColor("#1B2430"),
+            keyFill: HexColor("#354459"),
+            keyPressedFill: HexColor("#4A5D78"),
+            specialKeyFill: HexColor("#243040"),
+            specialKeyPressedFill: HexColor("#344459"),
+            accentFill: HexColor("#38BDF8"),
+            accentPressedFill: HexColor("#0EA5E9"),
+            keyText: HexColor("#F8FAFC"),
+            keyHintText: HexColor("#AFC0D6"),
+            accentText: HexColor("#081B29"),
+            candidateText: HexColor("#F1F5F9"),
+            candidateHighlight: HexColor("#5CCBFF"),
+            keyShadowHex: HexColor("#060A10"),
+            keyShadowOpacity: 0.50
         ),
         KeyboardThemePreset(
             id: "obsidian_gold",
-            name: "黑金殿堂",
-            subtitle: "曜石哑光 · 鎏金点缀",
+            name: "石墨曜金",
+            subtitle: "暖灰炭石 · 鎏金高级质感",
             isDark: true,
-            canvasTop: HexColor("#161412"),
-            canvasBottom: HexColor("#0E0D0B"),
-            toolbarBackground: HexColor("#1C1A17"),
-            keyFill: HexColor("#282520"),
-            keyPressedFill: HexColor("#3F382D"),
-            specialKeyFill: HexColor("#1E1C18"),
-            specialKeyPressedFill: HexColor("#322D25"),
-            accentFill: HexColor("#D4A74A"),
-            accentPressedFill: HexColor("#B68A32"),
-            keyText: HexColor("#F5EFE4"),
-            keyHintText: HexColor("#9C907D"),
+            canvasTop: HexColor("#1B1917"),
+            canvasBottom: HexColor("#141210"),
+            toolbarBackground: HexColor("#24211E"),
+            keyFill: HexColor("#47423B"),
+            keyPressedFill: HexColor("#5F574D"),
+            specialKeyFill: HexColor("#312D28"),
+            specialKeyPressedFill: HexColor("#464039"),
+            accentFill: HexColor("#E0B24F"),
+            accentPressedFill: HexColor("#C49635"),
+            keyText: HexColor("#FAF5EC"),
+            keyHintText: HexColor("#C7BCA9"),
             accentText: HexColor("#1A1408"),
-            candidateText: HexColor("#F3EBDC"),
-            candidateHighlight: HexColor("#E5BA5C"),
+            candidateText: HexColor("#F7F0E4"),
+            candidateHighlight: HexColor("#F0C565"),
             keyShadowHex: HexColor("#000000"),
-            keyShadowOpacity: 0.48
+            keyShadowOpacity: 0.50
+        ),
+        KeyboardThemePreset(
+            id: "cyber_neon",
+            name: "赛博极光",
+            subtitle: "靛紫电光 · 高对比霓虹键帽",
+            isDark: true,
+            canvasTop: HexColor("#121526"),
+            canvasBottom: HexColor("#191430"),
+            toolbarBackground: HexColor("#1B1E36"),
+            keyFill: HexColor("#353A63"),
+            keyPressedFill: HexColor("#4D528A"),
+            specialKeyFill: HexColor("#242847"),
+            specialKeyPressedFill: HexColor("#373B66"),
+            accentFill: HexColor("#00D9B8"),
+            accentPressedFill: HexColor("#00B398"),
+            keyText: HexColor("#F2FEFF"),
+            keyHintText: HexColor("#AEB8E8"),
+            accentText: HexColor("#061E1B"),
+            candidateText: HexColor("#ECFEFF"),
+            candidateHighlight: HexColor("#34F2C4"),
+            keyShadowHex: HexColor("#050610"),
+            keyShadowOpacity: 0.52
+        ),
+        KeyboardThemePreset(
+            id: "forest_night",
+            name: "暗夜松林",
+            subtitle: "深苔墨绿 · 温和不刺眼",
+            isDark: true,
+            canvasTop: HexColor("#141E19"),
+            canvasBottom: HexColor("#0F1713"),
+            toolbarBackground: HexColor("#1B2821"),
+            keyFill: HexColor("#344A3E"),
+            keyPressedFill: HexColor("#496656"),
+            specialKeyFill: HexColor("#23342B"),
+            specialKeyPressedFill: HexColor("#334B3E"),
+            accentFill: HexColor("#34D399"),
+            accentPressedFill: HexColor("#10B981"),
+            keyText: HexColor("#F0FDF6"),
+            keyHintText: HexColor("#A8C9B7"),
+            accentText: HexColor("#062116"),
+            candidateText: HexColor("#ECFDF5"),
+            candidateHighlight: HexColor("#4EE3AB"),
+            keyShadowHex: HexColor("#050A07"),
+            keyShadowOpacity: 0.50
         ),
     ]
 
@@ -291,22 +382,32 @@ enum KeyboardAppearanceMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// 用户皮肤自定义配置（支持预设切换、跟随系统自动配对，以及自由调色板自定义色值）。
+/// 用户皮肤自定义配置（支持预设切换、跟随系统自动配对，以及浅色/深色独立自由调色板）。
 struct ThemeCustomization: Codable, Equatable {
     var selectedThemeID: String = "lingxi_pure"
     var lightThemeID: String = "lingxi_pure"
     var darkThemeID: String = "midnight_geek"
     var adaptiveDarkMode: Bool = true
     var appearanceMode: KeyboardAppearanceMode = .followSystem
+
+    // 浅色（或传统统一）自定义调色
     var customCanvasHex: String? = nil
     var customKeyFillHex: String? = nil
     var customKeyTextHex: String? = nil
     var customAccentHex: String? = nil
+
+    // 深色独立自由调色（跟随系统或深色模式下互不干扰）
+    var customDarkCanvasHex: String? = nil
+    var customDarkKeyFillHex: String? = nil
+    var customDarkKeyTextHex: String? = nil
+    var customDarkAccentHex: String? = nil
+
     var customBackgroundFileName: String? = nil
     var backgroundBlurRadius: Double = 8.0
     var backgroundDimOpacity: Double = 0.25
     var keyOpacity: Double = 0.96
-    var keyCornerRadius: Double = 8.0
+    var keyCornerRadius: Double = 7.0
+    var keyShadowScale: Double = 1.0
     var boldKeyLabel: Bool = false
 
     private static let fileName = "lingxi_theme.json"
@@ -335,16 +436,29 @@ struct ThemeCustomization: Codable, Equatable {
         customKeyFillHex = try c.decodeIfPresent(String.self, forKey: .customKeyFillHex)
         customKeyTextHex = try c.decodeIfPresent(String.self, forKey: .customKeyTextHex)
         customAccentHex = try c.decodeIfPresent(String.self, forKey: .customAccentHex)
+        customDarkCanvasHex = try c.decodeIfPresent(String.self, forKey: .customDarkCanvasHex)
+        customDarkKeyFillHex = try c.decodeIfPresent(String.self, forKey: .customDarkKeyFillHex)
+        customDarkKeyTextHex = try c.decodeIfPresent(String.self, forKey: .customDarkKeyTextHex)
+        customDarkAccentHex = try c.decodeIfPresent(String.self, forKey: .customDarkAccentHex)
         customBackgroundFileName = try c.decodeIfPresent(String.self, forKey: .customBackgroundFileName)
         backgroundBlurRadius = try c.decodeIfPresent(Double.self, forKey: .backgroundBlurRadius) ?? 8.0
         backgroundDimOpacity = try c.decodeIfPresent(Double.self, forKey: .backgroundDimOpacity) ?? 0.25
         keyOpacity = try c.decodeIfPresent(Double.self, forKey: .keyOpacity) ?? 0.96
-        keyCornerRadius = try c.decodeIfPresent(Double.self, forKey: .keyCornerRadius) ?? 8.0
+        keyCornerRadius = try c.decodeIfPresent(Double.self, forKey: .keyCornerRadius) ?? 7.0
+        keyShadowScale = try c.decodeIfPresent(Double.self, forKey: .keyShadowScale) ?? 1.0
         boldKeyLabel = try c.decodeIfPresent(Bool.self, forKey: .boldKeyLabel) ?? false
     }
 
-    var hasCustomColorOverrides: Bool {
+    var hasLightCustomOverrides: Bool {
         customCanvasHex != nil || customKeyFillHex != nil || customKeyTextHex != nil || customAccentHex != nil
+    }
+
+    var hasDarkCustomOverrides: Bool {
+        customDarkCanvasHex != nil || customDarkKeyFillHex != nil || customDarkKeyTextHex != nil || customDarkAccentHex != nil
+    }
+
+    var hasCustomColorOverrides: Bool {
+        hasLightCustomOverrides || hasDarkCustomOverrides
     }
 
     mutating func clearCustomColors() {
@@ -352,6 +466,24 @@ struct ThemeCustomization: Codable, Equatable {
         customKeyFillHex = nil
         customKeyTextHex = nil
         customAccentHex = nil
+        customDarkCanvasHex = nil
+        customDarkKeyFillHex = nil
+        customDarkKeyTextHex = nil
+        customDarkAccentHex = nil
+    }
+
+    mutating func clearCustomColors(forDark isDark: Bool) {
+        if isDark {
+            customDarkCanvasHex = nil
+            customDarkKeyFillHex = nil
+            customDarkKeyTextHex = nil
+            customDarkAccentHex = nil
+        } else {
+            customCanvasHex = nil
+            customKeyFillHex = nil
+            customKeyTextHex = nil
+            customAccentHex = nil
+        }
     }
 
     /// 统一的外观模式切换逻辑：切回跟随系统或切换深/浅模式时，自动清理冲突的自定义色覆盖，确保切换 100% 立即生效。
@@ -360,19 +492,19 @@ struct ThemeCustomization: Codable, Equatable {
         adaptiveDarkMode = (mode == .followSystem)
         switch mode {
         case .followSystem:
-            if hasCustomColorOverrides {
-                clearCustomColors()
+            if hasLightCustomOverrides, let c = customCanvasHex, HexColor(c).isDarkColor {
+                clearCustomColors(forDark: false)
             }
         case .alwaysLight:
             if let canvasHex = customCanvasHex, HexColor(canvasHex).isDarkColor {
-                clearCustomColors()
+                clearCustomColors(forDark: false)
             }
             if KeyboardThemePreset.find(id: selectedThemeID).isDark {
                 selectedThemeID = lightThemeID
             }
         case .alwaysDark:
             if let canvasHex = customCanvasHex, !HexColor(canvasHex).isDarkColor {
-                clearCustomColors()
+                clearCustomColors(forDark: false)
             }
             if !KeyboardThemePreset.find(id: selectedThemeID).isDark {
                 selectedThemeID = darkThemeID
@@ -437,37 +569,80 @@ struct ThemeCustomization: Codable, Equatable {
             base = sel.isDark ? sel : KeyboardThemePreset.find(id: darkThemeID)
         }
 
-        guard hasCustomColorOverrides else { return base }
-        let canvasTop = customCanvasHex.map { HexColor($0) } ?? base.canvasTop
-        let effectiveDark = customCanvasHex != nil ? canvasTop.isDarkColor : base.isDark
-        let canvasBottom = customCanvasHex != nil
+        let cCanvas: String?
+        let cKey: String?
+        let cText: String?
+        let cAccent: String?
+        if appearanceMode == .followSystem {
+            if base.isDark {
+                cCanvas = customDarkCanvasHex
+                cKey = customDarkKeyFillHex
+                cText = customDarkKeyTextHex
+                cAccent = customDarkAccentHex
+            } else {
+                cCanvas = customCanvasHex
+                cKey = customKeyFillHex
+                cText = customKeyTextHex
+                cAccent = customAccentHex
+            }
+        } else if base.isDark && hasDarkCustomOverrides {
+            cCanvas = customDarkCanvasHex
+            cKey = customDarkKeyFillHex
+            cText = customDarkKeyTextHex
+            cAccent = customDarkAccentHex
+        } else {
+            cCanvas = customCanvasHex
+            cKey = customKeyFillHex
+            cText = customKeyTextHex
+            cAccent = customAccentHex
+        }
+
+        let hasActiveCustom = (cCanvas != nil || cKey != nil || cText != nil || cAccent != nil)
+        guard hasActiveCustom else {
+            if abs(keyShadowScale - 1.0) < 0.01 { return base }
+            return KeyboardThemePreset(
+                id: base.id, name: base.name, subtitle: base.subtitle, isDark: base.isDark,
+                canvasTop: base.canvasTop, canvasBottom: base.canvasBottom, toolbarBackground: base.toolbarBackground,
+                keyFill: base.keyFill, keyPressedFill: base.keyPressedFill,
+                specialKeyFill: base.specialKeyFill, specialKeyPressedFill: base.specialKeyPressedFill,
+                accentFill: base.accentFill, accentPressedFill: base.accentPressedFill,
+                keyText: base.keyText, keyHintText: base.keyHintText, accentText: base.accentText,
+                candidateText: base.candidateText, candidateHighlight: base.candidateHighlight,
+                keyShadowHex: base.keyShadowHex,
+                keyShadowOpacity: min(0.85, max(0.0, base.keyShadowOpacity * keyShadowScale))
+            )
+        }
+
+        let canvasTop = cCanvas.map { HexColor($0) } ?? base.canvasTop
+        let effectiveDark = cCanvas != nil ? canvasTop.isDarkColor : base.isDark
+        let canvasBottom = cCanvas != nil
             ? canvasTop.adjustedBrightness(by: effectiveDark ? -0.04 : -0.03)
             : base.canvasBottom
-        let toolbarBg = customCanvasHex != nil
-            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.04 : 0.04)
+        let toolbarBg = cCanvas != nil
+            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.05 : 0.05)
             : base.toolbarBackground
 
-        let keyFill = customKeyFillHex.map { HexColor($0) } ?? base.keyFill
-        let keyPressed = customKeyFillHex != nil
+        let keyFill = cKey.map { HexColor($0) } ?? base.keyFill
+        let keyPressed = cKey != nil
             ? keyFill.adjustedBrightness(by: keyFill.isDarkColor ? 0.12 : -0.11)
             : base.keyPressedFill
-        let specialKey = customCanvasHex != nil
-            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.06 : -0.08)
+        let specialKey = cCanvas != nil
+            ? canvasTop.adjustedBrightness(by: effectiveDark ? 0.10 : -0.10)
             : base.specialKeyFill
-        let specialPressed = customCanvasHex != nil
+        let specialPressed = cCanvas != nil
             ? specialKey.adjustedBrightness(by: effectiveDark ? 0.10 : -0.09)
             : base.specialKeyPressedFill
 
-        let keyText = customKeyTextHex.map { HexColor($0) } ?? base.keyText
-        let keyHint = customKeyTextHex != nil
-            ? keyText.adjustedBrightness(by: keyText.isDarkColor ? 0.32 : -0.28)
+        let keyText = cText.map { HexColor($0) } ?? base.keyText
+        let keyHint = cText != nil
+            ? keyText.adjustedBrightness(by: keyText.isDarkColor ? 0.32 : -0.24)
             : base.keyHintText
 
-        let accent = customAccentHex.map { HexColor($0) } ?? base.accentFill
-        let accentPressed = customAccentHex != nil
+        let accent = cAccent.map { HexColor($0) } ?? base.accentFill
+        let accentPressed = cAccent != nil
             ? accent.adjustedBrightness(by: accent.isDarkColor ? 0.12 : -0.12)
             : base.accentPressedFill
-        let accentText = customAccentHex != nil
+        let accentText = cAccent != nil
             ? (accent.isDarkColor ? HexColor("#FFFFFF") : HexColor("#0A0A0A"))
             : base.accentText
 
@@ -491,7 +666,7 @@ struct ThemeCustomization: Codable, Equatable {
             candidateText: keyText,
             candidateHighlight: accent,
             keyShadowHex: effectiveDark ? HexColor("#000000") : HexColor("#898A8D"),
-            keyShadowOpacity: effectiveDark ? 0.42 : 0.32
+            keyShadowOpacity: min(0.85, max(0.0, (effectiveDark ? 0.45 : 0.36) * keyShadowScale))
         )
     }
 

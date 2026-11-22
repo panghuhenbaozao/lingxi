@@ -286,10 +286,12 @@ let MY_TOKEN = localStorage.getItem('lx_cf_token') || '';
 const NS_NAMES = {
   lexicon: '🧠 个人自学习词库',
   ai_prompts: '✨ AI 专属提示词与人设',
+  style_dna: '🧬 个人文风 DNA 与去AI腔',
+  keymap: '⌨️ 26键自定义滑行映射',
   settings: '⚙️ 输入法全局设置',
-  theme: '🎨 外观主题与调色',
+  theme: '🎨 日夜双套外观主题',
   phrases: '📝 自定义编码短语',
-  quick_phrases: '⚡ 常用快捷短语',
+  quick_phrases: '⚡ 动态变量快捷短语',
   recent_emojis: '😊 最近常用表情',
   typing_stats: '📈 本机打字统计'
 };

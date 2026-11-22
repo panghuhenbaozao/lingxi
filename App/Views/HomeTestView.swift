@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// 首页工作台：对标苹果原生 App（App Store / 健康）清爽层级——右上角圆形头像直达账号/登录，主屏聚焦试打体验与四宫格核心入口。
+/// 首页工作台：对标苹果原生 App 清爽层级——顶部云同步状态胶囊、一键快捷开关条、5 场景实时试打台与 2×2 核心入口。
 struct HomeTestView: View {
     @EnvironmentObject private var appState: AppState
     var onSelectTab: ((Int) -> Void)? = nil
@@ -18,8 +18,9 @@ struct HomeTestView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     statusHeroBanner
+                    quickControlStrip
                     sandboxCard
                     quickBentoGrid
                     tipsCard
@@ -58,7 +59,7 @@ struct HomeTestView: View {
         }
     }
 
-    // MARK: - 1. 顶部精简状态横幅（未启用时高对比引导，启用后清爽一行）
+    // MARK: - 1. 顶部状态横幅（含云同步状态胶囊）
 
     private var statusHeroBanner: some View {
         let health = EngineHealthAndSustainabilityService.shared.diagnose()
@@ -66,16 +67,16 @@ struct HomeTestView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(Design.Palette.ink))
+                        .fill(Color(Design.Palette.accent))
                         .frame(width: 42, height: 42)
                     Image(systemName: appState.isKeyboardEnabled ? "checkmark.seal.fill" : "keyboard")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .foregroundStyle(Color.white)
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(appState.isKeyboardEnabled ? "灵犀输入法已就绪" : "尚未在系统设置中启用灵犀")
+                        Text(appState.isKeyboardEnabled ? "灵犀 5.0 已就绪" : "尚未在系统设置中启用灵犀")
                             .font(.system(size: 15.5, weight: .semibold))
                             .foregroundStyle(Color(Design.Palette.ink))
                         if appState.isKeyboardEnabled {
@@ -84,7 +85,7 @@ struct HomeTestView: View {
                                 .frame(width: 7, height: 7)
                         }
                     }
-                    Text("\(appState.settings.inputScheme.displayName) · \(appState.theme.appearanceMode.displayName) · 引擎健康 \(health.healthScore) 分")
+                    Text("\(appState.settings.inputScheme.displayName) · \(appState.theme.appearanceMode.displayName) · 健康 \(health.healthScore) 分")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -92,34 +93,59 @@ struct HomeTestView: View {
 
                 Spacer(minLength: 4)
 
-                if appState.isKeyboardEnabled {
-                    Button {
+                Button {
+                    if appState.isKeyboardEnabled {
                         isTestingFocused = true
-                    } label: {
-                        Text("去试打")
-                            .font(.system(size: 13, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .frame(height: 32)
-                            .background(Color(Design.Palette.ink))
-                            .foregroundStyle(Color(Design.Palette.canvas))
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(PressableStyle())
-                } else {
-                    Button {
+                    } else {
                         showGuide = true
-                    } label: {
-                        Text("去启用")
-                            .font(.system(size: 13, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .frame(height: 32)
-                            .background(Color(Design.Palette.ink))
-                            .foregroundStyle(Color(Design.Palette.canvas))
-                            .clipShape(Capsule())
                     }
-                    .buttonStyle(PressableStyle())
+                } label: {
+                    Text(appState.isKeyboardEnabled ? "去试打" : "去启用")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 14)
+                        .frame(height: 32)
+                        .background(Color(Design.Palette.accent))
+                        .foregroundStyle(Color.white)
+                        .clipShape(Capsule())
                 }
+                .buttonStyle(PressableStyle())
             }
+
+            // 实时云同步与账号身份胶囊条
+            Button {
+                if appState.isCloudAuthenticated {
+                    navigateToAccount = true
+                } else {
+                    showSignInSheet = true
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: appState.isCloudAuthenticated && !appState.cloudConfig.isLocalOnlyAccount ? "icloud.fill" : "apple.logo")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color(Design.Palette.accent))
+                    if appState.isCloudAuthenticated {
+                        let summary = appState.cloudConfig.lastSyncSummary.isEmpty ? "10 类核心数据端到端同步就绪" : appState.cloudConfig.lastSyncSummary
+                        Text("\(appState.cloudConfig.username.isEmpty ? "灵犀用户" : appState.cloudConfig.username) · \(summary)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("点此通过 Apple 通行密钥 / 面容 ID 登录 Cloudflare 全球云")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Color(Design.Palette.accent))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(Design.Palette.surface))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
 
             if !appState.isKeyboardEnabled {
                 HStack(spacing: 10) {
@@ -139,12 +165,67 @@ struct HomeTestView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 2. 实时试打体验区（可直接实测顶栏验证码/新复制内容接管）
+    // MARK: - 1.5 一键快捷调节栏（方案 / 布局 / 日夜外观 / 思考模式秒切）
+
+    private var quickControlStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                quickTogglePill(icon: "textformat.abc", label: appState.settings.inputScheme.displayName) {
+                    let all = InputScheme.allCases
+                    if let idx = all.firstIndex(of: appState.settings.inputScheme) {
+                        appState.settings.inputScheme = all[(idx + 1) % all.count]
+                    }
+                }
+                quickTogglePill(icon: "keyboard", label: appState.settings.layoutMode.displayName) {
+                    let all = KeyboardLayoutMode.allCases
+                    if let idx = all.firstIndex(of: appState.settings.layoutMode) {
+                        appState.settings.layoutMode = all[(idx + 1) % all.count]
+                    }
+                }
+                quickTogglePill(icon: "circle.lefthalf.filled", label: appState.theme.appearanceMode.displayName) {
+                    let modes = KeyboardAppearanceMode.allCases
+                    if let idx = modes.firstIndex(of: appState.theme.appearanceMode) {
+                        appState.theme.applyAppearanceMode(modes[(idx + 1) % modes.count])
+                    }
+                }
+                quickTogglePill(icon: "brain", label: "思考: \(appState.aiConfig.thinkingMode.shortBadge)") {
+                    let modes: [AIThinkingMode] = [.off, .auto, .low, .medium, .high]
+                    if let idx = modes.firstIndex(of: appState.aiConfig.thinkingMode) {
+                        appState.aiConfig.thinkingMode = modes[(idx + 1) % modes.count]
+                    } else {
+                        appState.aiConfig.thinkingMode = .auto
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func quickTogglePill(icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(Design.Palette.accent))
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+        }
+        .buttonStyle(PressableStyle())
+    }
+
+    // MARK: - 2. 实时试打体验区（5 大场景一键实测）
 
     private var sandboxCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text("试打体验区")
+                Text("试打体验台")
                     .font(.system(size: 15.5, weight: .semibold))
                     .foregroundStyle(Color(Design.Palette.ink))
 
@@ -163,7 +244,7 @@ struct HomeTestView: View {
                     } label: {
                         Image(systemName: "doc.on.clipboard")
                             .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(Color(Design.Palette.ink))
+                            .foregroundStyle(Color(Design.Palette.accent))
                             .frame(width: 30, height: 30)
                             .background(Color(Design.Palette.surface))
                             .clipShape(Circle())
@@ -203,7 +284,7 @@ struct HomeTestView: View {
                     }
 
                 if sandboxText.isEmpty {
-                    Text("点这里切出「灵犀输入法」，试打拼音、双拼、退格删除或点下方按钮测试顶栏验证码秒填。")
+                    Text("点这里切出「灵犀输入法」，试打中数混输 mingtian3dianjian、长拼音单字音节回改，或点下方场景芯片测试。")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                         .padding(.leading, 17)
@@ -212,22 +293,33 @@ struct HomeTestView: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                compactChip("模拟验证码短信", icon: "message.badge.filled.fill") {
-                    let sample = "【灵犀测试】您的验证码是 849201，5分钟内有效。"
-                    UIPasteboard.general.string = sample
-                    appState.addClipboardEntry(sample)
-                }
-                compactChip("模拟长文本滑动", icon: "doc.on.doc") {
-                    let sample = "灵犀输入法 · 纯白圆角按键，支持顶栏复制内容与短信验证码左右滑动查看完整全文并一键填入"
-                    UIPasteboard.general.string = sample
-                    appState.addClipboardEntry(sample)
-                }
-                Spacer(minLength: 0)
-                if !sandboxText.isEmpty {
-                    compactChip("清空", icon: "trash") {
-                        sandboxText = ""
-                        isTyping = false
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    compactChip("模拟验证码", icon: "message.badge.filled.fill") {
+                        let sample = "【灵犀测试】您的验证码是 849201，5分钟内有效。"
+                        UIPasteboard.general.string = sample
+                        appState.addClipboardEntry(sample)
+                    }
+                    compactChip("模拟框选即改", icon: "sparkles") {
+                        sandboxText = "明天下午两点我实在赶不过去，能不能往后推一天再碰一下需求？"
+                        isTestingFocused = true
+                    }
+                    compactChip("模拟博弈消息", icon: "chess.knight") {
+                        let msg = "这周六临时加个班把方案赶出来吧，周一早上老板要看。"
+                        UIPasteboard.general.string = msg
+                        appState.addClipboardEntry(msg)
+                        isTestingFocused = true
+                    }
+                    compactChip("测试英文剪贴板", icon: "globe") {
+                        let msg = "Could we postpone Friday's architecture sync to Monday morning?"
+                        UIPasteboard.general.string = msg
+                        appState.addClipboardEntry(msg)
+                    }
+                    if !sandboxText.isEmpty {
+                        compactChip("清空", icon: "trash") {
+                            sandboxText = ""
+                            isTyping = false
+                        }
                     }
                 }
             }
@@ -251,10 +343,19 @@ struct HomeTestView: View {
             } label: {
                 bentoTile(
                     icon: "paintpalette.fill",
-                    title: "外观与自由调色",
-                    subtitle: appState.theme.hasCustomColorOverrides
-                        ? "自定义调色中 · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
-                        : "\(appState.theme.appearanceMode.displayName) · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                    title: "日夜双套外观",
+                    subtitle: "12 套精校主题 · 圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                )
+            }
+            .buttonStyle(PressableStyle())
+
+            Button {
+                onSelectTab?(2)
+            } label: {
+                bentoTile(
+                    icon: "brain.head.profile",
+                    title: "AI 灵犀智脑",
+                    subtitle: "\(appState.aiConfig.activeModelName) · 思考\(appState.aiConfig.thinkingMode.shortBadge)"
                 )
             }
             .buttonStyle(PressableStyle())
@@ -264,19 +365,8 @@ struct HomeTestView: View {
             } label: {
                 bentoTile(
                     icon: "chart.bar.fill",
-                    title: "打字统计与画像",
-                    subtitle: "今日 \(todayChars) 字 · 本机 24h 节律"
-                )
-            }
-            .buttonStyle(PressableStyle())
-
-            Button {
-                onSelectTab?(3)
-            } label: {
-                bentoTile(
-                    icon: "laptopcomputer.and.iphone",
-                    title: "跨屏剪贴板",
-                    subtitle: "6 位码实时 SSE 秒传与炸词"
+                    title: "进化周报与热力图",
+                    subtitle: "今日 \(todayChars) 字 · 26 键手型校准"
                 )
             }
             .buttonStyle(PressableStyle())
@@ -298,9 +388,9 @@ struct HomeTestView: View {
         VStack(alignment: .leading, spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Color(Design.Palette.ink))
+                .foregroundStyle(Color(Design.Palette.accent))
                 .frame(width: 34, height: 34)
-                .background(Color(Design.Palette.surface))
+                .background(Color(Design.Palette.accentSoft))
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
@@ -325,7 +415,7 @@ struct HomeTestView: View {
     private var tipsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text("高频玩法")
+                Text("灵犀 5.0 进阶玩法")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Color(Design.Palette.ink))
                 Spacer()
@@ -336,9 +426,7 @@ struct HomeTestView: View {
             .padding(.bottom, 6)
 
             ForEach(Array(visibleTips.indices), id: \.self) { index in
-                if index > 0 {
-                    Divider()
-                }
+                if index > 0 { Divider() }
                 tipRow(visibleTips[index])
             }
 
@@ -351,7 +439,7 @@ struct HomeTestView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(Design.Palette.ink))
+                .foregroundStyle(Color(Design.Palette.accent))
                 .frame(maxWidth: .infinity, minHeight: 40)
             }
             .buttonStyle(PressableStyle())
@@ -364,14 +452,14 @@ struct HomeTestView: View {
     }
 
     private var visibleTips: [PlayTip] {
-        tipsExpanded ? Self.allTips : Array(Self.allTips.filter(\.isPopular).prefix(3))
+        tipsExpanded ? Self.allTips : Array(Self.allTips.filter(\.isPopular).prefix(4))
     }
 
     private func tipRow(_ tip: PlayTip) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: tip.icon)
                 .font(.system(size: 13.5, weight: .medium))
-                .foregroundStyle(Color(Design.Palette.ink))
+                .foregroundStyle(Color(Design.Palette.accent))
                 .frame(width: 20, alignment: .leading)
                 .padding(.top, 2)
 
@@ -396,6 +484,7 @@ struct HomeTestView: View {
             HStack(spacing: 4) {
                 Image(systemName: icon)
                     .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color(Design.Palette.accent))
                 Text(title)
                     .font(.system(size: 12, weight: .medium))
             }
@@ -416,9 +505,9 @@ struct HomeTestView: View {
                 Text(title)
                     .font(.system(size: 13.5, weight: .semibold))
             }
-            .foregroundStyle(filled ? Color(Design.Palette.canvas) : Color(Design.Palette.ink))
+            .foregroundStyle(filled ? Color.white : Color(Design.Palette.ink))
             .frame(maxWidth: .infinity, minHeight: 40)
-            .background(filled ? Color(Design.Palette.ink) : Color(Design.Palette.surface))
+            .background(filled ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
             .clipShape(Capsule())
         }
         .buttonStyle(PressableStyle())
@@ -430,10 +519,10 @@ struct HomeTestView: View {
 
         var body: some View {
             Circle()
-                .fill(Color(Design.Palette.stone))
+                .fill(Color(Design.Palette.accent))
                 .frame(width: 6, height: 6)
                 .scaleEffect(isPulsing ? 0.8 + phase * 0.4 : 0.85)
-                .opacity(isPulsing ? 0.7 + phase * 0.3 : 0.15)
+                .opacity(isPulsing ? 0.75 + phase * 0.25 : 0.18)
                 .onChange(of: isPulsing) { new in
                     withAnimation(new ? .easeOut(duration: 0.5).repeatForever(autoreverses: true) : .easeOut(duration: 0.12)) {
                         phase = new ? 1 : 0
@@ -462,37 +551,38 @@ private extension HomeTestView {
     static var allTips: [PlayTip] {
         [
             PlayTip(
-                icon: "menubar.rectangle",
-                title: "顶栏智能全栏接管（验证码 / 刚复制内容秒填）",
-                desc: "复制新内容或收到短信验证码时，自动隐藏 AI/译按钮，整栏切换为一键填入/粘贴胶囊。",
+                icon: "sparkles",
+                title: "框选即改 + 博弈军师三策略气泡",
+                desc: "在任意输入框选中一段字，顶栏立刻弹出「润色 / 更委婉 / 译英」；复制棘手消息点「博弈军师」一键出 3 套高情商回复。",
                 isPopular: true
             ),
             PlayTip(
-                icon: "laptopcomputer.and.iphone",
-                title: "6 位匹配码跨屏剪贴板实时秒传",
-                desc: "电脑与手机输入相同 6 位码，免登录通过 SSE 毫秒级双向接力文本与短信验证码。",
+                icon: "character.textbox",
+                title: "长拼音单字音节回改 & 四声调精准筛字",
+                desc: "打长句时点顶栏任意拼音音节可原地换单字不退格；展开候选切「只看单字」后支持按一声/二声/三声/四声秒选生僻字。",
                 isPopular: true
             ),
             PlayTip(
-                icon: "scribble.variable",
-                title: "26 键中英文滑行输入与空格移光标",
-                desc: "手指连续滑过字母成词；在空格键左右滑动即可丝滑移动光标定位。",
+                icon: "textformat.123",
+                title: "中数英无缝混输（无需切换键盘）",
+                desc: "直接连打 mingtian3dianjian 出「明天3点见」，打 fayigepdfgeiwo 出「发一个PDF给我」。",
                 isPopular: true
             ),
             PlayTip(
-                icon: "magnifyingglass.circle",
-                title: "u 模式 · 拆字与笔画反查",
-                desc: "全拼输 u 查生僻字并带读音：ushuishuishui → 淼、uhspn → 木。"
+                icon: "arrow.up.and.down.and.arrow.left.and.right",
+                title: "专业文本编辑台 + 26 键自定义滑行映射",
+                desc: "从键盘快捷设置打开「📐 编辑台」精准移动光标、一键盘古空格/去空行；在效率中心自由定义任意键上下滑输出。",
+                isPopular: true
             ),
             PlayTip(
                 icon: "function",
-                title: "v 模式 · 大写金额 / 算式 / 日期",
-                desc: "全拼输 v125*8 同时出 1000 与「壹仟元整」，vrq / vsj 快速插入日期时间。"
+                title: "v 模式 · 财务大写金额与 AA 均摊",
+                desc: "全拼输 v12800rmb 出「壹万贰仟捌佰元整」，输 v1280/4 自动出「人均 ¥320」。"
             ),
             PlayTip(
-                icon: "globe",
-                title: "译 · 14 语种实时边打边译",
-                desc: "点顶栏「译」照常输中文，一键切口语/正式语气，空格直接上屏译文。"
+                icon: "lock.shield.fill",
+                title: "Face ID 本地加密安全保险箱",
+                desc: "身份证、银行卡与税号经面容 ID 保护存于本机独立容器，绝不上传云端、绝不污染剪贴板历史。"
             )
         ]
     }

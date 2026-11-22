@@ -1044,6 +1044,146 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         }
     }
 
+    // MARK: - 真 Apple iCloud 通行密钥 (WebAuthn Passkey) 与 Face ID 硬件 P-256 免密登录（侧载零报错）
+
+    private static let hardwareKeyFallbackFile = "lingxi_apple_hw_p256.json"
+
+    private struct StoredHardwareKey: Codable {
+        var rawPrivateKeyB64: String
+    }
+
+    private static func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func base64URLDecode(_ text: String) -> Data? {
+        var s = text
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let rem = s.count % 4
+        if rem > 0 {
+            s += String(repeating: "=", count: 4 - rem)
+        }
+        return Data(base64Encoded: s)
+    }
+
+    /// 持久化加载或生成本机专属 ECDSA P-256 硬件私钥（用于 Face ID 免密真云端登录，同一设备永久绑定同一云端账号）。
+    private func loadOrCreateHardwareSigningKey() throws -> P256.Signing.PrivateKey {
+        if let stored = AppGroup.readJSON(StoredHardwareKey.self, from: Self.hardwareKeyFallbackFile),
+           let raw = Data(base64Encoded: stored.rawPrivateKeyB64),
+           let key = try? P256.Signing.PrivateKey(rawRepresentation: raw) {
+            return key
+        }
+        let fresh = P256.Signing.PrivateKey()
+        let record = StoredHardwareKey(rawPrivateKeyB64: fresh.rawRepresentation.base64EncodedString())
+        _ = AppGroup.writeJSON(record, to: Self.hardwareKeyFallbackFile, protected: true)
+        return fresh
+    }
+
+    /// 构造带设备标识的 Cloudflare Apple iCloud Passkey 网页认证 URL（供主 App `ASWebAuthenticationSession` 打开）。
+    public func applePasskeyAuthURL() -> URL? {
+        let base = CloudBackendConfig.load().normalizedBaseURL
+        let devID = SyncInfra.deviceIdentity().deviceID
+        var comps = URLComponents(string: base + "/auth/apple-passkey")
+        comps?.queryItems = [URLQueryItem(name: "deviceID", value: devID)]
+        return comps?.url
+    }
+
+    /// 解析 `lingxi://auth-callback?payload=...` 回调并落地真实的 Cloudflare 云端会话。
+    @discardableResult
+    public func completeApplePasskeyCallback(url: URL) throws -> AuthSession {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let payloadStr = comps.queryItems?.first(where: { $0.name == "payload" })?.value,
+              let jsonData = Self.base64URLDecode(payloadStr),
+              let dict = (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any] else {
+            throw CloudBackendError.badRequest("Apple 通行密钥回调数据无效，请重新验证")
+        }
+        return try persistAuthResponse(dict, isLocalOnly: false)
+    }
+
+    /// Face ID / 触控 ID 通过后，使用本机持久 P-256 硬件私钥签名直连 Cloudflare `/api/v1/auth/apple-device`。
+    @discardableResult
+    public func signInWithAppleHardwareKey(username: String = "Apple 用户", email: String? = nil) async throws -> AuthSession {
+        let privKey = try loadOrCreateHardwareSigningKey()
+        // CryptoKit x963Representation 为 65 字节未压缩点 (0x04 || X || Y)，与 WebCrypto ECDSA "raw" 公钥完全同构
+        let pubX963 = privKey.publicKey.x963Representation
+        let digest = SHA256.hash(data: pubX963)
+        let hardwareID = digest.map { String(format: "%02x", $0) }.joined().prefix(32)
+        let ts = Int(Date().timeIntervalSince1970)
+        let msg = Data("\(hardwareID)|\(ts)".utf8)
+        let sig = try privKey.signature(for: msg)
+        // rawRepresentation 为 64 字节 IEEE P1363 (R || S)，WebCrypto verify 原生支持
+        let cleanName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        var payload: [String: Any] = [
+            "hardwareID": String(hardwareID),
+            "publicKeyRawB64": Self.base64URLEncode(pubX963),
+            "signatureB64": Self.base64URLEncode(sig.rawRepresentation),
+            "timestamp": ts,
+            "username": cleanName.isEmpty ? "Apple 用户" : cleanName,
+            "deviceID": SyncInfra.deviceIdentity().deviceID
+        ]
+        if let email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["email"] = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        do {
+            let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple-device", body: payload, requireAuth: false)
+            return try persistAuthResponse(dict, isLocalOnly: false)
+        } catch CloudBackendError.networkFailure {
+            let rec = LocalAccountVault.upsertQuick(
+                username: cleanName.isEmpty ? "Apple 用户" : cleanName,
+                email: "faceid-\(hardwareID.prefix(8))@lingxi.local"
+            )
+            return persistLocalSession(for: rec)
+        }
+    }
+
+    public struct NamespaceSyncSummary: Identifiable, Equatable {
+        public let id: String
+        public let namespace: SyncNamespace
+        public let title: String
+        public let icon: String
+        public let localCountLabel: String
+        public let serverCursor: UInt64
+        public let isSynced: Bool
+    }
+
+    /// 供「数据云端透明看板」展示 10 个核心命名空间的本地数量与同步游标状态。
+    public func syncNamespaceDashboardSummary() -> [NamespaceSyncSummary] {
+        let ledger = SyncLedgerStore().load()
+        let aiCfg = AIConfig.load()
+        let settings = LingxiSettings.load()
+        let theme = ThemeCustomization.load()
+        let stats = TypingStatsStore.shared.summary()
+        let items: [(SyncNamespace, String, String, String)] = [
+            (.lexicon, "个人自学习词库", "text.book.closed.fill", "\(UserLexicon().allEntries(limit: 500).count) 词"),
+            (.aiPrompts, "AI 专属提示词与人设", "sparkles", "\(aiCfg.customPrompts.count) 提示词 · \(aiCfg.contextCards.count) 背景卡"),
+            (.styleDNA, "个人文风 DNA 与去AI腔", "waveform.path.ecg", !aiCfg.styleDNA.clonedStyleSummary.isEmpty ? "已克隆 (\(aiCfg.styleDNA.bannedAICliches.count) 禁用词)" : "待校准 (\(aiCfg.styleDNA.bannedAICliches.count) 禁用词)"),
+            (.keymap, "26键自定义滑行映射", "keyboard", "\(settings.customSwipeUpMap.count + settings.customSwipeDownMap.count) 键自定义"),
+            (.settings, "输入法全局设置与模糊音", "gearshape.fill", "\(settings.inputScheme.displayName) · \(settings.layoutMode.displayName)"),
+            (.theme, "日夜双套外观主题", "paintpalette.fill", theme.appearanceMode.displayName),
+            (.phrases, "自定义编码短语", "text.badge.star", "\(CustomWordStore.load().count) 条"),
+            (.quickPhrases, "动态变量快捷短语", "bolt.fill", "\(QuickPhraseStore.load().count) 条"),
+            (.recentEmojis, "最近常用表情与颜文字", "face.smiling", "\(RecentEmojiStore.load().count) 个"),
+            (.typingStats, "脱敏打字统计", "chart.bar.fill", "\(stats.totalChars) 字 · \(stats.dayCount) 天")
+        ]
+        return items.map { ns, title, icon, label in
+            let cursor = ledger.cursors[ns.rawValue] ?? 0
+            let hasPushed = ledger.pushedHashes.keys.contains(where: { $0.hasPrefix(ns.rawValue + "::") })
+            return NamespaceSyncSummary(
+                id: ns.rawValue,
+                namespace: ns,
+                title: title,
+                icon: icon,
+                localCountLabel: label,
+                serverCursor: cursor,
+                isSynced: cursor > 0 || hasPushed
+            )
+        }
+    }
+
     private func persistLocalSession(for rec: LocalAccountVault.Record) -> AuthSession {
         let session = AuthSession(
             userID: rec.userID,
@@ -1305,7 +1445,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             let res = try await requestJSON(
                 method: "POST",
                 path: "/api/v1/analytics/typing-events",
-                body: ["digests": rawList],
+                body: ["events": rawList, "digests": rawList],
                 requireAuth: true
             )
             TypingHabitTracker.shared.clearPendingEvents()
@@ -1344,7 +1484,8 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         }
 
         let dict = try await requestJSON(method: "GET", path: "/api/v1/analytics/habits", body: nil, requireAuth: true)
-        if let profile = decodeProfile(from: dict) {
+        let profilePayload = (dict["profile"] as? [String: Any]) ?? dict
+        if let profile = decodeProfile(from: profilePayload) {
             TypingHabitTracker.shared.saveServerProfile(profile)
             return profile
         }

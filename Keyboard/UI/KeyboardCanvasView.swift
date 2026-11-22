@@ -343,9 +343,11 @@ final class KeyboardCanvasView: UIView {
             let x = hPad + CGFloat(idx) * (r1Unit + colSpacing)
             let rect = CGRect(x: x, y: currentRowY, width: r1Unit, height: rowH)
             let char = displayedChar(item.0)
+            let customUp = settings.customSwipeUpMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.1
+            let customDown = settings.customSwipeDownMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.2
             result.append(KeyModel(
                 id: "k_\(item.0)",
-                kind: .character(primary: char, secondary: item.1, downPunct: item.2, alternatives: item.3),
+                kind: .character(primary: char, secondary: customUp, downPunct: customDown, alternatives: item.3),
                 rect: rect,
                 isSpecial: false,
                 isAccent: false
@@ -360,9 +362,11 @@ final class KeyboardCanvasView: UIView {
             let x = r2StartX + CGFloat(idx) * (r1Unit + colSpacing)
             let rect = CGRect(x: x, y: r2Y, width: r1Unit, height: rowH)
             let char = displayedChar(item.0)
+            let customUp = settings.customSwipeUpMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.1
+            let customDown = settings.customSwipeDownMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.2
             result.append(KeyModel(
                 id: "k_\(item.0)",
-                kind: .character(primary: char, secondary: item.1, downPunct: item.2, alternatives: item.3),
+                kind: .character(primary: char, secondary: customUp, downPunct: customDown, alternatives: item.3),
                 rect: rect,
                 isSpecial: false,
                 isAccent: false
@@ -386,9 +390,11 @@ final class KeyboardCanvasView: UIView {
             let x = r3LettersX + CGFloat(idx) * (r1Unit + colSpacing)
             let rect = CGRect(x: x, y: r3Y, width: r1Unit, height: rowH)
             let char = displayedChar(item.0)
+            let customUp = settings.customSwipeUpMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.1
+            let customDown = settings.customSwipeDownMap[item.0].flatMap { $0.isEmpty ? nil : $0 } ?? item.2
             result.append(KeyModel(
                 id: "k_\(item.0)",
-                kind: .character(primary: char, secondary: item.1, downPunct: item.2, alternatives: item.3),
+                kind: .character(primary: char, secondary: customUp, downPunct: customDown, alternatives: item.3),
                 rect: rect,
                 isSpecial: false,
                 isAccent: false
@@ -547,6 +553,9 @@ final class KeyboardCanvasView: UIView {
                let c = p.lowercased().first,
                c >= "a" && c <= "z" {
                 initialVisited = [String(c)]
+                let dx = Double(pt.x - hitKey.rect.midX)
+                let dy = Double(pt.y - hitKey.rect.midY)
+                TouchOffsetCalibrator.shared.recordTouch(key: String(c), dx: dx, dy: dy)
             }
 
             let track = ActiveTouch(

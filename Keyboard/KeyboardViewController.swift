@@ -16,6 +16,7 @@ final class KeyboardViewController: UIInputViewController {
         case clipboard
         case ai
         case quickSettings
+        case editPad
     }
 
     // 核心引擎与服务
@@ -45,6 +46,7 @@ final class KeyboardViewController: UIInputViewController {
     private let clipboardPanel = ClipboardPanelView()
     private let aiPanel = AIAssistantPanelView()
     private let quickSettingsPanel = QuickSettingsSheetView()
+    private let editPadPanel = TextEditingPadView()
 
     // 中文/英文输入状态机
     private var activePanel: ActivePanel = .letters
@@ -54,6 +56,8 @@ final class KeyboardViewController: UIInputViewController {
     private var lockedT9Syllables: [String] = []
     private var t9LeftSyllables: [String] = []
     private var currentTokens: [PinyinToken] = []
+    private var editingSyllableIndex: Int?
+    private var savedSentenceCandidatesBeforeEdit: [PinyinCandidate] = []
     private var currentCorrectedHint: String?
     private var currentCandidates: [PinyinCandidate] = []
     private var isCandidatesExpanded = false
@@ -150,6 +154,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         flushTypingHabitSessionIfNeeded()
+        TouchOffsetCalibrator.shared.flush()
     }
 
     override func viewWillLayoutSubviews() {
@@ -257,6 +262,7 @@ final class KeyboardViewController: UIInputViewController {
             clipboardPanel,
             aiPanel,
             quickSettingsPanel,
+            editPadPanel,
         ]
         for panel in subpanels {
             panel.translatesAutoresizingMaskIntoConstraints = false
@@ -438,7 +444,12 @@ final class KeyboardViewController: UIInputViewController {
         clipboardPanel.onInsertText = { [weak self] text in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.insertFinalText(text, checkPairing: false)
+            let rendered = DynamicTemplateEngine.render(
+                text,
+                clipboard: ClipboardStore.items().first?.text,
+                selectedText: self.textDocumentProxy.selectedText
+            )
+            self.insertFinalText(rendered, checkPairing: false)
         }
         clipboardPanel.onSendToAI = { [weak self] text in
             self?.openAIPanel(preferredAction: .replyClipboard, explicitClipboard: text)
@@ -517,7 +528,17 @@ final class KeyboardViewController: UIInputViewController {
             )
             self.applyThemeAndSettings()
         }
+        quickSettingsPanel.onOpenEditPad = { [weak self] in
+            self?.switchToPanel(.editPad)
+        }
         quickSettingsPanel.onClose = { [weak self] in
+            self?.switchToPanel(.letters)
+        }
+
+        editPadPanel.onAction = { [weak self] action in
+            self?.handleEditPadAction(action)
+        }
+        editPadPanel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
         }
     }
@@ -881,6 +902,8 @@ final class KeyboardViewController: UIInputViewController {
             commitTranslateSourceOutput()
         case .toggleClipboard:
             switchToPanel(activePanel == .clipboard ? .letters : .clipboard)
+        case .toggleEditPad:
+            switchToPanel(activePanel == .editPad ? .letters : .editPad)
         case .toggleQuickSettings:
             switchToPanel(activePanel == .quickSettings ? .letters : .quickSettings)
         case .toggleLayoutQuick:
@@ -904,6 +927,48 @@ final class KeyboardViewController: UIInputViewController {
             }
         case .askAIForClipboard(let text):
             openAIPanel(preferredAction: .replyClipboard, explicitClipboard: text)
+        case .clipboardIntentAI(let intent, let text):
+            pasteMonitor.dismissCurrent()
+            if let customInst = intent.customInstruction {
+                switchToPanel(.ai)
+                aiPanel.runDirectInstruction(
+                    title: intent.badge,
+                    instruction: customInst,
+                    sourceText: text,
+                    replaceCount: 0,
+                    theme: resolvedTheme,
+                    hasFullAccess: hasFullAccess
+                )
+            } else {
+                openAIPanel(preferredAction: intent.action, explicitClipboard: text)
+            }
+        case .selectionQuickAI(let title, let instruction):
+            let sel = (textDocumentProxy.selectedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sel.isEmpty else { return }
+            switchToPanel(.ai)
+            aiPanel.runDirectInstruction(
+                title: title,
+                instruction: instruction,
+                sourceText: sel,
+                replaceCount: 1,
+                theme: resolvedTheme,
+                hasFullAccess: hasFullAccess
+            )
+        case .tapComposingSyllable(let idx):
+            enterRetroactiveSyllableEdit(at: idx)
+        case .askAIForWord(let word):
+            switchToPanel(.ai)
+            aiPanel.runDirectInstruction(
+                title: "换更高级说法",
+                instruction: "请给「\(word)」提供3个更得体、高级或生动的中文替换说法或完整例句，简洁直接。",
+                sourceText: word,
+                replaceCount: 0,
+                theme: resolvedTheme,
+                hasFullAccess: hasFullAccess
+            )
+        case .saveWordAsPhrase(let word):
+            QuickPhraseStore.add(title: String(word.prefix(6)), content: word, category: "常用")
+            refreshToolbar()
         case .dismissClipboardBanner:
             pasteMonitor.dismissCurrent()
             refreshToolbar()
@@ -1032,6 +1097,12 @@ final class KeyboardViewController: UIInputViewController {
                 rawComposing.dropFirst().allSatisfy { $0.isNumber || "+-*/%^().=".contains($0) }
             if isDigitOrMath(ch),
                (isVToolBody || rawComposing.allSatisfy({ $0.isNumber || "+-*/%^().=".contains($0) })) {
+                rawComposing.append(ch)
+                recomputeCandidates()
+                return
+            }
+            // 中英数零切换混输：全拼拼音串中直接敲数字（如 mingtian3dianjian -> 明天3点见）保持组合态
+            if settings.inputScheme == .quanpin && !isUsingT9Layout && ch.count == 1 && ch.allSatisfy(\.isNumber) && !isVToolHead {
                 rawComposing.append(ch)
                 recomputeCandidates()
                 return
@@ -1302,6 +1373,8 @@ final class KeyboardViewController: UIInputViewController {
         lockedT9Syllables.removeAll()
         t9LeftSyllables.removeAll()
         currentTokens = []
+        editingSyllableIndex = nil
+        savedSentenceCandidatesBeforeEdit = []
         currentCorrectedHint = nil
         wubiEmptyCode = false
         wubiDisplayBuffer = nil
@@ -1548,6 +1621,34 @@ final class KeyboardViewController: UIInputViewController {
         feedback.triggerCursorSound(settings: settings)
         clearUndoBuffer()
         let cand = currentCandidates[index]
+
+        // 点击拼音条音节「免退格局部换字」：把选中的同音单字直接拼回整句第 idx 位并恢复整句首位！
+        if let editIdx = editingSyllableIndex, !savedSentenceCandidatesBeforeEdit.isEmpty {
+            let baseList = savedSentenceCandidatesBeforeEdit
+            editingSyllableIndex = nil
+            savedSentenceCandidatesBeforeEdit = []
+            if let baseSent = baseList.first {
+                var chars = Array(baseSent.word)
+                if editIdx >= 0 && editIdx < chars.count, let newCh = cand.word.first {
+                    chars[editIdx] = newCh
+                    let patchedWord = String(chars)
+                    let patchedCand = PinyinCandidate(
+                        word: patchedWord,
+                        py: baseSent.py,
+                        lp: baseSent.lp + 2.0,
+                        consumed: baseSent.consumed,
+                        isExact: true,
+                        source: baseSent.source
+                    )
+                    var merged = [patchedCand] + baseList.filter { $0.word != patchedWord }
+                    if merged.isEmpty { merged = [patchedCand] }
+                    currentCandidates = merged
+                    expandedCandidates.update(candidates: merged)
+                    refreshUI()
+                    return
+                }
+            }
+        }
 
         // 英文模式下点选补全词或滑行替换词，替换掉已输入的前缀或刚滑行上屏的词
         if isEnglishMode && cand.source == .englishDirect {
@@ -2249,6 +2350,8 @@ final class KeyboardViewController: UIInputViewController {
         case .numbers:
             let (retTitle, _) = returnKeyAppearance()
             numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
+        case .editPad:
+            editPadPanel.apply(theme: resolvedTheme)
         case .letters, .ai:
             break
         }
@@ -2264,12 +2367,14 @@ final class KeyboardViewController: UIInputViewController {
         clipboardPanel.isHidden = (activePanel != .clipboard)
         aiPanel.isHidden = (activePanel != .ai)
         quickSettingsPanel.isHidden = (activePanel != .quickSettings)
+        editPadPanel.isHidden = (activePanel != .editPad)
     }
 
     private func applyThemeAndSettings() {
         backdropView.apply(theme: resolvedTheme)
         toolbarView.apply(theme: resolvedTheme)
         expandedCandidates.apply(theme: resolvedTheme)
+        editPadPanel.apply(theme: resolvedTheme)
         // 候选字号可调：单行候选条与展开网格联动应用
         toolbarView.candidateBar.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
         expandedCandidates.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
@@ -2332,8 +2437,15 @@ final class KeyboardViewController: UIInputViewController {
             ? []
             : currentCandidates
 
+        let composingSyllables: [String] = (!rawComposing.isEmpty && !isUsingT9Layout && currentCorrectedHint == nil && wubiDisplayBuffer == nil && uModeDisplayBuffer == nil && currentTokens.count >= 2)
+            ? currentTokens.map(\.text)
+            : []
+        let activeSelectedText: String? = (settings.selectionMagicEnabled && !isSecureField) ? textDocumentProxy.selectedText : nil
+
         toolbarView.update(
             composingDisplay: composingDisplay,
+            composingSyllables: composingSyllables,
+            activeSyllableIndex: editingSyllableIndex,
             candidates: effectiveCandidates,
             expanded: isCandidatesExpanded,
             showUndo: undoBuffer != nil,
@@ -2342,10 +2454,106 @@ final class KeyboardViewController: UIInputViewController {
             layoutMode: settings.layoutMode,
             aiPromptDraft: aiPromptDraft,
             translateState: translateState,
+            selectedHostText: activeSelectedText,
             hasFullAccess: hasFullAccess,
             toolbarLayout: settings.toolbarLayout,
             showComposingStrip: settings.showComposingStrip
         )
+    }
+
+    // MARK: - v5.0 专业编辑台与长句点击音节免退格回溯改字
+
+    private func enterRetroactiveSyllableEdit(at idx: Int) {
+        guard currentTokens.indices.contains(idx), let engine else { return }
+        if editingSyllableIndex == idx {
+            editingSyllableIndex = nil
+            if !savedSentenceCandidatesBeforeEdit.isEmpty {
+                currentCandidates = savedSentenceCandidatesBeforeEdit
+                savedSentenceCandidatesBeforeEdit = []
+                expandedCandidates.update(candidates: currentCandidates)
+            }
+            refreshUI()
+            return
+        }
+        if savedSentenceCandidatesBeforeEdit.isEmpty {
+            savedSentenceCandidatesBeforeEdit = currentCandidates
+        }
+        editingSyllableIndex = idx
+        let singleList = engine.candidatesForSingleToken(currentTokens[idx], isT9: isUsingT9Layout, settings: settings, limit: 48)
+        if !singleList.isEmpty {
+            currentCandidates = singleList
+            expandedCandidates.update(candidates: singleList)
+        }
+        refreshUI()
+    }
+
+    private func handleEditPadAction(_ action: TextEditingPadView.EditAction) {
+        feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
+        switch action {
+        case .moveLeft:
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1) }
+        case .moveRight:
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1) }
+        case .moveUp:
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -16) }
+        case .moveDown:
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 16) }
+        case .lineStart:
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            let rev = before.reversed()
+            let dist = rev.firstIndex(of: "\n").map { rev.distance(from: rev.startIndex, to: $0) } ?? before.count
+            if dist > 0 { performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -dist) } }
+        case .lineEnd:
+            let after = textDocumentProxy.documentContextAfterInput ?? ""
+            let dist = after.firstIndex(of: "\n").map { after.distance(from: after.startIndex, to: $0) } ?? after.count
+            if dist > 0 { performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: dist) } }
+        case .copy:
+            if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
+                UIPasteboard.general.string = sel
+                _ = ClipboardStore.record(sel)
+            }
+        case .cut:
+            if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
+                UIPasteboard.general.string = sel
+                _ = ClipboardStore.record(sel)
+                performEdit { self.textDocumentProxy.deleteBackward() }
+            }
+        case .paste:
+            if let txt = UIPasteboard.general.string ?? ClipboardStore.items().first?.text, !txt.isEmpty {
+                insertDirectlyIntoHost(txt)
+            }
+        case .selectAll:
+            break
+        case .deleteBackward:
+            performBackspace(isRepeat: false)
+        case .formatPanguSpace:
+            if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
+                let formatted = TextFormatterToolbox.addPanguSpaces(sel)
+                performEdit {
+                    self.textDocumentProxy.deleteBackward()
+                    self.textDocumentProxy.insertText(formatted)
+                }
+            } else if let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty {
+                let chunk = String(before.suffix(120))
+                let formatted = TextFormatterToolbox.addPanguSpaces(chunk)
+                if formatted != chunk {
+                    performEdit {
+                        for _ in 0..<chunk.count { self.textDocumentProxy.deleteBackward() }
+                        self.textDocumentProxy.insertText(formatted)
+                    }
+                }
+            }
+        case .formatCollapseLines:
+            if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
+                let formatted = TextFormatterToolbox.collapseBlankLines(sel)
+                performEdit {
+                    self.textDocumentProxy.deleteBackward()
+                    self.textDocumentProxy.insertText(formatted)
+                }
+            } else if let clip = UIPasteboard.general.string ?? ClipboardStore.items().first?.text, !clip.isEmpty {
+                insertDirectlyIntoHost(TextFormatterToolbox.collapseBlankLines(clip))
+            }
+        }
     }
 
     private func refreshCanvas() {

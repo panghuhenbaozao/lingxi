@@ -4,6 +4,7 @@ import UIKit
 final class QuickSettingsSheetView: UIView {
     var onSettingsChanged: ((LingxiSettings) -> Void)?
     var onThemeChanged: ((ThemeCustomization) -> Void)?
+    var onOpenEditPad: (() -> Void)?
     var onClose: (() -> Void)?
 
     private let scrollView = LingxiScrollView()
@@ -391,6 +392,36 @@ final class QuickSettingsSheetView: UIView {
         })
         stackView.addArrangedSubview(proRow)
 
+        let v5Row = UIStackView()
+        v5Row.axis = .horizontal
+        v5Row.distribution = .fillEqually
+        v5Row.spacing = 6
+
+        let aiCfg = AIConfig.load()
+        v5Row.addArrangedSubview(makeToggleChip("🧠思考:\(aiCfg.thinkingMode.shortBadge)", on: aiCfg.thinkingMode.isEnabled, theme: theme) { [weak self] in
+            guard let self else { return }
+            var cfg = AIConfig.load()
+            let modes: [AIThinkingMode] = [.off, .auto, .low, .medium, .high]
+            if let idx = modes.firstIndex(of: cfg.thinkingMode) {
+                cfg.thinkingMode = modes[(idx + 1) % modes.count]
+            } else {
+                cfg.thinkingMode = .medium
+            }
+            cfg.save()
+            self.rebuild()
+        })
+        v5Row.addArrangedSubview(makeToggleChip("框选即改", on: settings.selectionMagicEnabled, theme: theme) { [weak self] in
+            guard let self else { return }
+            self.settings.selectionMagicEnabled.toggle()
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+            self.rebuild()
+        })
+        v5Row.addArrangedSubview(makeToggleChip("📐 编辑台", on: false, theme: theme) { [weak self] in
+            self?.onOpenEditPad?()
+        })
+        stackView.addArrangedSubview(v5Row)
+
         setNeedsLayout()
     }
 
@@ -409,11 +440,22 @@ final class QuickSettingsSheetView: UIView {
         let lbl = UILabel()
         lbl.text = label
         lbl.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        lbl.textColor = theme.keyHintText
+        lbl.textColor = theme.keyText.withAlphaComponent(0.82)
         lbl.widthAnchor.constraint(equalToConstant: 64).isActive = true
 
         let seg = ActionSegmentedControl(items: options)
         seg.selectedSegmentIndex = selectedIndex
+        // 显式注入深浅主题高对比配色，彻底解决暗色模式下系统分段器文字发黑看不清的真机 Bug
+        seg.backgroundColor = theme.specialKeyFill
+        seg.selectedSegmentTintColor = theme.accentFill
+        seg.setTitleTextAttributes([
+            .foregroundColor: theme.accentText,
+            .font: UIFont.systemFont(ofSize: 12.5, weight: .semibold)
+        ], for: .selected)
+        seg.setTitleTextAttributes([
+            .foregroundColor: theme.keyText,
+            .font: UIFont.systemFont(ofSize: 12.5, weight: .medium)
+        ], for: .normal)
         seg.onChange = onSelect
 
         row.addArrangedSubview(lbl)
@@ -425,9 +467,13 @@ final class QuickSettingsSheetView: UIView {
         let btn = ActionClosureButton(type: .system)
         btn.setTitle(on ? "✓ \(title)" : title, for: .normal)
         btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        btn.backgroundColor = on ? theme.accentFill.withAlphaComponent(0.18) : theme.specialKeyFill
-        btn.setTitleColor(on ? theme.candidateHighlight : theme.keyHintText, for: .normal)
+        // 高对比配色：开启态用主题强调色实底白字，关闭态用立体键帽底+清晰主文字+细描边，暗色/亮色均一眼看清
+        btn.backgroundColor = on ? theme.accentFill : theme.keyFill
+        btn.setTitleColor(on ? theme.accentText : theme.keyText, for: .normal)
         btn.layer.cornerRadius = 8
+        btn.layer.cornerCurve = .continuous
+        btn.layer.borderWidth = on ? 0 : 0.6
+        btn.layer.borderColor = theme.keyBorder.cgColor
         btn.heightAnchor.constraint(equalToConstant: 32).isActive = true
         // VoiceOver：开关 chip 暴露纯净功能名与选中状态，避免读出标题中的对勾符号
         btn.accessibilityLabel = title

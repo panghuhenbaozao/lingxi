@@ -62,7 +62,7 @@ struct OnboardingGuideView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color(Design.Palette.ink))
+                    .tint(Color(Design.Palette.accent))
                 }
             }
             .listStyle(.insetGrouped)

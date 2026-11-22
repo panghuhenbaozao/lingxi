@@ -81,7 +81,7 @@ def main() -> int:
         "removeFromSuperview", "addSubview", "setNeedsLayout", "layoutIfNeeded", "subviews",
         "arrangedSubviews", "addArrangedSubview", "removeArrangedSubview", "isUserInteractionEnabled",
         "trimmingCharacters", "components", "lowercased", "uppercased", "replacingOccurrences",
-        "hasPrefix", "hasSuffix", "split", "dropFirst", "dropLast",
+        "hasPrefix", "hasSuffix", "split", "dropFirst", "dropLast", "removeValue",
     }
     our_roots = [
         "appState", "settings", "theme", "aiConfig", "cloudConfig", "relayConfig", "habitProfile",

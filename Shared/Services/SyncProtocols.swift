@@ -55,6 +55,8 @@ public struct SyncNamespace: RawRepresentable, Equatable, Hashable, Codable {
     public static let lexicon = SyncNamespace(rawValue: "lexicon")
     public static let theme = SyncNamespace(rawValue: "theme")
     public static let aiPrompts = SyncNamespace(rawValue: "ai_prompts")
+    public static let keymap = SyncNamespace(rawValue: "keymap")
+    public static let styleDNA = SyncNamespace(rawValue: "style_dna")
 }
 
 /// 单条同步变更。value 由调用方加密（E2EE 层负责），协议层不感知加密细节。

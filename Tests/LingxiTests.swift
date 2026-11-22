@@ -1313,4 +1313,187 @@ final class LingxiTests: XCTestCase {
         let askRec = SmartContextPromptDetector.analyze(text: "今晚有空一起吃饭吗？", isClipboard: true, customPrompts: CustomAIPromptTemplate.defaultTemplates)
         XCTAssertEqual(askRec.recommendedPresets.first, .replyClipboard)
     }
+
+    func testV5AIThinkingModelDiscoveryAndStyleDNA() throws {
+        // 1. 跨分片 <think> 状态机：绝不向正文泄漏思考草稿
+        var splitter = ThinkTagStreamSplitter()
+        let parts = ["<thi", "nk>先分析语气与", "重点</th", "ink>收到啦，下午三点同步给你～"]
+        var thoughts = ""
+        var answers = ""
+        for p in parts {
+            for ev in splitter.push(p) {
+                switch ev {
+                case .thought(let t): thoughts += t
+                case .answer(let a): answers += a
+                }
+            }
+        }
+        for ev in splitter.finish() {
+            switch ev {
+            case .thought(let t): thoughts += t
+            case .answer(let a): answers += a
+            }
+        }
+        XCTAssertEqual(thoughts, "先分析语气与重点")
+        XCTAssertEqual(answers, "收到啦，下午三点同步给你～")
+
+        // 2. 远端模型列表动态解析 (Gemini / OpenAI / Ollama)
+        let geminiPayload = Data("""
+        {
+          "models": [
+            {"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash", "inputTokenLimit": 1048576, "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/text-embedding-004", "displayName": "Embedding", "supportedGenerationMethods": ["embedContent"]}
+          ]
+        }
+        """.utf8)
+        let gModels = AIClient.parseGeminiModelsPayload(geminiPayload)
+        XCTAssertEqual(gModels.count, 1)
+        XCTAssertEqual(gModels.first?.id, "gemini-3.8-flash")
+        XCTAssertEqual(gModels.first?.supportsThinking, true)
+
+        let openAIPayload = Data("""
+        {"data": [{"id": "deepseek-reasoner", "context_length": 65536}, {"id": "whisper-1"}]}
+        """.utf8)
+        let oModels = AIClient.parseOpenAIModelsPayload(openAIPayload)
+        XCTAssertEqual(oModels.count, 1)
+        XCTAssertEqual(oModels.first?.id, "deepseek-reasoner")
+        XCTAssertEqual(oModels.first?.supportsThinking, true)
+
+        let ollamaPayload = Data("{\"models\": [{\"name\": \"qwen3:8b\"}]}".utf8)
+        let olModels = AIClient.parseOllamaTagsPayload(ollamaPayload)
+        XCTAssertEqual(olModels.first?.id, "qwen3:8b")
+        XCTAssertEqual(olModels.first?.supportsThinking, true)
+
+        // 3. 跨协议思考模式参数构造
+        let g38High = AIClient.geminiThinkingPayload(model: "gemini-3.8-flash", mode: .high, budget: 2048)
+        XCTAssertEqual(g38High["thinking_level"] as? String, "high")
+        let g25Custom = AIClient.geminiThinkingPayload(model: "gemini-2.5-pro", mode: .customBudget, budget: 4096)
+        XCTAssertEqual(g25Custom["thinking_budget"] as? Int, 4096)
+        let qwenOff = AIClient.openAIThinkingExtraBody(model: "qwen3-235b", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", mode: .off, budget: 1024)
+        XCTAssertEqual(qwenOff["enable_thinking"] as? Bool, false)
+        let o3Med = AIClient.openAIThinkingExtraBody(model: "o3-mini", baseURL: "https://api.openai.com/v1", mode: .medium, budget: 1024)
+        XCTAssertEqual(o3Med["reasoning_effort"] as? String, "medium")
+
+        // 4. 多渠道档案保存与秒切 + 文风 DNA Diff 自学习 + 博弈军师解析
+        var aiCfg = AIConfig()
+        aiCfg.provider = .openAICompatible
+        aiCfg.openAIBaseURL = "https://api.deepseek.com/v1"
+        aiCfg.openAIModel = "deepseek-chat"
+        aiCfg.deepModel = "deepseek-reasoner"
+        aiCfg.saveCurrentAsProfile(name: "DeepSeek 通道")
+        XCTAssertEqual(aiCfg.profiles.count, 1)
+        XCTAssertEqual(aiCfg.resolvedModel(preferDeep: true), "deepseek-reasoner")
+
+        var dna = PersonalStyleDNA()
+        AIAutoInsightService.learnFromUserEditDiff(
+            aiOriginal: "您好，感谢您的耐心等待，我这边已经完整审阅了您的全部方案并准备好了详细反馈。",
+            userFinal: "收到，我看完了～",
+            into: &dna
+        )
+        XCTAssertTrue(dna.learnedDiffRules.contains(where: { $0.contains("简短") }))
+        XCTAssertTrue(dna.learnedDiffRules.contains(where: { $0.contains("您好") }))
+        XCTAssertTrue(dna.learnedDiffRules.contains(where: { $0.contains("波浪号") }))
+
+        let stratJSON = """
+        {"subtext": "对方想临时加需求但不好直说", "options": [{"tag": "🛡️ 温和太极", "toneLabel": "先缓冲", "reply": "收到啦，我先核对下排期～"}]}
+        """
+        let strat = AIAutoInsightService.parseStrategistResult(stratJSON, fallbackMessage: "周末加个班吧")
+        XCTAssertEqual(strat.options.first?.tag, "🛡️ 温和太极")
+    }
+
+    func testV5MixedInputToneFilterTemplatesAndFormatting() throws {
+        // 1. 动态变量短语渲染
+        let fixedDate = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01 00:00 UTC
+        let rendered = DynamicTemplateEngine.render("汇报日期 {{日期}} | 引用: {{剪贴板}}", clipboard: "测试进度", now: fixedDate)
+        XCTAssertTrue(rendered.contains("引用: 测试进度"))
+        XCTAssertFalse(rendered.contains("{{日期}}"))
+
+        // 2. 排版微整形工具箱（盘古空格 / 去空行 / 编号 / 财务大写金额）
+        XCTAssertEqual(TextFormatterToolbox.addPanguSpaces("我在iPhone16上用Swift写代码"), "我在 iPhone16 上用 Swift 写代码")
+        XCTAssertEqual(TextFormatterToolbox.collapseBlankLines("第一行\n\n  \n第二行\n"), "第一行\n第二行")
+        XCTAssertEqual(TextFormatterToolbox.toNumberedList("准备数据\n发布版本"), "1. 准备数据\n2. 发布版本")
+        XCTAssertEqual(TextFormatterToolbox.amountToChineseCapital(12800), "壹万贰仟捌佰元整")
+
+        // 3. v 模式财务大写与 AA 均摊
+        let vSettings = LingxiSettings()
+        let vRmb = SmartCandidateHelper.extraCandidates(forRawInput: "v12800rmb", settings: vSettings, consumedLength: 9)
+        XCTAssertTrue(vRmb.contains(where: { $0.word == "壹万贰仟捌佰元整" }))
+        let vAA = SmartCandidateHelper.extraCandidates(forRawInput: "v1280/4", settings: vSettings, consumedLength: 7)
+        XCTAssertTrue(vAA.contains(where: { $0.word == "人均 ¥320" }))
+
+        // 4. 汉字四声调识别器（妈/麻/马/骂）
+        XCTAssertEqual(PinyinToneClassifier.tone(for: "妈"), 1)
+        XCTAssertEqual(PinyinToneClassifier.tone(for: "麻"), 2)
+        XCTAssertEqual(PinyinToneClassifier.tone(for: "马"), 3)
+        XCTAssertEqual(PinyinToneClassifier.tone(for: "骂"), 4)
+
+        // 5. 本地安全保险箱脱敏展示
+        let vaultItem = SecureVaultItem(title: "税号", category: "开票", value: "91310000MA1FL8888X")
+        XCTAssertTrue(vaultItem.maskedPreview.hasPrefix("91"))
+        XCTAssertTrue(vaultItem.maskedPreview.hasSuffix("8X"))
+        XCTAssertTrue(vaultItem.maskedPreview.contains("••••"))
+
+        // 6. 中数英无缝混输 + 点击音节单字反查
+        guard let dbURL = findTestDBURL() else {
+            throw XCTSkip("未找到测试词库 pinyin.sqlite")
+        }
+        let engine = PinyinEngine(databaseURL: dbURL)
+        var settings = LingxiSettings()
+        settings.userLearningEnabled = false
+
+        let mixedNum = engine.query(raw: "mingtian3dianjian", settings: settings)
+        XCTAssertTrue(mixedNum.candidates.contains(where: { $0.word.contains("3") && $0.word.contains("明天") }), "中数混输应直出含数字的中文短语")
+
+        let mixedEng = engine.query(raw: "fayigepdfgeiwo", settings: settings)
+        XCTAssertTrue(mixedEng.candidates.contains(where: { $0.word.contains("PDF") }), "中英混输应识别内嵌英文词 PDF")
+
+        let singleTok = PinyinToken(text: "ni", raw: "ni", kind: .complete, end: 2)
+        let singleChars = engine.candidatesForSingleToken(singleTok, isT9: false, settings: settings, limit: 20)
+        XCTAssertTrue(singleChars.contains(where: { $0.word == "你" }), "点击单个音节应返回对应高频单字")
+    }
+
+    func testV5DualThemeContrastAndApplePasskeyCallback() throws {
+        // 1. 全部 12 套精校主题必须满足 WCAG AA 键帽文字可读对比度 (>= 4.5:1)
+        XCTAssertEqual(KeyboardThemePreset.presets.count, 12)
+        for preset in KeyboardThemePreset.presets {
+            let ratio = preset.keyFill.contrastRatio(with: preset.keyText)
+            XCTAssertGreaterThanOrEqual(ratio, 4.5, "主题 \(preset.name) 键帽对比度不足: \(ratio)")
+            let accentRatio = preset.accentFill.contrastRatio(with: preset.accentText)
+            XCTAssertGreaterThanOrEqual(accentRatio, 3.0, "主题 \(preset.name) 强调按钮对比度不足: \(accentRatio)")
+        }
+
+        // 2. 日夜双套独立自由调色在「跟随系统」模式下互不串色
+        var theme = ThemeCustomization()
+        theme.appearanceMode = .followSystem
+        theme.customCanvasHex = "#E5EEF8"
+        theme.customKeyFillHex = "#FFFFFF"
+        theme.customKeyTextHex = "#111827"
+        let dayPreset = theme.activePreset(isSystemDark: false)
+        let nightPreset = theme.activePreset(isSystemDark: true)
+        XCTAssertEqual(dayPreset.canvasTop.hex.uppercased(), "#E5EEF8")
+        XCTAssertTrue(nightPreset.isDark, "浅色自定义调色绝不能污染深色模式")
+        XCTAssertNotEqual(nightPreset.canvasTop.hex.uppercased(), "#E5EEF8")
+
+        // 3. Apple iCloud Passkey 回调 URL 解析校验
+        let mockAuthObj: [String: Any] = [
+            "userID": "apple-passkey-u1",
+            "email": "apple_test@icloud.lingxi.ime",
+            "username": "Apple 体验官",
+            "accessToken": "lxt.mock.token",
+            "refreshToken": "lxr_mock_refresh",
+            "accessExpiry": Int(Date().addingTimeInterval(3600).timeIntervalSince1970),
+            "e2eeSalt": "0123456789abcdef0123456789abcdef"
+        ]
+        let rawJSON = try JSONSerialization.data(withJSONObject: mockAuthObj)
+        let b64u = rawJSON.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let url = URL(string: "lingxi://auth-callback?payload=\(b64u)")!
+        let session = try CloudBackendClient.shared.completeApplePasskeyCallback(url: url)
+        XCTAssertEqual(session.userID, "apple-passkey-u1")
+        XCTAssertFalse(CloudBackendConfig.load().isLocalOnlyAccount)
+        // 清理测试会话避免污染后续测试
+        CloudCredentialStore.clearAll()
+    }
 }

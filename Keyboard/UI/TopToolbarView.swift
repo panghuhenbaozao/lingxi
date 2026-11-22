@@ -26,6 +26,7 @@ final class TopToolbarView: UIView {
         case commitTranslatedText
         case commitTranslateSource
         case toggleClipboard
+        case toggleEditPad
         case toggleQuickSettings
         case toggleLayoutQuick
         case undoDelete
@@ -33,6 +34,11 @@ final class TopToolbarView: UIView {
         case pasteCaptured(String)
         case directPasteFallback
         case askAIForClipboard(String)
+        case clipboardIntentAI(ClipboardIntentAction, String)
+        case selectionQuickAI(title: String, instruction: String)
+        case tapComposingSyllable(Int)
+        case askAIForWord(String)
+        case saveWordAsPhrase(String)
         case dismissClipboardBanner
         case forgetWord(word: String, py: String)
         case pinWord(word: String, py: String)
@@ -48,8 +54,11 @@ final class TopToolbarView: UIView {
     var onToggleExpandCandidates: (() -> Void)?
 
     private let bottomHairline = UIView()
-    private let composingScrollView = UIScrollView()
+    private let composingScrollView = ToolbarHorizontalScrollView()
     private let composingLabel = UILabel()
+    private let composingSyllableStack = UIStackView()
+    private var lastSyllableSignature = ""
+    private var activeEditingSyllableIdx: Int?
     let candidateBar = CandidateBarView()
 
     // 空闲功能区：可横向平滑滚动的双簇容器（宽屏自然左右分列，窄屏/多按钮自动可滑不遮挡）
@@ -61,8 +70,14 @@ final class TopToolbarView: UIView {
     private let translateButton = UIButton(type: .system)
     private let clipboardButton = UIButton(type: .system)
     private let layoutButton = UIButton(type: .system)
+    private let editPadButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
     private let undoButton = UIButton(type: .system)
+
+    // 框选即改（Selection In-Place Magic）：检测到宿主输入框选中文字时自动替换顶栏
+    private let selectionMagicScroll = ToolbarHorizontalScrollView()
+    private let selectionMagicStack = UIStackView()
+    private var isSelectionMagicActive = false
 
     // 剪贴板 / 短信验证码全栏独占接管胶囊（Full-Bar Takeover）
     private let bannerContainer = UIView()
@@ -132,6 +147,12 @@ final class TopToolbarView: UIView {
         composingLabel.lineBreakMode = .byClipping
         composingScrollView.addSubview(composingLabel)
 
+        composingSyllableStack.axis = .horizontal
+        composingSyllableStack.alignment = .center
+        composingSyllableStack.spacing = 2
+        composingSyllableStack.isHidden = true
+        composingScrollView.addSubview(composingSyllableStack)
+
         candidateBar.isHidden = true
         candidateBar.onSelectCandidate = { [weak self] idx in
             self?.onSelectCandidate?(idx)
@@ -192,6 +213,13 @@ final class TopToolbarView: UIView {
             action: #selector(didTapLayout)
         )
         configureUtilityButton(
+            editPadButton,
+            title: nil,
+            symbol: "cursorarrow.and.square.on.square.dashed",
+            accessibilityLabel: "专业光标编辑台",
+            action: #selector(didTapEditPad)
+        )
+        configureUtilityButton(
             settingsButton,
             title: nil,
             symbol: "slider.horizontal.3",
@@ -215,9 +243,18 @@ final class TopToolbarView: UIView {
 
         leftClusterStack.addArrangedSubview(aiButton)
         leftClusterStack.addArrangedSubview(translateButton)
-        [undoButton, layoutButton, clipboardButton, settingsButton].forEach {
+        [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton].forEach {
             rightClusterStack.addArrangedSubview($0)
         }
+
+        // 框选即改顶栏胶囊条
+        selectionMagicScroll.isHidden = true
+        idleContainer.addSubview(selectionMagicScroll)
+        selectionMagicStack.axis = .horizontal
+        selectionMagicStack.alignment = .center
+        selectionMagicStack.spacing = 6
+        selectionMagicScroll.addSubview(selectionMagicStack)
+        setupSelectionMagicPills()
 
         // 全栏接管胶囊容器（复制内容 / 短信验证码到来时整栏替换显示）
         bannerContainer.isHidden = true
@@ -352,8 +389,32 @@ final class TopToolbarView: UIView {
         case .translate: return translateButton
         case .clipboard: return clipboardButton
         case .layout: return layoutButton
+        case .editPad: return editPadButton
         case .settings: return settingsButton
         case .undo: return undoButton
+        }
+    }
+
+    private func setupSelectionMagicPills() {
+        let items: [(String, String)] = [
+            ("✨ 润色选中", "请保持原意，将用户选中的这段文字润色得更加流畅自然得体。只输出改写后的文字。"),
+            ("🌐 译为英文", "Translate the selected text into natural, idiomatic English. Output only the translation."),
+            ("🌐 译为中文", "将选中的外文翻译成地道自然的简体中文。只输出译文。"),
+            ("✂️ 缩成一句", "将用户选中的文字精简浓缩为一两句重点清晰的表达。只输出精简后的文字。"),
+            ("👔 更正式", "将用户选中的文字改写为正式得体的职场商务口吻。只输出改写后的文字。"),
+            ("💬 温和一点", "将用户选中的文字改写得更温和礼貌、高情商。只输出改写后的文字。"),
+        ]
+        for (title, inst) in items {
+            let btn = ActionClosureButton(type: .system)
+            btn.setTitle(title, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+            btn.layer.cornerRadius = 14
+            btn.layer.cornerCurve = .continuous
+            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+            btn.actionHandler = { [weak self] in
+                self?.onAction?(.selectionQuickAI(title: title, instruction: inst))
+            }
+            selectionMagicStack.addArrangedSubview(btn)
         }
     }
 
@@ -387,20 +448,26 @@ final class TopToolbarView: UIView {
         bottomHairline.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
 
         if hasCandidates {
-            let showComposing = !(composingLabel.text ?? "").isEmpty
+            let showComposing = !(composingLabel.text ?? "").isEmpty || !composingSyllableStack.isHidden
             composingScrollView.isHidden = !showComposing
             if showComposing {
-                composingScrollView.frame = CGRect(x: 12, y: 2, width: max(0, bounds.width - 24), height: 16)
-                let fitW = ceil(composingLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 16)).width) + 6
-                let contentW = max(composingScrollView.bounds.width, fitW)
-                composingLabel.frame = CGRect(x: 0, y: 0, width: contentW, height: 16)
-                composingScrollView.contentSize = CGSize(width: contentW, height: 16)
-                if contentW > composingScrollView.bounds.width {
-                    composingScrollView.contentOffset = CGPoint(x: contentW - composingScrollView.bounds.width, y: 0)
+                composingScrollView.frame = CGRect(x: 12, y: 2, width: max(0, bounds.width - 24), height: 17)
+                if !composingSyllableStack.isHidden {
+                    let stackW = max(composingScrollView.bounds.width, ceil(composingSyllableStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width) + 6)
+                    composingSyllableStack.frame = CGRect(x: 0, y: 0, width: stackW, height: 17)
+                    composingScrollView.contentSize = CGSize(width: stackW, height: 17)
+                } else {
+                    let fitW = ceil(composingLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 17)).width) + 6
+                    let contentW = max(composingScrollView.bounds.width, fitW)
+                    composingLabel.frame = CGRect(x: 0, y: 0, width: contentW, height: 17)
+                    composingScrollView.contentSize = CGSize(width: contentW, height: 17)
+                }
+                if composingScrollView.contentSize.width > composingScrollView.bounds.width {
+                    composingScrollView.contentOffset = CGPoint(x: composingScrollView.contentSize.width - composingScrollView.bounds.width, y: 0)
                 } else {
                     composingScrollView.contentOffset = .zero
                 }
-                candidateBar.frame = CGRect(x: 0, y: 16, width: bounds.width, height: max(28, bounds.height - 16))
+                candidateBar.frame = CGRect(x: 0, y: 17, width: bounds.width, height: max(28, bounds.height - 17))
             } else {
                 candidateBar.frame = bounds
             }
@@ -422,6 +489,13 @@ final class TopToolbarView: UIView {
         let idleContentW = max(bounds.width, rightClusterStack.frame.maxX + 12)
         idleScrollView.contentSize = CGSize(width: idleContentW, height: bounds.height)
         idleScrollView.isScrollEnabled = idleContentW > bounds.width + 1
+
+        if !selectionMagicScroll.isHidden {
+            selectionMagicScroll.frame = bounds
+            let sw = max(bounds.width - 20, ceil(selectionMagicStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width) + 16)
+            selectionMagicStack.frame = CGRect(x: 10, y: pillY, width: sw, height: pillH)
+            selectionMagicScroll.contentSize = CGSize(width: sw + 16, height: bounds.height)
+        }
 
         // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
         let bannerH: CGFloat = min(36, bounds.height - 10)
@@ -468,11 +542,20 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        for btn in [clipboardButton, layoutButton, settingsButton] {
+        for btn in [clipboardButton, layoutButton, editPadButton, settingsButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
             btn.layer.borderColor = theme.keyBorder.withAlphaComponent(0.85).cgColor
+        }
+
+        for sub in selectionMagicStack.arrangedSubviews {
+            if let btn = sub as? UIButton {
+                btn.backgroundColor = theme.accentFill.withAlphaComponent(0.16)
+                btn.setTitleColor(theme.candidateHighlight, for: .normal)
+                btn.layer.borderWidth = 0.6
+                btn.layer.borderColor = theme.accentFill.withAlphaComponent(0.40).cgColor
+            }
         }
 
         undoButton.backgroundColor = theme.accentFill
@@ -535,6 +618,8 @@ final class TopToolbarView: UIView {
 
     func update(
         composingDisplay: String,
+        composingSyllables: [String] = [],
+        activeSyllableIndex: Int? = nil,
         candidates: [PinyinCandidate],
         expanded: Bool,
         showUndo: Bool,
@@ -543,18 +628,21 @@ final class TopToolbarView: UIView {
         layoutMode: KeyboardLayoutMode,
         aiPromptDraft: String?,
         translateState: TranslateBarState? = nil,
+        selectedHostText: String? = nil,
         hasFullAccess: Bool,
         toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
         showComposingStrip: Bool = true
     ) {
         self.toolbarLayout = toolbarLayout
         self.showComposingStrip = showComposingStrip
+        self.activeEditingSyllableIdx = activeSyllableIndex
         applyToolbarConfiguration()
         self.hasCandidates = !candidates.isEmpty
         self.currentBannerState = bannerState
         self.hasFullAccess = hasFullAccess
         self.isAIPromptMode = (aiPromptDraft != nil)
         self.isTranslateBarActive = (translateState != nil)
+        self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
 
         layoutButton.setTitle(layoutMode == .qwerty26 ? "九键" : "26键", for: .normal)
 
@@ -603,15 +691,26 @@ final class TopToolbarView: UIView {
             translateBar.isHidden = true
         }
 
-        composingLabel.text = showComposingStrip ? composingDisplay : ""
+        if showComposingStrip && composingSyllables.count >= 2 {
+            composingLabel.text = ""
+            composingLabel.isHidden = true
+            composingSyllableStack.isHidden = false
+            rebuildSyllableChips(composingSyllables, activeIndex: activeSyllableIndex)
+        } else {
+            composingSyllableStack.isHidden = true
+            composingLabel.isHidden = false
+            composingLabel.text = showComposingStrip ? composingDisplay : ""
+        }
         candidateBar.isHidden = !hasCandidates
         idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
-        // 当剪贴板新内容或短信验证码胶囊激活时，隐藏常规的「灵犀 AI / 译 / 工具」按钮栏，由剪贴板胶囊独占顶栏
+        // 当剪贴板新内容或短信验证码胶囊激活，或者宿主输入框存在选中文字触发「框选即改」时，切换顶栏展示
         let isBannerTakeoverActive = (currentBannerState != .hidden)
-        leftClusterStack.isHidden = isBannerTakeoverActive
-        rightClusterStack.isHidden = isBannerTakeoverActive
+        selectionMagicScroll.isHidden = !isSelectionMagicActive
+        leftClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive
+        rightClusterStack.isHidden = isBannerTakeoverActive || isSelectionMagicActive
+        idleScrollView.isHidden = isBannerTakeoverActive || isSelectionMagicActive
 
         if let theme {
             stylePrimaryButtons(theme: theme, aiActive: aiPanelActive, translateActive: isTranslateBarActive)
@@ -661,6 +760,16 @@ final class TopToolbarView: UIView {
             arranged.append(lastBtn)
         }
 
+        let aiWordBtn = makeCapsuleButton(title: "✨换说法", bg: theme.accentFill.withAlphaComponent(0.18), fg: theme.candidateHighlight) { [weak self] in
+            guard let self, let pending = self.pendingWordAction else { return }
+            self.wordActionContainer.isHidden = true
+            self.onAction?(.askAIForWord(pending.word))
+        }
+        let savePhraseBtn = makeCapsuleButton(title: "+短语", bg: theme.keyFill.withAlphaComponent(0.9), fg: theme.keyText) { [weak self] in
+            guard let self, let pending = self.pendingWordAction else { return }
+            self.wordActionContainer.isHidden = true
+            self.onAction?(.saveWordAsPhrase(pending.word))
+        }
         let pinBtn = makeCapsuleButton(title: isPinned ? "解置" : "置顶", bg: theme.accentFill.withAlphaComponent(0.16), fg: theme.candidateHighlight) { [weak self] in
             guard let self, let pending = self.pendingWordAction else { return }
             self.wordActionContainer.isHidden = true
@@ -675,7 +784,7 @@ final class TopToolbarView: UIView {
             self?.wordActionContainer.isHidden = true
         }
 
-        arranged.append(contentsOf: [pinBtn, forgetBtn, cancelBtn])
+        arranged.append(contentsOf: [aiWordBtn, savePhraseBtn, pinBtn, forgetBtn, cancelBtn])
         arranged.forEach { stack.addArrangedSubview($0) }
         wordActionContainer.addSubview(stack)
         wordActionContainer.isHidden = false
@@ -842,6 +951,17 @@ final class TopToolbarView: UIView {
 
                 bannerStack.addArrangedSubview(badge)
                 bannerStack.addArrangedSubview(contentView)
+                // 剪贴板语义意图直达胶囊（如复制了外文/提问/报错/长段文字，顶栏 1 步直达 AI 处理）
+                if hasFullAccess, let intent = SmartContextPromptDetector.detectClipboardIntent(for: item.text) {
+                    let aiIntentBtn = makeCapsuleButton(
+                        title: intent.badge,
+                        bg: theme.accentFill.withAlphaComponent(0.16),
+                        fg: theme.candidateHighlight
+                    ) { [weak self] in
+                        self?.onAction?(.clipboardIntentAI(intent, item.text))
+                    }
+                    bannerStack.addArrangedSubview(aiIntentBtn)
+                }
                 bannerStack.addArrangedSubview(pasteBtn)
                 bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
             }
@@ -897,10 +1017,43 @@ final class TopToolbarView: UIView {
         return btn
     }
 
+    private func rebuildSyllableChips(_ syllables: [String], activeIndex: Int?) {
+        let sig = "\(syllables.joined(separator: "'"))|\(activeIndex ?? -1)|\(theme?.preset.id ?? "")"
+        guard sig != lastSyllableSignature else { return }
+        lastSyllableSignature = sig
+        composingSyllableStack.arrangedSubviews.forEach {
+            composingSyllableStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        guard let theme else { return }
+        for (idx, syl) in syllables.enumerated() {
+            if idx > 0 {
+                let sep = UILabel()
+                sep.text = "'"
+                sep.font = .systemFont(ofSize: 11, weight: .medium)
+                sep.textColor = theme.keyHintText
+                composingSyllableStack.addArrangedSubview(sep)
+            }
+            let btn = ActionClosureButton(type: .custom)
+            let isSelected = (activeIndex == idx)
+            btn.setTitle(syl, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: isSelected ? .bold : .semibold)
+            btn.setTitleColor(isSelected ? theme.accentText : theme.candidateHighlight, for: .normal)
+            btn.backgroundColor = isSelected ? theme.accentFill : .clear
+            btn.layer.cornerRadius = 4
+            btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: isSelected ? 4 : 1, bottom: 0, right: isSelected ? 4 : 1)
+            btn.actionHandler = { [weak self] in
+                self?.onAction?(.tapComposingSyllable(idx))
+            }
+            composingSyllableStack.addArrangedSubview(btn)
+        }
+    }
+
     @objc private func didTapAI() { onAction?(.toggleAI) }
     @objc private func didTapTranslate() { onAction?(.toggleTranslateMode) }
     @objc private func didTapClipboard() { onAction?(.toggleClipboard) }
     @objc private func didTapLayout() { onAction?(.toggleLayoutQuick) }
+    @objc private func didTapEditPad() { onAction?(.toggleEditPad) }
     @objc private func didTapSettings() { onAction?(.toggleQuickSettings) }
     @objc private func didTapUndo() { onAction?(.undoDelete) }
 }

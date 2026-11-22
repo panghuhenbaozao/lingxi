@@ -208,10 +208,16 @@ final class PinyinEngine {
         guard !trimmed.isEmpty else { return ([], [], nil) }
         let lower = trimmed.lowercased()
 
+        // 0. 中英数混输直出（含内嵌数字如 mingtian3dianjian -> 明天3点见，或含非法拼音段的常见英文缩写如 fayigepdfgeiwo -> 发一个PDF给我）
+        let effectiveScheme: InputScheme = settings.inputScheme.isWubi ? .quanpin : settings.inputScheme
+        if effectiveScheme == .quanpin && !lower.hasPrefix("v") && lower.count >= 3 && lower.contains(where: \.isNumber),
+           let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
+            return (mixed.tokens, mixed.candidates, nil)
+        }
+
         let ctxMap = settings.bigramPredictionEnabled
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
-        let effectiveScheme: InputScheme = settings.inputScheme.isWubi ? .quanpin : settings.inputScheme
         let segs = segmenter.segmentations(raw: trimmed, scheme: effectiveScheme)
         var (bestSeg, out) = evaluateSegmentations(
             segs,
@@ -223,6 +229,12 @@ final class PinyinEngine {
         )
 
         let hasInvalid = bestSeg.contains { $0.kind == .invalid }
+        if effectiveScheme == .quanpin && hasInvalid && lower.count >= 4,
+           let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
+            let mixedWords = Set(mixed.candidates.map(\.word))
+            out = mixed.candidates + out.filter { !mixedWords.contains($0.word) }
+            return (bestSeg, Array(out.prefix(limit)), nil)
+        }
         let allInitials = !bestSeg.isEmpty && bestSeg.allSatisfy { $0.raw.count == 1 }
         let allComplete = !bestSeg.isEmpty && bestSeg.allSatisfy { $0.kind == .complete }
         let hasAwkwardPartial = bestSeg.count >= 2 && !allInitials && bestSeg.contains { $0.kind == .partial }
@@ -323,6 +335,129 @@ final class PinyinEngine {
         }
 
         return (bestSeg, Array(out.prefix(limit)), correctedHint)
+    }
+
+    // MARK: - 引擎 3.0：中英数混输直出 & 点击任意音节局部单字反查
+
+    private static let embeddedEnglishTokens: [(lower: String, display: String)] = [
+        ("iphone", "iPhone"), ("github", "GitHub"), ("wechat", "WeChat"), ("deepseek", "DeepSeek"),
+        ("chatgpt", "ChatGPT"), ("gemini", "Gemini"), ("swift", "Swift"), ("python", "Python"),
+        ("docker", "Docker"), ("macos", "macOS"), ("xcode", "Xcode"), ("wifi", "Wi-Fi"),
+        ("pdf", "PDF"), ("ppt", "PPT"), ("vip", "VIP"), ("api", "API"), ("app", "App"),
+        ("bug", "Bug"), ("ios", "iOS"), ("mac", "Mac"), ("sql", "SQL"), ("llm", "LLM"),
+        ("ipa", "IPA"), ("url", "URL"), ("ceo", "CEO"), ("kpi", "KPI"), ("okr", "OKR"),
+        ("hr", "HR"), ("ok", "OK"), ("ai", "AI"), ("pm", "PM"), ("pr", "PR"), ("ui", "UI"),
+    ]
+
+    /// 当拼音串中包含阿拉伯数字（如 `mingtian3dianjian`）或嵌入高频英文缩写（如 `fayigepdfgeiwo`）时，
+    /// 自动分段解码中文并无缝拼合英文/数字，免切换键盘直接输出整句。
+    private func attemptMixedChineseDigitEnglishDecode(
+        raw: String,
+        settings: LingxiSettings,
+        contextBeforeCursor: String?
+    ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate])? {
+        let lower = raw.lowercased()
+        enum Piece { case py(String), literal(String) }
+        var pieces: [Piece] = []
+        var idx = lower.startIndex
+
+        // 1. 先按数字块切分
+        var buf = ""
+        while idx < lower.endIndex {
+            let ch = lower[idx]
+            if ch.isNumber {
+                if !buf.isEmpty { pieces.append(.py(buf)); buf = "" }
+                var numStr = ""
+                while idx < lower.endIndex && (lower[idx].isNumber || lower[idx] == ".") {
+                    numStr.append(lower[idx])
+                    idx = lower.index(after: idx)
+                }
+                pieces.append(.literal(numStr))
+                continue
+            }
+            buf.append(ch)
+            idx = lower.index(after: idx)
+        }
+        if !buf.isEmpty { pieces.append(.py(buf)) }
+
+        // 2. 在无法完整切分为合法拼音的字母片段中，尝试识别常见内嵌英文词（如 pdf/ppt/bug/api/app/ios）
+        var refined: [Piece] = []
+        var foundMixedLiteral = pieces.contains { if case .literal = $0 { return true }; return false }
+        for piece in pieces {
+            guard case .py(let segText) = piece, segText.count >= 3 else {
+                refined.append(piece)
+                continue
+            }
+            let rawSegs = segmenter.segmentations(raw: segText, scheme: .quanpin)
+            let isCleanPinyin = rawSegs.first?.allSatisfy({ $0.kind != .invalid }) ?? false
+            if isCleanPinyin {
+                refined.append(piece)
+                continue
+            }
+            var splitDone = false
+            for entry in Self.embeddedEnglishTokens where segText.contains(entry.lower) {
+                if let range = segText.range(of: entry.lower) {
+                    let left = String(segText[..<range.lowerBound])
+                    let right = String(segText[range.upperBound...])
+                    let leftOK = left.isEmpty || (segmenter.segmentations(raw: left, scheme: .quanpin).first?.allSatisfy({ $0.kind != .invalid }) ?? false)
+                    let rightOK = right.isEmpty || (segmenter.segmentations(raw: right, scheme: .quanpin).first?.allSatisfy({ $0.kind != .invalid }) ?? false)
+                    if leftOK && rightOK && (!left.isEmpty || !right.isEmpty) {
+                        if !left.isEmpty { refined.append(.py(left)) }
+                        refined.append(.literal(entry.display))
+                        if !right.isEmpty { refined.append(.py(right)) }
+                        foundMixedLiteral = true
+                        splitDone = true
+                        break
+                    }
+                }
+            }
+            if !splitDone { refined.append(piece) }
+        }
+
+        guard foundMixedLiteral else { return nil }
+
+        var assembledWords: [String] = []
+        var assembledTokens: [PinyinToken] = []
+        var cursorOffset = 0
+        for p in refined {
+            switch p {
+            case .literal(let lit):
+                assembledWords.append(lit)
+                assembledTokens.append(PinyinToken(text: lit, raw: lit, kind: .complete, end: cursorOffset + lit.count))
+                cursorOffset += lit.count
+            case .py(let pyPart):
+                let segs = segmenter.segmentations(raw: pyPart, scheme: .quanpin)
+                let (subSeg, subCands) = evaluateSegmentations(segs, isT9: false, settings: settings, contextMap: [:], limit: 4)
+                guard let top = subCands.first else { return nil }
+                assembledWords.append(top.word)
+                for t in subSeg {
+                    assembledTokens.append(PinyinToken(text: t.text, raw: t.raw, kind: t.kind, end: cursorOffset + t.end))
+                }
+                cursorOffset += pyPart.count
+            }
+        }
+        let joined = assembledWords.joined()
+        guard !joined.isEmpty else { return nil }
+        let mixedCand = PinyinCandidate(
+            word: joined,
+            py: "",
+            lp: 12.0,
+            consumed: raw.count,
+            isExact: true,
+            source: .dictionary
+        )
+        return (assembledTokens, [mixedCand])
+    }
+
+    /// 针对长句中用户点选的任意单个音节，快速返回其全部同音单字，用于「免退格回溯改字」。
+    func candidatesForSingleToken(
+        _ token: PinyinToken,
+        isT9: Bool,
+        settings: LingxiSettings,
+        limit: Int = 48
+    ) -> [PinyinCandidate] {
+        let single = lookup(tokens: [token], start: 0, end: 1, openEnd: false, isT9: isT9, settings: settings)
+        return Array(single.prefix(limit))
     }
 
     // MARK: - 五笔 86（固定表序、剩余码提示、四码唯一自动上屏、z 临时拼音与五笔编码反查）

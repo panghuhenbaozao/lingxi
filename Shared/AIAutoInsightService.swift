@@ -688,4 +688,272 @@ enum SmartContextPromptDetector {
             recommendedCustomIDs: pinned
         )
     }
+
+    /// 剪贴板 12 类意图快速直达动作（用于键盘顶部栏粘贴条右侧直接展示一键 AI 胶囊，零面板切换）。
+    static func detectClipboardIntent(for text: String) -> ClipboardIntentAction? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 4 else { return nil }
+
+        let asciiLetters = trimmed.unicodeScalars.filter { ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122) }.count
+        let nonSpace = max(1, trimmed.unicodeScalars.filter { !$0.properties.isWhitespace }.count)
+        let asciiRatio = Double(asciiLetters) / Double(nonSpace)
+
+        // 1. 报错/代码日志
+        let codeHints = ["Error:", "Exception", "Traceback", "TypeError", "SyntaxError", "func ", "class ", "SELECT ", "HTTP 500", "404"]
+        if codeHints.contains(where: { trimmed.contains($0) }) {
+            return ClipboardIntentAction(badge: "🛠️ 排错建议", action: .summarize, customInstruction: "分析这段代码或报错信息，用2-3句话给出根因和直接修复建议。")
+        }
+
+        // 2. 英文/外文段落
+        if asciiRatio >= 0.58 && asciiLetters >= 8 {
+            return ClipboardIntentAction(badge: "🌐 秒译中文", action: .translateZh, customInstruction: nil)
+        }
+
+        // 3. 提问 / 对方聊天消息
+        let qHints = ["?", "？", "吗", "呢", "方便吗", "在吗", "请问", "能不能", "可以吗", "什么时候", "怎么看"]
+        if qHints.contains(where: { trimmed.contains($0) }) {
+            return ClipboardIntentAction(badge: "🧠 军师回复", action: .strategist, customInstruction: nil)
+        }
+
+        // 4. 职场/会议/排期通知
+        let schedHints = ["会议", "排期", "汇报", "方案", "几点", "明早", "下午", "周", "待办", "合同"]
+        if schedHints.contains(where: { trimmed.contains($0) }) && trimmed.count >= 14 {
+            return ClipboardIntentAction(badge: "📋 提炼待办", action: .structureList, customInstruction: nil)
+        }
+
+        // 5. 长文章 / 长段草稿
+        if trimmed.count >= 50 || trimmed.contains("\n") {
+            return ClipboardIntentAction(badge: "📝 一句总结", action: .summarize, customInstruction: nil)
+        }
+
+        return ClipboardIntentAction(badge: "✨ 得体回复", action: .replyClipboard, customInstruction: nil)
+    }
 }
+
+struct ClipboardIntentAction: Equatable {
+    let badge: String
+    let action: AIPresetAction
+    let customInstruction: String?
+}
+
+// MARK: - 博弈军师三策略回复、10 秒文风克隆、Diff 反向自学习与每周进化周报
+
+struct NegotiationStrategyOption: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var tag: String
+    var toneLabel: String
+    var reply: String
+}
+
+struct NegotiationStrategistResult: Codable, Equatable {
+    var subtext: String
+    var options: [NegotiationStrategyOption]
+}
+
+struct WeeklyEvolutionDigest: Equatable {
+    let totalChars: Int
+    let avgCPM: Double
+    let estimatedMinutesSavedByAI: Int
+    let topConfusionPair: String?
+    let topLearnedWords: [String]
+    let headline: String
+    let advice: String
+}
+
+extension AIAutoInsightService {
+    /// 博弈军师：分析对方棘手消息潜台词，一次性产出 3 种不同立场的直接回复策略气泡。
+    static func runNegotiationStrategist(
+        message: String,
+        config: AIConfig = AIConfig.load(),
+        client: AIClient = AIClient(timeout: 40)
+    ) async throws -> NegotiationStrategistResult {
+        let sys = """
+        你是高情商社交与职场博弈军师。针对对方发来的消息，输出一个严格合法的 JSON 对象（不要额外解释）：
+        {
+          "subtext": "一句话点破对方真实诉求或潜台词（15-32字）",
+          "options": [
+            {"tag": "🛡️ 温和太极", "toneLabel": "礼貌接住不硬刚", "reply": "直接可发送的中文回复"},
+            {"tag": "🎯 专业底线", "toneLabel": "清晰边界讲条件", "reply": "直接可发送的中文回复"},
+            {"tag": "😄 幽默破冰", "toneLabel": "轻松给台阶化解", "reply": "直接可发送的中文回复"}
+          ]
+        }
+        要求：每条 reply 自然口语、像真人发微信，严禁官腔套话。
+        """
+        var collected = ""
+        for try await chunk in client.streamText(
+            prompt: "对方发来消息：\n\(message)",
+            systemInstruction: sys,
+            config: config,
+            featureTag: "ai_strategist",
+            preferDeep: true
+        ) {
+            collected += chunk
+        }
+        return parseStrategistResult(collected, fallbackMessage: message)
+    }
+
+    static func parseStrategistResult(_ raw: String, fallbackMessage: String) -> NegotiationStrategistResult {
+        let cleaned = extractJSONObjectString(from: raw)
+        if let data = cleaned.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = obj["options"] as? [[String: Any]] {
+            let subtext = (obj["subtext"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "对方在试探你的态度与节奏"
+            let opts: [NegotiationStrategyOption] = arr.prefix(3).compactMap { item in
+                let reply = (item["reply"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !reply.isEmpty else { return nil }
+                return NegotiationStrategyOption(
+                    tag: (item["tag"] as? String) ?? "✨ 策略回复",
+                    toneLabel: (item["toneLabel"] as? String) ?? "得体方案",
+                    reply: reply
+                )
+            }
+            if !opts.isEmpty {
+                return NegotiationStrategistResult(subtext: subtext, options: opts)
+            }
+        }
+        let plain = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NegotiationStrategistResult(
+            subtext: "已为你生成得体回复策略，点击任意气泡直接上屏",
+            options: [
+                NegotiationStrategyOption(tag: "🛡️ 温和接住", toneLabel: "先缓冲再定夺", reply: plain.isEmpty ? "收到啦，我先核对一下这边的安排，稍后给你准信～" : plain),
+                NegotiationStrategyOption(tag: "🎯 明确边界", toneLabel: "清晰表达条件", reply: "明白你的意思，这件事我这边目前排期比较紧，如果能调整一下时间节点会更稳妥。"),
+                NegotiationStrategyOption(tag: "😄 轻松化解", toneLabel: "友好给台阶", reply: "哈哈收到！这事交给我先评估一下，回头咱再细聊～"),
+            ]
+        )
+    }
+
+    /// 10 秒文风 DNA 克隆：粘贴 3~5 条用户日常写的聊天/文案样本，提取说话习惯、标点特征与专属人设。
+    static func cloneStyleDNA(
+        fromSamples samples: String,
+        config: AIConfig = AIConfig.load(),
+        client: AIClient = AIClient(timeout: 35)
+    ) async -> PersonalStyleDNA {
+        var dna = config.styleDNA
+        let trimmed = samples.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return dna }
+
+        // 先做端侧标点与句长特征快速提取
+        let usesTilde = trimmed.contains("～") || trimmed.contains("~")
+        let avgLen = trimmed.count / max(1, trimmed.split(whereSeparator: { "\n。！？!?".contains($0) }).count)
+        let localSummary = "平均句长约 \(avgLen) 字，\(usesTilde ? "偏爱柔和波浪号「～」拉近距离" : "标点干脆利落")，表达自然真实、去除了机械套话。"
+
+        guard config.isConfigured else {
+            dna.clonedStyleSummary = localSummary
+            dna.updatedAt = Int(Date().timeIntervalSince1970)
+            return dna
+        }
+
+        let sys = """
+        你是语言风格分析专家。根据用户提供的 3-5 句真实日常表达样本，输出严格合法 JSON：
+        {
+          "clonedStyleSummary": "50-90字总结该用户的真实语气温度、句长节奏、用词与标点指纹，可直接指导后续 AI 模仿TA本人说话",
+          "catchphrases": ["从样本或同风格中提取的 2-4 个自然常用短语/收尾词"]
+        }
+        """
+        do {
+            var collected = ""
+            for try await chunk in client.streamText(
+                prompt: "用户真实表达样本：\n\(trimmed)",
+                systemInstruction: sys,
+                config: config,
+                featureTag: "style_dna_clone"
+            ) {
+                collected += chunk
+            }
+            let cleaned = extractJSONObjectString(from: collected)
+            if let data = cleaned.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let summary = obj["clonedStyleSummary"] as? String, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    dna.clonedStyleSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    dna.clonedStyleSummary = localSummary
+                }
+                if let arr = obj["catchphrases"] as? [String] {
+                    let existing = Set(dna.personalCatchphrases)
+                    for item in arr.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }) where !item.isEmpty && !existing.contains(item) {
+                        dna.personalCatchphrases.insert(item, at: 0)
+                    }
+                    if dna.personalCatchphrases.count > 12 {
+                        dna.personalCatchphrases = Array(dna.personalCatchphrases.prefix(12))
+                    }
+                }
+            } else {
+                dna.clonedStyleSummary = collected.count >= 15 ? String(collected.prefix(160)) : localSummary
+            }
+        } catch {
+            dna.clonedStyleSummary = localSummary
+        }
+        dna.updatedAt = Int(Date().timeIntervalSince1970)
+        return dna
+    }
+
+    /// AI 改写 Diff 反向自学习：当用户手动删改 AI 生成文本并发送时，自动提炼个人偏好规则。
+    static func learnFromUserEditDiff(aiOriginal: String, userFinal: String, into dna: inout PersonalStyleDNA) {
+        let orig = aiOriginal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fin = userFinal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !orig.isEmpty, !fin.isEmpty, orig != fin else { return }
+
+        var newRules: [String] = []
+        if Double(fin.count) < Double(orig.count) * 0.72 {
+            newRules.append("偏爱更简短凝练的表达，减少冗长铺垫")
+        }
+        if orig.contains("您好") && !fin.contains("您好") {
+            newRules.append("避免过度客套的「您好」，口吻更自然直接")
+        }
+        if (fin.contains("～") || fin.contains("~")) && !orig.contains("～") {
+            newRules.append("句尾倾向使用柔和波浪号「～」")
+        }
+        for rule in newRules where !dna.learnedDiffRules.contains(rule) {
+            dna.learnedDiffRules.insert(rule, at: 0)
+        }
+        if dna.learnedDiffRules.count > 10 {
+            dna.learnedDiffRules = Array(dna.learnedDiffRules.prefix(10))
+        }
+        dna.updatedAt = Int(Date().timeIntervalSince1970)
+    }
+
+    /// 生成每周输入进化周报（汇总速度、AI 省时估算、高频混淆与最常用自造词）。
+    static func buildWeeklyEvolutionDigest(
+        profile: UserTypingHabitProfile = TypingHabitTracker.shared.currentProfile(),
+        stats: TypingStatsStore.Summary = TypingStatsStore.shared.summary(),
+        userWords: [UserWordEntry] = UserLexicon().allEntries(limit: 20),
+        ledger: [AIUsageLedgerEntry] = AIUsageLedgerStore.load()
+    ) -> WeeklyEvolutionDigest {
+        let chars = max(profile.totalChars, stats.totalChars)
+        let cpm = max(profile.avgCPM, stats.averageCharsPerMinute)
+        let aiOutputChars = ledger.reduce(0) { $0 + $1.outputChars }
+        let savedMins = max(ledger.isEmpty ? 0 : 1, Int(round(Double(aiOutputChars) / 38.0)))
+        let topConfKey = profile.confusionMatrix.filter { $0.value > 0 }.max(by: { $0.value < $1.value })?.key
+        let topConfName = topConfKey.map(fuzzyDisplayName(for:))
+        let topWords = userWords.prefix(6).map(\.word)
+
+        let headline: String
+        if chars >= 1500 {
+            headline = "本周高能输出 \(chars) 字，均速 \(String(format: "%.0f", cpm)) 字/分"
+        } else if chars > 0 {
+            headline = "已累计记录 \(chars) 字，个人自学习词库正在加速贴合你"
+        } else {
+            headline = "灵犀进化引擎已就绪，开始打字即可生成你的个人成长周报"
+        }
+
+        let advice: String
+        if let conf = topConfName {
+            advice = "近期「\(conf)」出现误拼，开启该组模糊音预计可进一步降低退格率。"
+        } else if ledger.count >= 5 {
+            advice = "AI 助手累计帮你生成 \(aiOutputChars) 字，约节省 \(savedMins) 分钟打字时间。"
+        } else {
+            advice = "试试在聊天中选中一段文字触发「框选即改」，或复制难题点「博弈军师」。"
+        }
+
+        return WeeklyEvolutionDigest(
+            totalChars: chars,
+            avgCPM: cpm,
+            estimatedMinutesSavedByAI: savedMins,
+            topConfusionPair: topConfName,
+            topLearnedWords: topWords,
+            headline: headline,
+            advice: advice
+        )
+    }
+}
+
