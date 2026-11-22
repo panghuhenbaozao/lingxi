@@ -59,10 +59,19 @@ struct HexColor: Codable, Equatable, Hashable {
         )
     }
 
-    /// 简化 WCAG 相对对比度（用于自由调色板自动提示可读性）
+    /// 标准 W3C WCAG 2.1 相对亮度（含 sRGB 伽马线性化）
+    var relativeLuminance: Double {
+        let c = rgba
+        func linearize(_ v: Double) -> Double {
+            v <= 0.03928 ? (v / 12.92) : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linearize(c.r) + 0.7152 * linearize(c.g) + 0.0722 * linearize(c.b)
+    }
+
+    /// 标准 W3C WCAG 2.1 相对对比度（用于自由调色板自动提示与主题可读性校验）
     func contrastRatio(with other: HexColor) -> Double {
-        let l1 = max(luminance, other.luminance)
-        let l2 = min(luminance, other.luminance)
+        let l1 = max(relativeLuminance, other.relativeLuminance)
+        let l2 = min(relativeLuminance, other.relativeLuminance)
         return (l1 + 0.05) / (l2 + 0.05)
     }
 }

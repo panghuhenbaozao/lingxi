@@ -229,7 +229,19 @@ final class PinyinEngine {
         )
 
         let hasInvalid = bestSeg.contains { $0.kind == .invalid }
-        if effectiveScheme == .quanpin && hasInvalid && lower.count >= 4,
+        let hasInitialCluster: Bool = {
+            var run = 0
+            for t in bestSeg {
+                if t.kind == .initial || t.kind == .invalid || t.kind == .partial {
+                    run += 1
+                    if run >= 2 { return true }
+                } else {
+                    run = 0
+                }
+            }
+            return false
+        }()
+        if effectiveScheme == .quanpin && (hasInvalid || hasInitialCluster) && lower.count >= 4,
            let mixed = attemptMixedChineseDigitEnglishDecode(raw: trimmed, settings: settings, contextBeforeCursor: contextBeforeCursor) {
             let mixedWords = Set(mixed.candidates.map(\.word))
             out = mixed.candidates + out.filter { !mixedWords.contains($0.word) }
@@ -380,7 +392,7 @@ final class PinyinEngine {
         }
         if !buf.isEmpty { pieces.append(.py(buf)) }
 
-        // 2. 在无法完整切分为合法拼音的字母片段中，尝试识别常见内嵌英文词（如 pdf/ppt/bug/api/app/ios）
+        // 2. 在无法全部切分为完整全拼音节的字母片段中，尝试识别常见内嵌英文词（如 pdf/ppt/bug/api/app/ios）
         var refined: [Piece] = []
         var foundMixedLiteral = pieces.contains { if case .literal = $0 { return true }; return false }
         for piece in pieces {
@@ -389,8 +401,8 @@ final class PinyinEngine {
                 continue
             }
             let rawSegs = segmenter.segmentations(raw: segText, scheme: .quanpin)
-            let isCleanPinyin = rawSegs.first?.allSatisfy({ $0.kind != .invalid }) ?? false
-            if isCleanPinyin {
+            let isCleanCompletePinyin = rawSegs.first?.allSatisfy({ $0.kind == .complete }) ?? false
+            if isCleanCompletePinyin {
                 refined.append(piece)
                 continue
             }
@@ -399,8 +411,10 @@ final class PinyinEngine {
                 if let range = segText.range(of: entry.lower) {
                     let left = String(segText[..<range.lowerBound])
                     let right = String(segText[range.upperBound...])
-                    let leftOK = left.isEmpty || (segmenter.segmentations(raw: left, scheme: .quanpin).first?.allSatisfy({ $0.kind != .invalid }) ?? false)
-                    let rightOK = right.isEmpty || (segmenter.segmentations(raw: right, scheme: .quanpin).first?.allSatisfy({ $0.kind != .invalid }) ?? false)
+                    let leftSeg = left.isEmpty ? [] : (segmenter.segmentations(raw: left, scheme: .quanpin).first ?? [])
+                    let rightSeg = right.isEmpty ? [] : (segmenter.segmentations(raw: right, scheme: .quanpin).first ?? [])
+                    let leftOK = left.isEmpty || (!leftSeg.isEmpty && leftSeg.allSatisfy({ $0.kind == .complete }))
+                    let rightOK = right.isEmpty || (!rightSeg.isEmpty && rightSeg.allSatisfy({ $0.kind == .complete }))
                     if leftOK && rightOK && (!left.isEmpty || !right.isEmpty) {
                         if !left.isEmpty { refined.append(.py(left)) }
                         refined.append(.literal(entry.display))
