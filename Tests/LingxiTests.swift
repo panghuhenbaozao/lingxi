@@ -682,4 +682,125 @@ final class LingxiTests: XCTestCase {
 
         store.clearAll()
     }
+
+    // MARK: - M2 同步地基（Lamport / LWW / E2EE）
+
+    private func makeChange(ns: String, key: String, ts: UInt64, device: String, tombstone: Bool = false) -> SyncChange {
+        SyncChange(
+            namespace: SyncNamespace(rawValue: ns),
+            key: key,
+            ciphertext: Data("v-\(ts)-\(device)".utf8),
+            lamportTS: ts,
+            deviceID: device,
+            tombstone: tombstone
+        )
+    }
+
+    func testLamportClockTickAndObserve() {
+        var persisted: [UInt64] = []
+        let clock = LamportClock(initial: 5, persist: { persisted.append($0) })
+        XCTAssertEqual(clock.value, 5)
+        XCTAssertEqual(clock.tick(), 6)
+        XCTAssertEqual(clock.observe(remote: 10), 11)
+        XCTAssertEqual(clock.observe(remote: 3), 12, "远端时钟落后时本地仍递增（ADR 0001：max(local, remote) + 1）")
+        XCTAssertEqual(clock.value, 12)
+        XCTAssertEqual(persisted, [6, 11, 12], "每次变化都必须落盘，崩溃后恢复值只增不减")
+    }
+
+    func testLamportClockRestoreFromPersistedValue() {
+        let clock = LamportClock(initial: 42)
+        XCTAssertEqual(clock.tick(), 43, "崩溃重启后从持久化值恢复，时钟绝不回退")
+    }
+
+    func testLWWMergeEngineRemoteWinsByLamport() {
+        let local = [makeChange(ns: "settings", key: "haptic", ts: 10, device: "A")]
+        let remote = [makeChange(ns: "settings", key: "haptic", ts: 12, device: "B")]
+        let outcome = LWWMergeEngine.merge(local: local, remote: remote)
+        XCTAssertEqual(outcome.merged.count, 1)
+        XCTAssertEqual(outcome.merged.first?.deviceID, "B")
+        XCTAssertEqual(outcome.toApply.count, 1)
+        XCTAssertEqual(outcome.watermark, 12)
+    }
+
+    func testLWWMergeEngineTieBrokenByDeviceID() {
+        let local = [makeChange(ns: "settings", key: "haptic", ts: 10, device: "B")]
+        let remote = [makeChange(ns: "settings", key: "haptic", ts: 10, device: "C")]
+        let outcome = LWWMergeEngine.merge(local: local, remote: remote)
+        XCTAssertEqual(outcome.merged.first?.deviceID, "C", "lamport 相同时 deviceID 字典序大者胜")
+        XCTAssertEqual(outcome.toApply.first?.deviceID, "C")
+    }
+
+    func testLWWMergeEngineTombstoneWins() {
+        let local = [makeChange(ns: "phrases", key: "p1", ts: 10, device: "A")]
+        let remote = [makeChange(ns: "phrases", key: "p1", ts: 11, device: "B", tombstone: true)]
+        let outcome = LWWMergeEngine.merge(local: local, remote: remote)
+        XCTAssertEqual(outcome.merged.first?.tombstone, true, "删除也是一次写入：墓碑参与决胜")
+        XCTAssertEqual(outcome.toApply.first?.tombstone, true)
+    }
+
+    func testLWWMergeEngineLocalWinsKeepsState() {
+        let local = [makeChange(ns: "settings", key: "k", ts: 20, device: "A")]
+        let remote = [makeChange(ns: "settings", key: "k", ts: 5, device: "B")]
+        let outcome = LWWMergeEngine.merge(local: local, remote: remote)
+        XCTAssertEqual(outcome.merged.first?.deviceID, "A")
+        XCTAssertTrue(outcome.toApply.isEmpty, "本地胜出时远端旧记录不应落本地")
+        XCTAssertEqual(outcome.watermark, 20)
+    }
+
+    func testLWWMergeEngineBatchSameKeyOnlyFinalWinnerApplied() {
+        let remote = [
+            makeChange(ns: "lexicon", key: "w1", ts: 8, device: "B"),
+            makeChange(ns: "lexicon", key: "w1", ts: 15, device: "B"),
+            makeChange(ns: "lexicon", key: "w1", ts: 12, device: "C")
+        ]
+        let outcome = LWWMergeEngine.merge(local: [], remote: remote)
+        XCTAssertEqual(outcome.merged.count, 1)
+        XCTAssertEqual(outcome.merged.first?.lamportTS, 15)
+        XCTAssertEqual(outcome.toApply.count, 1, "批内同键多版本只应用最终胜者")
+        XCTAssertEqual(outcome.toApply.first?.lamportTS, 15)
+        XCTAssertEqual(outcome.watermark, 15)
+    }
+
+    func testLWWMergeEngineNamespacesIsolated() {
+        let local = [makeChange(ns: "settings", key: "same", ts: 30, device: "A")]
+        let remote = [makeChange(ns: "theme", key: "same", ts: 10, device: "B")]
+        let outcome = LWWMergeEngine.merge(local: local, remote: remote)
+        XCTAssertEqual(outcome.merged.count, 2, "不同命名空间的同名 key 互不冲突")
+        XCTAssertEqual(outcome.toApply.count, 1)
+        XCTAssertEqual(outcome.watermark, 30)
+    }
+
+    func testSyncCryptoSealOpenRoundtripAndTamper() throws {
+        let master = Data("master-secret-material-0123456789ab".utf8)
+        let key = SyncCrypto.deriveSyncKey(from: master)
+        let value = Data("{\"candidateBarHeight\":50}".utf8)
+
+        let sealed = try SyncCrypto.seal(value, key: key)
+        XCTAssertNotEqual(sealed, value, "密文不得等于明文")
+        XCTAssertEqual(try SyncCrypto.open(sealed, key: key), value)
+
+        // nonce 每次随机：同明文两次加密密文不同
+        let sealed2 = try SyncCrypto.seal(value, key: key)
+        XCTAssertNotEqual(sealed, sealed2)
+
+        // 篡改密文必须解密失败（GCM 认证标签）
+        var tampered = sealed
+        tampered[tampered.count - 1] ^= 0x01
+        XCTAssertThrowsError(try SyncCrypto.open(tampered, key: key))
+
+        // 错误密钥材料必须解密失败
+        let wrongKey = SyncCrypto.deriveSyncKey(from: Data("another-master-material-9876543210".utf8))
+        XCTAssertThrowsError(try SyncCrypto.open(sealed, key: wrongKey))
+
+        // 同一材料派生确定性一致（多设备同凭据可恢复同钥）
+        let keyAgain = SyncCrypto.deriveSyncKey(from: master)
+        XCTAssertEqual(try SyncCrypto.open(sealed, key: keyAgain), value)
+    }
+
+    func testDeviceIdentityStableAcrossCalls() {
+        let first = SyncInfra.deviceIdentity()
+        XCTAssertFalse(first.deviceID.isEmpty)
+        let second = SyncInfra.deviceIdentity()
+        XCTAssertEqual(first, second, "设备身份必须稳定（LWW 决胜第二排序键的前提）")
+    }
 }
