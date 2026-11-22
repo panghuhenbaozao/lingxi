@@ -109,7 +109,11 @@ public final class SnapshotSyncSource: SyncDataSource {
             if change.tombstone {
                 try? FileManager.default.removeItem(at: url)
             } else {
-                guard try? change.ciphertext.write(to: url, options: [.atomic]) else { continue }
+                do {
+                    try change.ciphertext.write(to: url, options: [.atomic])
+                } catch {
+                    continue // 写盘失败不计数（不误报已应用）
+                }
             }
             applied += 1
         }
