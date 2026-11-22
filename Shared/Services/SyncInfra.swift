@@ -137,7 +137,7 @@ public enum LWWMergeEngine {
         // 仅『最终胜出者就是远端记录』的键需要落本地：
         // 批内同键多版本只应用最终胜者；与本地一致的远端记录重放为无害 no-op
         let applied = merged.compactMap { entry -> SyncChange? in
-            guard let remote = remoteByKey[fullKey(entry)], remote == entry else { return nil }
+            guard let remote = remoteByKey[fullKey(of: entry)], remote == entry else { return nil }
             return remote
         }
         let watermark = merged.map { $0.lamportTS }.max() ?? 0
