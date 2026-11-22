@@ -32,11 +32,18 @@ jobs:
       - name: Run Unit Tests (LingxiTests)
         run: |
           set -o pipefail
+          SIM_ID=$(xcrun simctl list devices available -j | python3 -c "import sys,json; devs=[d for k,v in json.load(sys.stdin)['devices'].items() if 'iOS' in k for d in v if 'iPhone' in d.get('name','') and d.get('isAvailable')]; print(devs[0]['udid'] if devs else '')")
+          if [ -n "$SIM_ID" ]; then
+            DEST="platform=iOS Simulator,id=$SIM_ID"
+          else
+            DEST="generic/platform=iOS Simulator"
+          fi
+          echo "Using Simulator Destination: $DEST"
           if ! xcodebuild test \
             -project Lingxi.xcodeproj \
             -scheme Lingxi \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -destination "$DEST" \
             -derivedDataPath build-test \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee test.log; then
