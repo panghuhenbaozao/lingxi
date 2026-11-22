@@ -1215,7 +1215,7 @@ final class LingxiTests: XCTestCase {
         guard let dbURL = findTestDBURL() else {
             throw XCTSkip("未找到测试词库 pinyin.sqlite")
         }
-        let engine = PinyinEngine(dbURL: dbURL)
+        let engine = PinyinEngine(databaseURL: dbURL)
         var settings = LingxiSettings()
         settings.userLearningEnabled = false
 
