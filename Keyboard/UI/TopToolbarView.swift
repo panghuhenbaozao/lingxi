@@ -670,6 +670,7 @@ final class TopToolbarView: UIView {
         }
         guard let theme else { return }
 
+        let wasHidden = bannerContainer.isHidden
         let isTakeover = (currentBannerState != .hidden)
         leftClusterStack.isHidden = isTakeover
         rightClusterStack.isHidden = isTakeover
@@ -677,9 +678,19 @@ final class TopToolbarView: UIView {
         switch currentBannerState {
         case .hidden:
             bannerContainer.isHidden = true
+            bannerContainer.alpha = 1.0
+            bannerContainer.transform = .identity
 
         case .detectedNewContent(_, let isURL, let isNumber):
             bannerContainer.isHidden = false
+            if wasHidden {
+                bannerContainer.alpha = 0.0
+                bannerContainer.transform = CGAffineTransform(scaleX: 0.97, y: 0.97)
+                UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                    self.bannerContainer.alpha = 1.0
+                    self.bannerContainer.transform = .identity
+                }
+            }
 
             let badge = makeTagBadge(
                 icon: isURL ? "link" : (isNumber ? "number.square.fill" : "doc.on.clipboard.fill"),
@@ -724,6 +735,14 @@ final class TopToolbarView: UIView {
 
         case .readyPreview(let item):
             bannerContainer.isHidden = false
+            if wasHidden {
+                bannerContainer.alpha = 0.0
+                bannerContainer.transform = CGAffineTransform(scaleX: 0.97, y: 0.97)
+                UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                    self.bannerContainer.alpha = 1.0
+                    self.bannerContainer.transform = .identity
+                }
+            }
             let singleLine = item.text
                 .replacingOccurrences(of: "\r\n", with: " ")
                 .replacingOccurrences(of: "\n", with: " ")

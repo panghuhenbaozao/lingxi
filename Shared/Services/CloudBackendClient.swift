@@ -11,7 +11,8 @@ public struct CloudBackendConfig: Codable, Equatable {
     public var username: String = ""
     public var apiKeyPrefix: String = ""
     public var e2eeSalt: String = ""
-    public var habitAnalysisEnabled: Bool = true
+    /// 第六部分合规铁律：分析功能默认关闭（零收集），由用户显式授权开启并与登录解耦
+    public var habitAnalysisEnabled: Bool = false
     public var autoSyncEnabled: Bool = true
     public var lastSyncedAt: Date?
     public var lastSyncSummary: String = ""
@@ -1146,6 +1147,50 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     public func checkServerHealth() async throws -> [String: Any] {
         try await requestJSON(method: "GET", path: "/api/v1/health", body: nil, requireAuth: false)
+    }
+
+    /// L2 密钥学：修改账号密码并轮换服务端 E2EE 派生盐，随后触发全量密文重加密同步
+    public func changePasswordAndRotateKey(newPassword: String) async throws -> String {
+        guard newPassword.count >= 8 else {
+            throw CloudBackendError.badRequest("新密码长度不能少于 8 位")
+        }
+        let dict = try await requestJSON(
+            method: "POST",
+            path: "/api/v1/auth/password/change",
+            body: ["newPassword": newPassword],
+            requireAuth: true
+        )
+        let newSalt = dict["newE2eeSalt"] as? String ?? ""
+        if !newSalt.isEmpty {
+            var cfg = CloudBackendConfig.load()
+            cfg.e2eeSalt = newSalt
+            cfg.save()
+            // 清空同步账本游标，触发用新盐派生的密钥全量重加密推送
+            SyncLedgerStore().save(SyncLedger())
+            _ = try? await syncAllImportantDataAndHabits()
+        }
+        return newSalt
+    }
+
+    /// 第六部分 PIPL/GDPR：向服务端写入不可变授权审计流水 (`consent_records`)
+    public func syncConsentToServer(scope: String, granted: Bool, policyVersion: String = "2026.11-v1") async {
+        ComplianceService.shared.recordConsent(scope: scope, granted: granted, policyVersion: policyVersion)
+        guard isAuthenticatedOrHasAPIKey else { return }
+        _ = try? await requestJSON(
+            method: "POST",
+            path: "/api/v1/compliance/consent",
+            body: ["scope": scope, "granted": granted, "policyVersion": policyVersion],
+            requireAuth: true
+        )
+    }
+
+    /// 第六部分 PIPL/GDPR：一键注销云端账号并级联物理删除所有同步密文、会话与画像数据
+    public func deleteCloudAccountCascade() async throws {
+        if isAuthenticatedOrHasAPIKey {
+            _ = try await requestJSON(method: "DELETE", path: "/api/v1/compliance/account", body: nil, requireAuth: true)
+        }
+        TypingHabitTracker.shared.clearAllLocalHabits()
+        await signOut()
     }
 
     private func decodeProfile(from dict: [String: Any]) -> UserTypingHabitProfile? {

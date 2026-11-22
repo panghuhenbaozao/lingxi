@@ -26,6 +26,9 @@ struct CloudAccountView: View {
     @State private var relayPairCode: String = ClipboardRelayConfig.load().pairCode
     @State private var relayDraftText: String = ""
     @State private var relayedItems: [RelayedClipboardItem] = []
+    @State private var relayStreamTask: Task<Void, Never>?
+    @State private var newPasswordForRotation: String = ""
+    @State private var showDeleteAccountConfirm: Bool = false
 
     var body: some View {
         ScrollView {
@@ -46,6 +49,19 @@ struct CloudAccountView: View {
         .task {
             await appState.refreshHabitProfile()
             relayedItems = (try? await ClipboardRelayService.shared.pullLatest(pairCode: relayPairCode)) ?? []
+            startSSEStream()
+        }
+        .onDisappear {
+            relayStreamTask?.cancel()
+            relayStreamTask = nil
+        }
+        .alert("永久注销云端账号？", isPresented: $showDeleteAccountConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("确认注销并物理删除", role: .destructive) {
+                Task { await performCascadeAccountDeletion() }
+            }
+        } message: {
+            Text("此操作将在服务器端级联物理删除您的账号、全部 E2EE 同步密文、设备会话与习惯画像，且无法恢复。您的本机离线词库不受影响。")
         }
     }
 
@@ -128,6 +144,7 @@ struct CloudAccountView: View {
                     var cfg = ClipboardRelayConfig.load()
                     cfg.pairCode = relayPairCode
                     cfg.save()
+                    startSSEStream()
                 }
                 .font(Design.Typography.SwiftUIFont.caption)
                 .foregroundStyle(Color(Design.Palette.stone))
@@ -689,6 +706,44 @@ struct CloudAccountView: View {
                 .clipShape(Capsule())
                 .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 1))
             }
+
+            if appState.isCloudAuthenticated {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("L2 密钥学 · 修改密码并全量轮换 E2EE 密钥")
+                        .font(Design.Typography.SwiftUIFont.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                    HStack(spacing: 8) {
+                        SecureField("输入新密码（至少 8 位）", text: $newPasswordForRotation)
+                            .font(Design.Typography.SwiftUIFont.body)
+                            .padding(9)
+                            .background(Color(Design.Palette.surface))
+                            .clipShape(RoundedRectangle(cornerRadius: Design.Radius.input))
+                        Button("轮换重加密") {
+                            Task { await performPasswordAndKeyRotation() }
+                        }
+                        .font(Design.Typography.SwiftUIFont.caption)
+                        .foregroundStyle(Color(Design.Palette.canvas))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color(Design.Palette.ink))
+                        .clipShape(Capsule())
+                        .disabled(isWorking || newPasswordForRotation.count < 8)
+                    }
+                }
+
+                Button(role: .destructive) {
+                    showDeleteAccountConfirm = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle.badge.xmark")
+                        Text("一键注销云端账号并级联物理删除全部云端数据")
+                    }
+                    .font(Design.Typography.SwiftUIFont.caption)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+            }
         }
         .padding(Design.Spacing.md)
         .background(Color(Design.Palette.canvas))
@@ -918,5 +973,46 @@ struct CloudAccountView: View {
         statusBanner = appState.isCloudAuthenticated
             ? "已实时上报打字习惯与 API 数据至服务器并更新画像"
             : "已在本地完成打字习惯画像分析（登录或接入 API Key 后自动同步至服务器）"
+    }
+
+    private func startSSEStream() {
+        relayStreamTask?.cancel()
+        let code = relayPairCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return }
+        relayStreamTask = ClipboardRelayService.shared.subscribeRealtimeStream(pairCode: code) { items in
+            self.relayedItems = items
+            self.appState.reloadClipboard()
+            if let newest = items.first {
+                UIPasteboard.general.string = newest.contentText
+                self.statusBanner = "⚡ 实时接力收到 (\(newest.senderDevice))：\(newest.contentText)"
+            }
+        }
+    }
+
+    private func performPasswordAndKeyRotation() async {
+        isWorking = true
+        errorBanner = nil
+        defer { isWorking = false }
+        do {
+            _ = try await CloudBackendClient.shared.changePasswordAndRotateKey(newPassword: newPasswordForRotation)
+            newPasswordForRotation = ""
+            appState.refreshAll()
+            statusBanner = "✓ 密码已更新，已完成 E2EE 新盐密钥轮换与全量密文重加密同步"
+        } catch {
+            errorBanner = error.localizedDescription
+        }
+    }
+
+    private func performCascadeAccountDeletion() async {
+        isWorking = true
+        errorBanner = nil
+        defer { isWorking = false }
+        do {
+            try await CloudBackendClient.shared.deleteCloudAccountCascade()
+            appState.refreshAll()
+            statusBanner = "✓ 云端账号及全部服务端数据已级联物理删除（本机离线词库完好保留）"
+        } catch {
+            errorBanner = error.localizedDescription
+        }
     }
 }

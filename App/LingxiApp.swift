@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct LingxiApp: App {
@@ -13,6 +14,19 @@ struct LingxiApp: App {
                     if newPhase == .active {
                         appState.refreshAll()
                         appState.scheduleAutoSyncIfNeeded()
+                        let relayCfg = ClipboardRelayConfig.load()
+                        if relayCfg.autoRelayEnabled, !relayCfg.pairCode.isEmpty {
+                            Task {
+                                if let items = try? await ClipboardRelayService.shared.pullLatest(pairCode: relayCfg.pairCode),
+                                   let newest = items.first,
+                                   newest.id > relayCfg.lastPulledID {
+                                    await MainActor.run {
+                                        UIPasteboard.general.string = newest.contentText
+                                        appState.reloadClipboard()
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
         }

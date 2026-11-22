@@ -16,6 +16,7 @@ struct ClipboardPhrasesView: View {
     @State private var relayConfig: ClipboardRelayConfig = ClipboardRelayConfig.load()
     @State private var relayToast: String?
     @State private var isRelaying: Bool = false
+    @State private var relaySSETask: Task<Void, Never>?
 
     // BigBang 炸词分词提取 Sheet
     @State private var bigBangSourceText: String?
@@ -45,6 +46,20 @@ struct ClipboardPhrasesView: View {
             .navigationTitle("剪贴板与短语")
             .onAppear {
                 relayConfig = ClipboardRelayConfig.load()
+                if relayConfig.autoRelayEnabled, !relayConfig.pairCode.isEmpty {
+                    relaySSETask?.cancel()
+                    relaySSETask = ClipboardRelayService.shared.subscribeRealtimeStream(pairCode: relayConfig.pairCode) { items in
+                        appState.reloadClipboard()
+                        if let first = items.first {
+                            UIPasteboard.general.string = first.contentText
+                            relayToast = "⚡ 实时跨屏收到：「\(first.contentText.prefix(24))」"
+                        }
+                    }
+                }
+            }
+            .onDisappear {
+                relaySSETask?.cancel()
+                relaySSETask = nil
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

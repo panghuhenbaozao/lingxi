@@ -36,6 +36,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: 灵犀输入法
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
@@ -43,6 +45,11 @@ targets:
         LingxiAppGroup: group.com.lingxi.ime
         NSPhotoLibraryUsageDescription: 用于选择键盘背景图片
         NSLocalNetworkUsageDescription: 用于在同 Wi-Fi 下通过 M2 局域网 6 位配对码加密通道与您的另一台设备点对点同步词库与设置
+        NSBonjourServices:
+          - _lingxi-sync._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -83,7 +90,12 @@ targets:
       path: Keyboard/Info.plist
       properties:
         CFBundleDisplayName: 灵犀输入法
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LingxiAppGroup: group.com.lingxi.ime
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         NSExtension:
           NSExtensionPointIdentifier: com.apple.keyboard-service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController

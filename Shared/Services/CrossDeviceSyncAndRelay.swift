@@ -194,6 +194,52 @@ public final class ClipboardRelayService {
         }
         return wrapper.items
     }
+
+    /// 建立原生 Server-Sent Events (SSE) 实时推流长连接，电脑端点击「秒传」时手机毫秒级收到并自动写入剪贴板与顶栏接管队列
+    public func subscribeRealtimeStream(
+        pairCode: String,
+        onUpdate: @escaping @MainActor ([RelayedClipboardItem]) -> Void
+    ) -> Task<Void, Never> {
+        let code = pairCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Task {
+            while !Task.isCancelled && !code.isEmpty {
+                let baseURL = CloudBackendConfig.load().normalizedBaseURL
+                guard let encoded = code.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                      let url = URL(string: baseURL + "/api/v1/relay/stream?code=\(encoded)") else {
+                    break
+                }
+                var req = URLRequest(url: url)
+                req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                req.timeoutInterval = 30
+                do {
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                        try? await Task.sleep(nanoseconds: 4_000_000_000)
+                        continue
+                    }
+                    struct SSEWrapper: Decodable { let items: [RelayedClipboardItem] }
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        guard line.hasPrefix("data:") else { continue }
+                        let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                        guard let data = jsonStr.data(using: .utf8),
+                              let parsed = try? JSONDecoder().decode(SSEWrapper.self, from: data),
+                              !parsed.items.isEmpty else { continue }
+
+                        var relayCfg = ClipboardRelayConfig.load()
+                        if let newest = parsed.items.first, newest.id > relayCfg.lastPulledID {
+                            relayCfg.lastPulledID = newest.id
+                            relayCfg.save()
+                            _ = ClipboardStore.record(newest.contentText, changeCount: nil)
+                        }
+                        await onUpdate(parsed.items)
+                    }
+                } catch {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - 2. M2 局域网直连同步服务 (LANSyncService —— 基于 Network.framework NWListener/NWConnection + 6 位配对码加密)
@@ -233,11 +279,12 @@ public final class LANSyncService: SyncService {
         return try JSONDecoder().decode([SyncChange].self, from: plain)
     }
 
-    /// 启动局域网 NWListener 监听对端连接
+    /// 启动局域网 NWListener 监听对端连接，并广播 Bonjour (_lingxi-sync._tcp) 服务实现双机双向加密应答
     public func startListening() throws {
         stopListening()
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
         let listener = try NWListener(using: .tcp, on: nwPort)
+        listener.service = NWListener.Service(name: "Lingxi-\(pairCode)", type: "_lingxi-sync._tcp")
         listener.newConnectionHandler = { [weak self] conn in
             conn.start(queue: .global(qos: .userInitiated))
             conn.receive(minimumIncompleteLength: 1, maximumLength: 2 * 1024 * 1024) { data, _, _, _ in
@@ -245,6 +292,15 @@ public final class LANSyncService: SyncService {
                     _ = self.applyToLocalBuffer(incoming)
                     _ = SyncEngine.makeFullSyncSource().apply(incoming)
                     self.receivedPacketCount += incoming.count
+
+                    // 双向互导：将本机合并后的最新同步账本加密回传给对端
+                    let hostRecords = Array(SyncLedgerStore().load().records.values)
+                    if !hostRecords.isEmpty, let replyFrame = try? self.encodeEncryptedFrame(hostRecords) {
+                        conn.send(content: replyFrame, completion: .contentProcessed { _ in
+                            conn.cancel()
+                        })
+                        return
+                    }
                 }
                 conn.cancel()
             }
@@ -260,7 +316,7 @@ public final class LANSyncService: SyncService {
         isListening = false
     }
 
-    /// 通过局域网 TCP 向对端主机发送 ChaCha20-Poly1305 加密帧（若对端即本机回环则直接走内存+磁盘双写闭环）
+    /// 通过局域网 TCP 向对端主机双向交换 ChaCha20-Poly1305 加密帧
     public func performPeerSync(peerHost: String, peerPort: UInt16, pairCode: String) async throws -> SyncRunReport {
         self.pairCode = pairCode
         self.hostEndpoint = peerHost
@@ -268,14 +324,19 @@ public final class LANSyncService: SyncService {
         let engine = SyncEngine(sync: self, source: SyncEngine.makeFullSyncSource())
         let report = try await engine.syncNow()
 
-        // 若已启动局域网监听或指向对端 IP，额外通过 NWConnection 投递加密帧
-        var ledger = SyncLedgerStore().load()
+        let ledger = SyncLedgerStore().load()
         let changes = Array(ledger.records.values)
         if !changes.isEmpty, let frame = try? encodeEncryptedFrame(changes), let nwPort = NWEndpoint.Port(rawValue: peerPort) {
             let connection = NWConnection(host: NWEndpoint.Host(peerHost), port: nwPort, using: .tcp)
             connection.start(queue: .global(qos: .userInitiated))
-            connection.send(content: frame, completion: .contentProcessed { _ in
-                connection.cancel()
+            connection.send(content: frame, completion: .contentProcessed { [weak self] _ in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 2 * 1024 * 1024) { replyData, _, _, _ in
+                    if let self, let replyData, let replyChanges = try? self.decodeEncryptedFrame(replyData) {
+                        _ = self.applyToLocalBuffer(replyChanges)
+                        _ = SyncEngine.makeFullSyncSource().apply(replyChanges)
+                    }
+                    connection.cancel()
+                }
             })
         }
         return report
