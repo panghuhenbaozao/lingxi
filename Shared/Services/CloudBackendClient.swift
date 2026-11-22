@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -12,6 +13,8 @@ public struct CloudBackendConfig: Codable, Equatable {
     public var avatarThemeIndex: Int = 0
     public var apiKeyPrefix: String = ""
     public var e2eeSalt: String = ""
+    /// true 表示当前为 iPhone 端侧离线加密账号（无需电脑服务器即可注册、设头像与本地同步，接入服务器后可随时升级云同步）
+    public var isLocalOnlyAccount: Bool = false
     /// 第六部分合规铁律：分析功能默认关闭（零收集），由用户显式授权开启并与登录解耦
     public var habitAnalysisEnabled: Bool = false
     public var autoSyncEnabled: Bool = true
@@ -31,6 +34,7 @@ public struct CloudBackendConfig: Codable, Equatable {
         avatarThemeIndex = try c.decodeIfPresent(Int.self, forKey: .avatarThemeIndex) ?? 0
         apiKeyPrefix = try c.decodeIfPresent(String.self, forKey: .apiKeyPrefix) ?? ""
         e2eeSalt = try c.decodeIfPresent(String.self, forKey: .e2eeSalt) ?? ""
+        isLocalOnlyAccount = try c.decodeIfPresent(Bool.self, forKey: .isLocalOnlyAccount) ?? false
         habitAnalysisEnabled = try c.decodeIfPresent(Bool.self, forKey: .habitAnalysisEnabled) ?? false
         autoSyncEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoSyncEnabled) ?? true
         lastSyncedAt = try c.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
@@ -797,6 +801,121 @@ public enum CloudBackendError: LocalizedError, Equatable {
     }
 }
 
+/// 端侧离线加密账号库（无自建服务器或侧载安装时，直接在 iPhone 上完成加盐哈希注册与登录，永不因无后端而卡死）。
+private enum LocalAccountVault {
+    private static let fileName = "lingxi_local_accounts.json"
+
+    struct Record: Codable, Equatable {
+        var userID: String
+        var email: String
+        var username: String
+        var passwordSalt: String
+        var passwordHash: String
+        var e2eeSalt: String
+        var createdAt: Date
+    }
+
+    static func loadAll() -> [Record] {
+        AppGroup.readJSON([Record].self, from: fileName) ?? []
+    }
+
+    private static func saveAll(_ list: [Record]) {
+        _ = AppGroup.writeJSON(list, to: fileName, protected: true)
+    }
+
+    private static func hashPassword(_ password: String, salt: String) -> String {
+        let digest = SHA256.hash(data: Data((salt + "|" + password).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func register(email: String, username: String, password: String) throws -> Record {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard cleanEmail.contains("@"), cleanEmail.count >= 5 else {
+            throw CloudBackendError.badRequest("请输入有效的邮箱地址")
+        }
+        guard password.count >= 6 else {
+            throw CloudBackendError.badRequest("密码长度不能少于 6 位")
+        }
+        var all = loadAll()
+        if all.contains(where: { $0.email == cleanEmail }) {
+            throw CloudBackendError.badRequest("该邮箱已在本机注册，请直接切换「登录」")
+        }
+        let salt = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let e2ee = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let cleanName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = cleanEmail.components(separatedBy: "@").first ?? "灵犀用户"
+        let rec = Record(
+            userID: "local-" + UUID().uuidString.lowercased(),
+            email: cleanEmail,
+            username: cleanName.isEmpty ? fallbackName : cleanName,
+            passwordSalt: salt,
+            passwordHash: hashPassword(password, salt: salt),
+            e2eeSalt: e2ee,
+            createdAt: Date()
+        )
+        all.append(rec)
+        saveAll(all)
+        return rec
+    }
+
+    static func mirrorServerAccount(userID: String, email: String, username: String, password: String, e2eeSalt: String) {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cleanEmail.isEmpty, !password.isEmpty else { return }
+        var all = loadAll()
+        all.removeAll { $0.email == cleanEmail }
+        let salt = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let rec = Record(
+            userID: userID,
+            email: cleanEmail,
+            username: username,
+            passwordSalt: salt,
+            passwordHash: hashPassword(password, salt: salt),
+            e2eeSalt: e2eeSalt,
+            createdAt: Date()
+        )
+        all.append(rec)
+        saveAll(all)
+    }
+
+    static func authenticate(account: String, password: String) throws -> Record {
+        let clean = account.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clean.isEmpty, !password.isEmpty else {
+            throw CloudBackendError.badRequest("请输入邮箱和密码")
+        }
+        let all = loadAll()
+        guard let rec = all.first(where: { $0.email == clean || $0.username.lowercased() == clean }) else {
+            throw CloudBackendError.unauthorized("未连接自建云端，且本机尚未注册该账号；请点「免费注册」或「一键创建本机账号」立即登录。")
+        }
+        guard hashPassword(password, salt: rec.passwordSalt) == rec.passwordHash else {
+            throw CloudBackendError.unauthorized("密码不正确，请重新输入")
+        }
+        return rec
+    }
+
+    static func upsertQuick(username: String, email: String) -> Record {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        var all = loadAll()
+        if let existing = all.first(where: { $0.email == cleanEmail }) {
+            return existing
+        }
+        let salt = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let e2ee = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let rec = Record(
+            userID: "local-" + UUID().uuidString.lowercased(),
+            email: cleanEmail,
+            username: cleanName.isEmpty ? "灵犀用户" : cleanName,
+            passwordSalt: salt,
+            passwordHash: "",
+            e2eeSalt: e2ee,
+            createdAt: Date()
+        )
+        all.append(rec)
+        saveAll(all)
+        return rec
+    }
+}
+
 /// 灵犀云端全栈客户端：同时实现 `AuthService`、`SyncService` 与 `InsightService`。
 public final class CloudBackendClient: AuthService, SyncService, InsightService {
     public static let shared = CloudBackendClient()
@@ -826,29 +945,77 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         return false
     }
 
-    /// 邮箱 + 用户名 + 密码注册
+    /// 邮箱 + 用户名 + 密码注册（优先连接自建/云端服务器；若未部署服务器或网络不可达，自动在本机创建加盐加密账号）
     @discardableResult
     public func register(email: String, username: String, password: String) async throws -> AuthSession {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanEmail.contains("@"), cleanEmail.count >= 5 else {
+            throw CloudBackendError.badRequest("请输入有效的邮箱地址")
+        }
+        guard password.count >= 6 else {
+            throw CloudBackendError.badRequest("密码长度不能少于 6 位")
+        }
+
         let payload: [String: Any] = [
-            "email": email,
-            "username": username,
+            "email": cleanEmail,
+            "username": cleanName.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "灵犀用户") : cleanName,
             "password": password,
             "deviceID": SyncInfra.deviceIdentity().deviceID
         ]
-        let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/register", body: payload, requireAuth: false)
-        return try persistAuthResponse(dict)
+        do {
+            let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/register", body: payload, requireAuth: false)
+            let session = try persistAuthResponse(dict, isLocalOnly: false)
+            let cfg = CloudBackendConfig.load()
+            LocalAccountVault.mirrorServerAccount(
+                userID: session.userID,
+                email: cfg.email,
+                username: cfg.username,
+                password: password,
+                e2eeSalt: cfg.e2eeSalt
+            )
+            return session
+        } catch CloudBackendError.networkFailure {
+            let localRec = try LocalAccountVault.register(email: cleanEmail, username: cleanName, password: password)
+            return persistLocalSession(for: localRec)
+        }
     }
 
-    /// 邮箱/用户名 + 密码登录
+    /// 邮箱/用户名 + 密码登录（优先连接云端；若未连服务器自动校验本机加密账号库）
     @discardableResult
     public func login(account: String, password: String) async throws -> AuthSession {
+        let cleanAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAccount.isEmpty, !password.isEmpty else {
+            throw CloudBackendError.badRequest("请输入邮箱地址和密码")
+        }
         let payload: [String: Any] = [
-            "account": account,
+            "account": cleanAccount,
             "password": password,
             "deviceID": SyncInfra.deviceIdentity().deviceID
         ]
-        let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/login", body: payload, requireAuth: false)
-        return try persistAuthResponse(dict)
+        do {
+            let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/login", body: payload, requireAuth: false)
+            let session = try persistAuthResponse(dict, isLocalOnly: false)
+            let cfg = CloudBackendConfig.load()
+            LocalAccountVault.mirrorServerAccount(
+                userID: session.userID,
+                email: cfg.email,
+                username: cfg.username,
+                password: password,
+                e2eeSalt: cfg.e2eeSalt
+            )
+            return session
+        } catch CloudBackendError.networkFailure {
+            let localRec = try LocalAccountVault.authenticate(account: cleanAccount, password: password)
+            return persistLocalSession(for: localRec)
+        }
+    }
+
+    /// 一键创建/登录本机加密账号（无需服务器、无需 Apple 付费签名，iPhone 装完即可用头像与个人档案）
+    @discardableResult
+    public func createQuickLocalAccount(username: String = "灵犀用户", email: String = "local@lingxi.ime") -> AuthSession {
+        let rec = LocalAccountVault.upsertQuick(username: username, email: email)
+        return persistLocalSession(for: rec)
     }
 
     public func signInWithApple(identityToken: Data, user: String) async throws -> AuthSession {
@@ -857,8 +1024,32 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             "user": user,
             "deviceID": SyncInfra.deviceIdentity().deviceID
         ]
-        let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple", body: payload, requireAuth: false)
-        return try persistAuthResponse(dict)
+        do {
+            let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple", body: payload, requireAuth: false)
+            return try persistAuthResponse(dict, isLocalOnly: false)
+        } catch CloudBackendError.networkFailure {
+            let suffix = String(user.prefix(6))
+            let rec = LocalAccountVault.upsertQuick(username: "灵犀用户", email: "apple-\(suffix)@lingxi.local")
+            return persistLocalSession(for: rec)
+        }
+    }
+
+    private func persistLocalSession(for rec: LocalAccountVault.Record) -> AuthSession {
+        let session = AuthSession(
+            userID: rec.userID,
+            accessToken: "lx_local_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            refreshToken: "lx_local_ref_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            accessExpiry: Date().addingTimeInterval(3600 * 24 * 365)
+        )
+        CloudCredentialStore.saveSession(session)
+        var cfg = CloudBackendConfig.load()
+        cfg.userID = rec.userID
+        cfg.email = rec.email
+        cfg.username = rec.username
+        cfg.e2eeSalt = rec.e2eeSalt
+        cfg.isLocalOnlyAccount = true
+        cfg.save()
+        return session
     }
 
     public func refreshIfNeeded() async throws -> AuthSession? {
@@ -889,10 +1080,11 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         cfg.email = ""
         cfg.username = ""
         cfg.apiKeyPrefix = ""
+        cfg.isLocalOnlyAccount = false
         cfg.save()
     }
 
-    private func persistAuthResponse(_ dict: [String: Any]) throws -> AuthSession {
+    private func persistAuthResponse(_ dict: [String: Any], isLocalOnly: Bool = false) throws -> AuthSession {
         guard let userID = dict["userID"] as? String,
               let accessToken = dict["accessToken"] as? String,
               let refreshToken = dict["refreshToken"] as? String else {
@@ -915,6 +1107,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         cfg.username = (dict["username"] as? String) ?? cfg.username
         cfg.apiKeyPrefix = (dict["apiKeyPrefix"] as? String) ?? cfg.apiKeyPrefix
         cfg.e2eeSalt = (dict["e2eeSalt"] as? String) ?? cfg.e2eeSalt
+        cfg.isLocalOnlyAccount = isLocalOnly
         cfg.save()
         return session
     }

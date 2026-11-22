@@ -1163,5 +1163,50 @@ final class LingxiTests: XCTestCase {
         let cfg = try JSONDecoder().decode(CloudBackendConfig.self, from: legacyCloudJSON)
         XCTAssertEqual(cfg.username, "测试用户")
         XCTAssertEqual(cfg.avatarThemeIndex, 0)
+        XCTAssertFalse(cfg.isLocalOnlyAccount)
+    }
+
+    func testOfflineLocalAccountRegisterLoginAndQuickSignIn() async throws {
+        // 指向不可达端口，模拟纯 iPhone 离线/无自建服务器环境
+        var cfg = CloudBackendConfig.load()
+        let prevURL = cfg.serverBaseURL
+        cfg.serverBaseURL = "http://127.0.0.1:1"
+        cfg.save()
+        defer {
+            var restore = CloudBackendConfig.load()
+            restore.serverBaseURL = prevURL
+            restore.save()
+        }
+
+        let uniqueEmail = "ios_\(UUID().uuidString.prefix(8).lowercased())@lingxi.test"
+        let client = CloudBackendClient(timeout: 2)
+
+        // 1. 离线邮箱注册应自动落入本机加密账号库，不再因无服务器报错
+        let regSession = try await client.register(email: uniqueEmail, username: "真机测试号", password: "password123")
+        XCTAssertTrue(regSession.userID.hasPrefix("local-"))
+        XCTAssertTrue(CloudBackendConfig.load().isLocalOnlyAccount)
+        XCTAssertEqual(CloudBackendConfig.load().username, "真机测试号")
+
+        // 2. 退出后，错误密码应被拒绝，正确密码应成功登录
+        await client.signOut()
+        XCTAssertFalse(client.isAuthenticatedOrHasAPIKey)
+
+        do {
+            _ = try await client.login(account: uniqueEmail, password: "wrong_password")
+            XCTFail("错误密码不应允许登录")
+        } catch {
+            // 预期拦截
+        }
+
+        let loginSession = try await client.login(account: uniqueEmail, password: "password123")
+        XCTAssertEqual(loginSession.userID, regSession.userID)
+        XCTAssertTrue(client.isAuthenticatedOrHasAPIKey)
+
+        // 3. 一键本机账号创建应立即可用
+        await client.signOut()
+        let quick = client.createQuickLocalAccount(username: "快速体验")
+        XCTAssertTrue(quick.userID.hasPrefix("local-"))
+        XCTAssertTrue(client.isAuthenticatedOrHasAPIKey)
+        await client.signOut()
     }
 }

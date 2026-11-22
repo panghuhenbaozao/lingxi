@@ -1,4 +1,3 @@
-import AuthenticationServices
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -100,7 +99,7 @@ struct AppleStyleSignInSheet: View {
         case apiKey = 2
     }
 
-    @State private var mode: Mode = .login
+    @State private var mode: Mode = .register
     @State private var email: String = ""
     @State private var username: String = ""
     @State private var password: String = ""
@@ -112,9 +111,9 @@ struct AppleStyleSignInSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(spacing: 22) {
                     // 1. 顶部居中品牌图标与大标题（严格对标 Apple Account 登录页）
-                    VStack(spacing: 12) {
+                    VStack(spacing: 10) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
                                 .fill(Color(Design.Palette.ink))
@@ -124,38 +123,29 @@ struct AppleStyleSignInSheet: View {
                                 .font(.system(size: 30, weight: .semibold))
                                 .foregroundStyle(Color(Design.Palette.canvas))
                         }
-                        .padding(.top, 12)
+                        .padding(.top, 10)
 
                         Text(mode == .register ? "创建灵犀账号" : (mode == .apiKey ? "接入客户 API Key" : "登录灵犀账号"))
                             .font(.system(size: 26, weight: .bold))
                             .foregroundStyle(Color(Design.Palette.ink))
 
-                        Text("端到端加密同步个人词库、皮肤与跨屏剪贴板。\n未登录也可永久免费使用全部本地输入功能。")
-                            .font(.system(size: 13.5))
+                        Text("无需配置服务器即可直接在本机加密注册、设置头像与昵称；\n连上自建云端后自动升级 E2EE 跨设备同步。")
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineSpacing(3)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 10)
                     }
 
-                    // 2. 官方 Sign in with Apple 主按钮（置顶最醒目）
-                    if mode != .apiKey {
-                        SignInWithAppleButton(.continue) { req in
-                            req.requestedScopes = [.fullName, .email]
-                        } onCompletion: { result in
-                            Task { await handleAppleAuth(result) }
-                        }
-                        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
-                        .frame(height: 50)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                        HStack(spacing: 12) {
-                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
-                            Text("或使用邮箱账号")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
-                        }
+                    // 2. 顶部清晰模式切换（免费注册 / 邮箱登录 / API Key）
+                    Picker("账号方式", selection: $mode) {
+                        Text("免费注册").tag(Mode.register)
+                        Text("邮箱登录").tag(Mode.login)
+                        Text("API Key").tag(Mode.apiKey)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: mode) { _ in
+                        errorMessage = nil
                     }
 
                     // 3. 苹果 InsetGrouped 风格极简表单卡片
@@ -169,13 +159,13 @@ struct AppleStyleSignInSheet: View {
                                 .frame(height: 48)
                         } else {
                             if mode == .register {
-                                TextField("昵称（显示在个人主页）", text: $username)
+                                TextField("昵称（显示在个人主页与头像）", text: $username)
                                     .font(.system(size: 15))
                                     .padding(.horizontal, 16)
                                     .frame(height: 48)
                                 Divider().padding(.leading, 16)
                             }
-                            TextField("邮箱地址", text: $email)
+                            TextField("邮箱地址（如 me@example.com）", text: $email)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.emailAddress)
@@ -183,7 +173,7 @@ struct AppleStyleSignInSheet: View {
                                 .padding(.horizontal, 16)
                                 .frame(height: 48)
                             Divider().padding(.leading, 16)
-                            SecureField("密码（至少 8 位）", text: $password)
+                            SecureField("密码（至少 6 位）", text: $password)
                                 .font(.system(size: 15))
                                 .padding(.horizontal, 16)
                                 .frame(height: 48)
@@ -210,7 +200,7 @@ struct AppleStyleSignInSheet: View {
                             if isWorking {
                                 ProgressView().tint(Color(Design.Palette.canvas))
                             } else {
-                                Text(mode == .register ? "创建账号并开启同步" : (mode == .apiKey ? "验证并连接 API Key" : "继续"))
+                                Text(mode == .register ? "立即注册并登录" : (mode == .apiKey ? "验证并连接 API Key" : "登录灵犀账号"))
                                     .font(.system(size: 16, weight: .semibold))
                             }
                         }
@@ -222,35 +212,44 @@ struct AppleStyleSignInSheet: View {
                     .buttonStyle(.plain)
                     .disabled(isWorking)
 
-                    // 5. 底部轻量模式切换链接
-                    HStack(spacing: 20) {
-                        if mode == .login {
-                            Button("没有账号？免费注册") {
-                                errorMessage = nil
-                                mode = .register
-                            }
-                            Button("API Key 接入") {
-                                errorMessage = nil
-                                mode = .apiKey
-                            }
-                        } else {
-                            Button("返回邮箱登录") {
-                                errorMessage = nil
-                                mode = .login
-                            }
-                            if mode == .register {
-                                Button("API Key 接入") {
-                                    errorMessage = nil
-                                    mode = .apiKey
-                                }
-                            }
+                    // 5. 一键免密创建本机加密档案（彻底避免侧载版调用官方 Apple ID 弹窗报“不能注册”的限制）
+                    if mode != .apiKey {
+                        HStack(spacing: 12) {
+                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
+                            Text("或者跳过填表")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Rectangle().fill(Color(Design.Palette.hairline)).frame(height: 0.5)
                         }
+
+                        Button {
+                            appState.createQuickLocalAccount(
+                                username: username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    ? "灵犀用户"
+                                    : username.trimmingCharacters(in: .whitespacesAndNewlines)
+                            )
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "person.crop.circle.badge.checkmark")
+                                    .font(.system(size: 16, weight: .semibold))
+                                Text("一键启用本机个人账号（免填邮箱）")
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
 
                     // 6. 高级自托管服务器地址默认折叠，保持登录屏极度纯净
-                    DisclosureGroup("自托管服务器设置（高级）", isExpanded: $showServerConfig) {
+                    DisclosureGroup("自建云端服务器设置（可选）", isExpanded: $showServerConfig) {
                         VStack(alignment: .leading, spacing: 8) {
                             TextField("如 http://192.168.1.10:8787", text: $appState.cloudConfig.serverBaseURL)
                                 .textInputAutocapitalization(.never)
@@ -260,7 +259,7 @@ struct AppleStyleSignInSheet: View {
                                 .padding(10)
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            Text("支持 Vaultwarden 模式自建私有服务器；手机连电脑自建服务时请填写电脑局域网 IP。")
+                            Text("不填也能在本机直接注册登录；若在电脑/Docker 运行了灵犀云端，填写局域网 IP 即可注册并多端云同步。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -268,7 +267,7 @@ struct AppleStyleSignInSheet: View {
                     }
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 8)
+                    .padding(.top, 4)
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 32)
@@ -304,26 +303,6 @@ struct AppleStyleSignInSheet: View {
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    private func handleAppleAuth(_ result: Result<ASAuthorization, Error>) async {
-        isWorking = true
-        errorMessage = nil
-        defer { isWorking = false }
-        switch result {
-        case .success(let auth):
-            if let cred = auth.credential as? ASAuthorizationAppleIDCredential {
-                let token = cred.identityToken ?? Data(cred.user.utf8)
-                do {
-                    try await appState.signInWithAppleAccount(identityToken: token, user: cred.user)
-                    dismiss()
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            }
-        case .failure(let err):
-            errorMessage = err.localizedDescription
         }
     }
 }

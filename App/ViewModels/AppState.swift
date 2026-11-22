@@ -283,6 +283,11 @@ final class AppState: ObservableObject {
         _ = try? await syncCloudNow()
     }
 
+    func createQuickLocalAccount(username: String = "灵犀用户") {
+        _ = CloudBackendClient.shared.createQuickLocalAccount(username: username)
+        refreshAll()
+    }
+
     func connectCustomerAPIKey(_ rawKey: String) async throws {
         let trimmed = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -322,7 +327,12 @@ final class AppState: ObservableObject {
                 pairCode: relayCfg.pairCode
             )
         case .e2eeCloud:
-            report = try await CloudBackendClient.shared.syncAllImportantDataAndHabits()
+            if cloudConfig.isLocalOnlyAccount && cloudConfig.normalizedBaseURL.contains("127.0.0.1") {
+                let engine = SyncEngine(sync: LocalNoopSyncService(), source: SyncEngine.makeFullSyncSource())
+                report = try await engine.syncNow()
+            } else {
+                report = try await CloudBackendClient.shared.syncAllImportantDataAndHabits()
+            }
         }
         refreshAll()
         return report

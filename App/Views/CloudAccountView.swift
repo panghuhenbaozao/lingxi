@@ -45,6 +45,16 @@ struct CloudAccountView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
 
+                            if appState.cloudConfig.isLocalOnlyAccount {
+                                Text("本机加密账号 · 无需服务器即可使用，接入自建服务端可随时云同步")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Color(Design.Palette.surface))
+                                    .clipShape(Capsule())
+                            }
+
                             // 6 组苹果风格字母头像色盘快速切换
                             if appState.userAvatarImage == nil {
                                 HStack(spacing: 10) {
