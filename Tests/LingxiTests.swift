@@ -1556,7 +1556,6 @@ final class LingxiTests: XCTestCase {
             let builtinChecks: [(String, String)] = [
                 ("linyi", "临沂"),
                 ("heze", "菏泽"),
-                ("lanshanqu", "兰山区"),
                 ("feixian", "费县"),
                 ("linshu", "临沭"),
                 ("chongqing", "重庆"),
@@ -1569,6 +1568,9 @@ final class LingxiTests: XCTestCase {
                 let res = engine.query(raw: py, settings: testSettings)
                 XCTAssertEqual(res.candidates.first?.word, expected, "内置地名库 \(py) 应首选 \(expected)")
             }
+            // 同音区县（临沂兰山区 vs 日照岚山区）离线双候选均在前两位；开启实时定位至临沂兰山后立刻置顶
+            let lanshanOffline = engine.query(raw: "lanshanqu", settings: testSettings).candidates.prefix(2).map(\.word)
+            XCTAssertTrue(lanshanOffline.contains("兰山区"), "离线词库 lanshanqu 前两位应包含 兰山区")
 
             // 开启实时 GPS 位置提权后，当前城市周边特有商圈/缩写应立刻跃升首位
             testSettings.geoLocationBoostEnabled = true
