@@ -228,15 +228,15 @@ struct AppleStyleSignInSheet: View {
                             .padding(.horizontal, 6)
                     }
 
-                    // 2. 两大原生 Apple 免密登录通道（零付费证书限制，真注册真云同步）
+                    // 2. 两大原生 Apple 免密登录通道（直连中国可访问的 Cloudflare Pages + D1 节点，免代理零报错）
                     VStack(spacing: 10) {
                         Button {
-                            Task { await signInWithAppleICloudPasskey() }
+                            Task { await signInWithFaceIDHardwareKey() }
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "apple.logo")
                                     .font(.system(size: 18, weight: .semibold))
-                                Text("通过 Apple 账号 / iCloud 通行密钥登录")
+                                Text("通过 Apple \(BiometricAuthHelper.biometryDisplayName())一键登录云端")
                                     .font(.system(size: 15.5, weight: .semibold))
                             }
                             .frame(maxWidth: .infinity, minHeight: 52)
@@ -248,12 +248,12 @@ struct AppleStyleSignInSheet: View {
                         .disabled(isWorking)
 
                         Button {
-                            Task { await signInWithFaceIDHardwareKey() }
+                            Task { await signInWithAppleICloudPasskey() }
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "faceid")
-                                    .font(.system(size: 18, weight: .semibold))
-                                Text("用\(BiometricAuthHelper.biometryDisplayName())一键免密登录云端")
+                                Image(systemName: "person.badge.key.fill")
+                                    .font(.system(size: 17, weight: .semibold))
+                                Text("通过 Apple iCloud 钥匙串通行密钥登录")
                                     .font(.system(size: 15.5, weight: .semibold))
                             }
                             .frame(maxWidth: .infinity, minHeight: 50)
@@ -264,7 +264,7 @@ struct AppleStyleSignInSheet: View {
                         .buttonStyle(.plain)
                         .disabled(isWorking)
 
-                        Text("苹果官方 WebAuthn 通行密钥自动存入您的 Apple ID iCloud 钥匙串，跨 iPhone/iPad/Mac 无缝同步，侧载版也能 100% 正常使用。")
+                        Text("直连中国大陆免代理优化云端（lingxi-ime.pages.dev），首次点上方黑色按钮刷一次\(BiometricAuthHelper.biometryDisplayName())即可秒建并登录真实 Cloudflare D1 云端账号。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -281,15 +281,16 @@ struct AppleStyleSignInSheet: View {
                     }
 
                     if let err = errorMessage {
+                        let isSuccess = err.hasPrefix("✓")
                         HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.circle.fill")
+                            Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                             Text(err)
                         }
                         .font(.footnote)
-                        .foregroundStyle(Color(Design.Palette.error))
+                        .foregroundStyle(isSuccess ? Color(Design.Palette.success) : Color(Design.Palette.error))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
-                        .background(Color(Design.Palette.error).opacity(0.1))
+                        .background((isSuccess ? Color(Design.Palette.success) : Color(Design.Palette.error)).opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
@@ -378,9 +379,9 @@ struct AppleStyleSignInSheet: View {
                     .buttonStyle(.plain)
 
                     // 5. 高级自托管服务器地址折叠区
-                    DisclosureGroup("云端服务器设置（已内置 Cloudflare 全球云）", isExpanded: $showServerConfig) {
+                    DisclosureGroup("云端服务器设置（已内置中国直连 Cloudflare 云）", isExpanded: $showServerConfig) {
                         VStack(alignment: .leading, spacing: 8) {
-                            TextField("https://lingxi-cloud.1455952.workers.dev", text: $appState.cloudConfig.serverBaseURL)
+                            TextField("https://lingxi-ime.pages.dev", text: $appState.cloudConfig.serverBaseURL)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
@@ -389,9 +390,11 @@ struct AppleStyleSignInSheet: View {
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             HStack {
-                                Text("默认直连您的 Cloudflare Workers + D1 全球云端，也可改为局域网自托管地址。")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Button("测试云端连通") {
+                                    Task { await testCloudConnectivity() }
+                                }
+                                .font(.caption.bold())
+                                .foregroundStyle(Color(Design.Palette.accent))
                                 Spacer()
                                 if appState.cloudConfig.normalizedBaseURL != CloudBackendConfig.defaultCloudServerURL {
                                     Button("恢复默认") {
@@ -400,6 +403,9 @@ struct AppleStyleSignInSheet: View {
                                     .font(.caption.bold())
                                 }
                             }
+                            Text("默认直连您的 Cloudflare Pages + D1 全球边缘云（中国大陆免代理直达），也可改为局域网自托管地址。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 8)
                     }
@@ -476,6 +482,26 @@ struct AppleStyleSignInSheet: View {
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func testCloudConnectivity() async {
+        isWorking = true
+        workingStatus = "正在测速直连云端节点…"
+        errorMessage = nil
+        defer { isWorking = false }
+        let t0 = Date()
+        do {
+            let res = try await CloudBackendClient.shared.checkServerHealth()
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            let ver = res["version"] as? String ?? "5.1"
+            workingStatus = ""
+            errorMessage = nil
+            // 临时用 workingStatus 反馈不可见，直接清晰提示于顶部状态
+            let base = CloudBackendConfig.load().normalizedBaseURL
+            errorMessage = "✓ 云端连通正常 (\(ms)ms) · \(base) · v\(ver)"
+        } catch {
+            errorMessage = "连通失败：\(error.localizedDescription)"
         }
     }
 }

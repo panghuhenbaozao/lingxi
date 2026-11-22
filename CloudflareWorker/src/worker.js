@@ -1,6 +1,6 @@
 import { DASHBOARD_HTML } from "./dashboard.js";
 
-const VERSION = "5.0.0";
+const VERSION = "5.1.2";
 const ACCESS_TTL_SEC = 86400;
 const REFRESH_TTL_SEC = 86400 * 30;
 const PBKDF2_ITERATIONS = 100000;
@@ -119,9 +119,9 @@ p{margin:0 0 18px;font-size:13.5px;color:var(--mut);text-align:center;line-heigh
 <h1>Apple iCloud 通行密钥登录</h1>
 <p>凭证通过 iOS 系统面容 ID 加密保存于您的 Apple ID iCloud 钥匙串，跨 iPhone / iPad / Mac 自动同步，并直连灵犀 Cloudflare 云端词库。</p>
 <input id="nick" class="in" placeholder="昵称（首次创建时可选填，如：我的 iPhone）" maxlength="24"/>
-<button class="btn btn-apple" onclick="doLogin()"> 刷面容 ID 登录已有通行密钥</button>
-<button class="btn btn-sub" onclick="doRegister()">✨ 首次使用：用 Apple ID 创建通行密钥</button>
-<div id="st" class="msg">请选择上方按钮触发系统面容 ID</div>
+<button class="btn btn-apple" onclick="doRegister()"> 首次使用：用 Apple ID 创建通行密钥并登录</button>
+<button class="btn btn-sub" onclick="doLogin()">🔑 已有通行密钥：刷面容 ID 直接登录</button>
+<div id="st" class="msg">首次登录请点上方黑色按钮，老用户点蓝色按钮</div>
 </div><script>
 const RP_ID = ${JSON.stringify(rpId)};
 const DEV_ID = ${JSON.stringify(defaultDevId)};
@@ -688,7 +688,7 @@ export default {
         const pubB64 = String(b.publicKeyRawB64 || "").trim();
         const sigB64 = String(b.signatureB64 || "").trim();
         const ts = Number(b.timestamp || 0);
-        if (!hwId || !pubB64 || !sigB64 || Math.abs(nowSec() - ts) > 600) {
+        if (!hwId || !pubB64 || !sigB64 || Math.abs(nowSec() - ts) > 3600) {
           return eres(400, "BAD_REQUEST", "Apple Face ID 硬件凭证无效或已过期");
         }
         const pubBytes = b64uDec(pubB64);

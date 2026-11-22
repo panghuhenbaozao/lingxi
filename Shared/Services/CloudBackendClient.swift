@@ -6,7 +6,16 @@ import Security
 
 /// 云端服务与 API 接入配置（持久化于 App Group；敏感 Token 与 API Key 走 Keychain + 沙盒保护回退）。
 public struct CloudBackendConfig: Codable, Equatable {
-    public static let defaultCloudServerURL = "https://lingxi-cloud.1455952.workers.dev"
+    /// 中国大陆免代理直连 Cloudflare Pages + D1 全球边缘主节点（规避 *.workers.dev 境内 DNS 污染）
+    public static let defaultCloudServerURL = "https://lingxi-ime.pages.dev"
+    /// 备用 Cloudflare Workers 节点（海外或代理环境自动容灾）
+    public static let fallbackCloudServerURL = "https://lingxi-cloud.1455952.workers.dev"
+
+    private static let legacyAutoMigrateURLs: Set<String> = [
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+        "https://lingxi-cloud.1455952.workers.dev"
+    ]
 
     public var serverBaseURL: String = CloudBackendConfig.defaultCloudServerURL
     public var userID: String = ""
@@ -29,8 +38,9 @@ public struct CloudBackendConfig: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedURL = (try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if decodedURL.isEmpty || decodedURL == "http://127.0.0.1:8787" || decodedURL == "http://localhost:8787" {
+        var decodedURL = (try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        while decodedURL.hasSuffix("/") { decodedURL.removeLast() }
+        if decodedURL.isEmpty || Self.legacyAutoMigrateURLs.contains(decodedURL) {
             serverBaseURL = Self.defaultCloudServerURL
         } else {
             serverBaseURL = decodedURL
@@ -62,7 +72,7 @@ public struct CloudBackendConfig: Codable, Equatable {
         while trimmed.hasSuffix("/") {
             trimmed.removeLast()
         }
-        if trimmed.isEmpty || trimmed == "http://127.0.0.1:8787" || trimmed == "http://localhost:8787" {
+        if trimmed.isEmpty || Self.legacyAutoMigrateURLs.contains(trimmed) {
             return Self.defaultCloudServerURL
         }
         return trimmed
@@ -1572,39 +1582,57 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         }
 
         let baseURL = CloudBackendConfig.load().normalizedBaseURL
-        guard let url = URL(string: baseURL + path) else {
-            throw CloudBackendError.invalidURL
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let candidateBases: [String] = (baseURL == CloudBackendConfig.defaultCloudServerURL)
+            ? [CloudBackendConfig.defaultCloudServerURL, CloudBackendConfig.defaultCloudServerURL, CloudBackendConfig.fallbackCloudServerURL]
+            : [baseURL]
 
         var rawBodyData = Data()
         if let body {
             rawBodyData = try JSONSerialization.data(withJSONObject: body)
-            req.httpBody = rawBodyData
         }
 
-        if requireAuth {
-            if let apiKey = activeAPIKey, !apiKey.isEmpty {
-                req.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
-                let ts = Int(Date().timeIntervalSince1970)
-                let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-                let sig = SyncCrypto.signRequest(body: rawBodyData, timestamp: ts, nonce: nonce, secret: apiKey)
-                req.setValue(String(ts), forHTTPHeaderField: "X-Lingxi-Timestamp")
-                req.setValue(nonce, forHTTPHeaderField: "X-Lingxi-Nonce")
-                req.setValue(sig, forHTTPHeaderField: "X-Lingxi-Signature")
+        var responsePair: (Data, URLResponse)?
+        var lastNetError: Error?
+        var activeBase = baseURL
+
+        for (attemptIdx, candidateBase) in candidateBases.enumerated() {
+            guard let url = URL(string: candidateBase + path) else {
+                throw CloudBackendError.invalidURL
             }
-            if let session = currentSession, !session.accessToken.isEmpty {
-                req.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+            var req = URLRequest(url: url)
+            req.httpMethod = method
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if body != nil {
+                req.httpBody = rawBodyData
+            }
+            if requireAuth {
+                if let apiKey = activeAPIKey, !apiKey.isEmpty {
+                    req.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+                    let ts = Int(Date().timeIntervalSince1970)
+                    let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                    let sig = SyncCrypto.signRequest(body: rawBodyData, timestamp: ts, nonce: nonce, secret: apiKey)
+                    req.setValue(String(ts), forHTTPHeaderField: "X-Lingxi-Timestamp")
+                    req.setValue(nonce, forHTTPHeaderField: "X-Lingxi-Nonce")
+                    req.setValue(sig, forHTTPHeaderField: "X-Lingxi-Signature")
+                }
+                if let session = currentSession, !session.accessToken.isEmpty {
+                    req.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+                }
+            }
+            do {
+                responsePair = try await urlSession.data(for: req)
+                activeBase = candidateBase
+                break
+            } catch {
+                lastNetError = error
+                if attemptIdx == 0 && candidateBases.count > 1 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
             }
         }
 
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await urlSession.data(for: req)
-        } catch {
-            throw CloudBackendError.networkFailure("无法连接后端服务器 (\(baseURL))：\(error.localizedDescription)")
+        guard let (data, response) = responsePair else {
+            throw CloudBackendError.networkFailure("无法连接后端服务器 (\(activeBase))：\(lastNetError?.localizedDescription ?? "网络请求失败")")
         }
 
         guard let http = response as? HTTPURLResponse else {
