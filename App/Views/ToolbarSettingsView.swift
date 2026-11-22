@@ -143,12 +143,12 @@ struct ToolbarSettingsView: View {
     /// 2) 收到短信验证码或新复制内容时的「全栏独占接管胶囊」
     private var toolbarLivePreview: some View {
         let p = previewPreset
-        let barBg = Color(uiColor: HexColor.color(p.toolbarBackground))
-        let keyFill = Color(uiColor: HexColor.color(p.keyFill))
-        let ink = Color(uiColor: HexColor.color(p.keyText))
-        let accent = Color(uiColor: HexColor.color(p.accentFill))
-        let accentText = Color(uiColor: HexColor.color(p.accentText))
-        let hint = Color(uiColor: HexColor.color(p.keyHintText))
+        let barBg = Color(hexColor: p.toolbarBackground)
+        let keyFill = Color(hexColor: p.keyFill)
+        let ink = Color(hexColor: p.keyText)
+        let accent = Color(hexColor: p.accentFill)
+        let accentText = Color(hexColor: p.accentText)
+        let hint = Color(hexColor: p.keyHintText)
 
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
@@ -280,34 +280,22 @@ struct ToolbarSettingsView: View {
     /// 模拟候选栏预览：高度/字号/配色随设置与调色即时变化；支持左右滑动浏览更多候选
     private var candidateBarPreview: some View {
         let p = previewPreset
-        let barBg = Color(uiColor: HexColor.color(p.toolbarBackground))
-        let ink = Color(uiColor: HexColor.color(p.keyText))
-        let accent = Color(uiColor: HexColor.color(p.accentFill))
+        let barBg = Color(hexColor: p.toolbarBackground)
+        let ink = Color(hexColor: p.keyText)
+        let accent = Color(hexColor: p.accentFill)
         let words = ["灵犀", "输入法", "纯白圆角", "候选栏", "左右滑动"]
+        let fontSize = CGFloat(appState.settings.candidateFontSize)
         let fontSizeText = String(format: "%.1f", appState.settings.candidateFontSize)
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(Array(words.enumerated()), id: \.offset) { idx, word in
-                    Text(word)
-                        .lineLimit(1)
-                        .font(.system(
-                            size: CGFloat(appState.settings.candidateFontSize),
-                            weight: idx == 0 ? .semibold : .regular
-                        ))
-                        .foregroundStyle(idx == 0 ? accent : ink)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            idx == 0 ? accent.opacity(0.12) : Color.clear
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(
-                                    idx == 0 ? Color.clear : ink.opacity(0.14),
-                                    lineWidth: 0.5
-                                )
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                ForEach(0..<words.count, id: \.self) { idx in
+                    candidatePreviewChip(
+                        word: words[idx],
+                        isPrimary: idx == 0,
+                        fontSize: fontSize,
+                        ink: ink,
+                        accent: accent
+                    )
                 }
             }
             .padding(.horizontal, 6)
@@ -319,6 +307,27 @@ struct ToolbarSettingsView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("候选栏预览")
         .accessibilityValue("高度 \(Int(appState.settings.candidateBarHeight)) pt，字号 \(fontSizeText)")
+    }
+
+    private func candidatePreviewChip(
+        word: String,
+        isPrimary: Bool,
+        fontSize: CGFloat,
+        ink: Color,
+        accent: Color
+    ) -> some View {
+        Text(word)
+            .lineLimit(1)
+            .font(.system(size: fontSize, weight: isPrimary ? .semibold : .regular))
+            .foregroundStyle(isPrimary ? accent : ink)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(isPrimary ? accent.opacity(0.12) : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isPrimary ? Color.clear : ink.opacity(0.14), lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private var presetBinding: Binding<ToolbarPreset> {
