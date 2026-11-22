@@ -1531,8 +1531,8 @@ final class LingxiTests: XCTestCase {
         geo.save()
 
         let settings = LingxiSettings()
-        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vwz"))
-        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vdz"))
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vwz", scheme: .quanpin))
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("vdz", scheme: .quanpin))
         let vwzHits = SmartCandidateHelper.extraCandidates(forRawInput: "vwz", settings: settings, consumedLength: 3)
         XCTAssertTrue(vwzHits.contains(where: { $0.word == "山东省临沂市兰山区北京路" }))
         XCTAssertTrue(vwzHits.contains(where: { $0.word == "临沂市" }))

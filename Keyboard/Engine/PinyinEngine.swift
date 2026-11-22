@@ -362,7 +362,7 @@ final class PinyinEngine {
                         lp: entry.boostScore,
                         consumed: trimmed.count,
                         isExact: isFullExact,
-                        source: .userLexicon
+                        source: .userLearned
                     )
                     if isFullExact || (entry.abbr == cleanLower && cleanLower.count >= 3) {
                         promotedTop.append(cand)
@@ -849,7 +849,7 @@ final class PinyinEngine {
                         lp: entry.boostScore,
                         consumed: digits.count,
                         isExact: true,
-                        source: .userLexicon
+                        source: .userLearned
                     )
                 }
                 let set = Set(geoCands.map(\.word))
