@@ -114,8 +114,8 @@ final class AIAssistantPanelView: UIView {
             self.threeVariantsMode.toggle()
             if let theme = self.theme { self.applyTheme(theme) }
             self.sourceLabel.text = self.threeVariantsMode
-                ? "🎲 已开启「3选1多版本模式」：点任意技能一次出 3 种风格气泡"
-                : "✨ 已切换回「极速单版本流式模式」"
+                ? "🎲 3选1 已开启：一次出 3 种风格"
+                : "✨ 单版本流式模式"
             self.setNeedsLayout()
         }
         topBar.addArrangedSubview(variantsButton)
@@ -264,13 +264,13 @@ final class AIAssistantPanelView: UIView {
         stopOrRetryButton.setTitle("换说法", for: .normal)
         stopOrRetryButton.actionHandler = { [weak self] in self?.handleStopOrRetry() }
 
-        savePhraseButton.setTitle("⭐存短语", for: .normal)
+        savePhraseButton.setTitle("⭐收藏", for: .normal)
         savePhraseButton.actionHandler = { [weak self] in self?.handleSaveAsPhrase() }
 
-        replaceButton.setTitle("替换原文", for: .normal)
+        replaceButton.setTitle("替换", for: .normal)
         replaceButton.actionHandler = { [weak self] in self?.handleReplace() }
 
-        insertButton.setTitle("插入光标", for: .normal)
+        insertButton.setTitle("插入", for: .normal)
         insertButton.actionHandler = { [weak self] in self?.handleInsert() }
 
         for btn in [stopOrRetryButton, savePhraseButton, replaceButton, insertButton] {
@@ -411,7 +411,7 @@ final class AIAssistantPanelView: UIView {
         sourceLabel.text = "⚡ \(title)  |  \(sourceText.replacingOccurrences(of: "\n", with: " "))"
         lastAction = .polish
         currentRunTitle = title
-        insertButton.setTitle("插入光标", for: .normal)
+        insertButton.setTitle("插入", for: .normal)
         lastCustomTemplateID = nil
         lastCustomPrompt = (sourceText, instruction)
         streamPrompt(prompt: sourceText, systemInstruction: instruction, preferFast: true)
@@ -638,13 +638,11 @@ final class AIAssistantPanelView: UIView {
         thoughtToggleButton.isHidden = true
         thoughtTextView.isHidden = true
         if !hasFullAccess {
-            outputTextView.text = "⚠️ 请前往 系统设置 -> 通用 -> 键盘 -> 灵犀输入法 开启「允许完全访问」，键盘扩展才可联网请求 AI。"
+            outputTextView.text = "⚠️ 请在系统设置开启「允许完全访问」以联网使用 AI。"
         } else if !config.isConfigured {
-            outputTextView.text = "✨ 尚未配置 API Key。请打开主 App「灵犀输入法 -> AI 智脑」，支持一键拉取模型或手动填写，并可配置思考模式。"
+            outputTextView.text = "✨ 请先在「灵犀 App → AI 智脑」填写 API Key。"
         } else {
-            let customCount = config.customPrompts.count
-            let recNote = currentRecommendation.map { "（\($0.badgeTitle)）" } ?? ""
-            outputTextView.text = "点击上方带「✦」的智能推荐技能、「博弈军师」三策略回复，或你的 \(customCount) 个专属提示词即可实时流式生成\(recNote)。顶部可随时切换沟通对象与思考模式。"
+            outputTextView.text = "点上方技能开始生成，或在输入框打「@ai 你的指令」一键直达。"
         }
         updateActionButtonsEnabled()
     }
@@ -672,7 +670,7 @@ final class AIAssistantPanelView: UIView {
 
         lastAction = .polish
         currentRunTitle = "自由提问"
-        insertButton.setTitle("插入光标", for: .normal)
+        insertButton.setTitle("插入", for: .normal)
         lastCustomTemplateID = nil
         lastCustomPrompt = (fullPrompt, sysPrompt)
         streamPrompt(prompt: fullPrompt, systemInstruction: sysPrompt)
@@ -681,7 +679,7 @@ final class AIAssistantPanelView: UIView {
     private func runCustomTemplate(_ template: CustomAIPromptTemplate) {
         lastAction = .polish
         currentRunTitle = template.title
-        insertButton.setTitle("插入光标", for: .normal)
+        insertButton.setTitle("插入", for: .normal)
         lastCustomTemplateID = template.id
         if let theme { rebuildActionButtons(theme: theme) }
         let source: String
@@ -728,7 +726,7 @@ final class AIAssistantPanelView: UIView {
             runThreeVariantsMode(source: source, title: action.title, instruction: action.systemPrompt, preferDeep: action.prefersDeepModel)
             return
         }
-        insertButton.setTitle(action.prefersAppendInsert ? "追加续写" : "插入光标", for: .normal)
+        insertButton.setTitle(action.prefersAppendInsert ? "续写" : "插入", for: .normal)
         streamPrompt(prompt: source, systemInstruction: action.systemPrompt, preferFast: !action.prefersDeepModel, preferDeep: action.prefersDeepModel)
     }
 
@@ -944,7 +942,7 @@ final class AIAssistantPanelView: UIView {
 
     private func updateThoughtHeader() {
         let arrow = isThinkingExpanded ? "▾" : "▸"
-        thoughtToggleButton.setTitle("💭 思考过程（\(thinkingText.count) 字 · 点击\(isThinkingExpanded ? "收起" : "展开")）\(arrow)", for: .normal)
+        thoughtToggleButton.setTitle("💭 思考 (\(thinkingText.count)字) \(arrow)", for: .normal)
     }
 
     private func streamPrompt(prompt: String, systemInstruction: String, preferFast: Bool = false, preferDeep: Bool = false) {
@@ -1025,7 +1023,7 @@ final class AIAssistantPanelView: UIView {
                         self.lastElapsedMs = elapsedMs
                         self.pushVersionHistory(finalClean)
                         AIRecentHistoryStore.record(title: self.currentRunTitle, output: finalClean)
-                        self.sourceLabel.text = "✓ 已生成 \(finalClean.count) 字 · 耗时 \(elapsedMs)ms（可下方继续多轮微调）"
+                        self.sourceLabel.text = "✓ \(finalClean.count)字 · \(elapsedMs)ms"
                     }
                     self.stopOrRetryButton.setTitle("换说法", for: .normal)
                     self.updateActionButtonsEnabled()
@@ -1071,10 +1069,10 @@ final class AIAssistantPanelView: UIView {
         let clean = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         QuickPhraseStore.add(title: "AI·\(String(clean.prefix(6)))", content: clean, category: "AI收藏")
-        savePhraseButton.setTitle("✓已收藏", for: .normal)
-        sourceLabel.text = "⭐ 已存入「快捷短语 -> AI收藏」并自动同步云端"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
-            self?.savePhraseButton.setTitle("⭐存短语", for: .normal)
+        savePhraseButton.setTitle("✓已存", for: .normal)
+        sourceLabel.text = "⭐ 已存至快捷短语"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.savePhraseButton.setTitle("⭐收藏", for: .normal)
         }
     }
 

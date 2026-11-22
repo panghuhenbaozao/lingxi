@@ -1,32 +1,21 @@
 import SwiftUI
 import UIKit
 
+/// AI 智脑中心（Apple 原生精简分层布局：首页 3 组清爽卡片，高阶能力按模块收敛到独立子页，零文字堆砌）。
 struct AISettingsView: View {
     @EnvironmentObject private var appState: AppState
 
     @State private var revealKey = false
     @State private var isTesting = false
-    @State private var testStatusMessage: String?
-    @State private var testSucceeded = false
-    @State private var fetchModelStatus: String?
-    @State private var actionFeedback: String?
+    @State private var statusMessage: String?
+    @State private var statusIsError = false
+    @State private var showAdvancedParams = false
 
     @State private var showModelPicker = false
     @State private var modelAssignTarget: ModelAssignTarget = .primary
     @State private var showPlaygroundSheet = false
-    @State private var showStyleClonerSheet = false
     @State private var showSaveProfileAlert = false
     @State private var newProfileName = ""
-
-    @State private var editingPrompt: CustomAIPromptTemplate?
-    @State private var showNewPromptSheet = false
-    @State private var showPromptMarketplace = false
-    @State private var recentAIHistory: [AIRecentResultItem] = []
-    @State private var editingContextCard: PersonalContextCard?
-    @State private var showNewContextCardSheet = false
-    @State private var newBannedCliche = ""
-    @State private var newCatchphrase = ""
-    @State private var showDualModelDisclosure = false
 
     private let client = AIClient()
 
@@ -36,45 +25,38 @@ struct AISettingsView: View {
         var title: String {
             switch self {
             case .primary: return "选择主模型"
-            case .fast: return "选择极速快模型（翻译/短回复）"
-            case .deep: return "选择深度思考模型（军师/分析）"
+            case .fast: return "选择快模型"
+            case .deep: return "选择深度模型"
             }
         }
     }
 
     var body: some View {
         NavigationStack {
-            Form {
-                providerAndModelSection
-                thinkingAndParamsSection
-                playgroundAndConnectivitySection
-                styleDNAAndContextCardsSection
-                autoInsightSection
-                customPromptsStudioSection
-                recentAIHistorySection
-                usageLedgerSection
-                builtInSkillsSection
+            List {
+                heroStatusSection
+                connectionSection
+                modulesHubSection
+                quickPreferencesSection
             }
-            .onAppear {
-                recentAIHistory = AIRecentHistoryStore.load()
-            }
-            .navigationTitle("AI 灵犀智脑")
+            .listStyle(.insetGrouped)
+            .navigationTitle("AI 智脑")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showPlaygroundSheet = true
                     } label: {
-                        Label("实战试炼场", systemImage: "play.circle.fill")
+                        Label("试炼场", systemImage: "play.circle.fill")
                             .font(.subheadline.weight(.semibold))
                     }
                 }
             }
-            .alert("保存当前配置为渠道档案", isPresented: $showSaveProfileAlert) {
-                TextField("档案名称（如：公司 Gemini 中转）", text: $newProfileName)
+            .alert("保存渠道档案", isPresented: $showSaveProfileAlert) {
+                TextField("档案名（如：公司 Gemini）", text: $newProfileName)
                 Button("取消", role: .cancel) {}
                 Button("保存") {
                     appState.aiConfig.saveCurrentAsProfile(name: newProfileName)
-                    showFeedback("已保存渠道档案「\(newProfileName.isEmpty ? appState.aiConfig.activeModelName : newProfileName)」")
+                    showStatus("已保存档案「\(newProfileName.isEmpty ? appState.aiConfig.activeModelName : newProfileName)」")
                     newProfileName = ""
                 }
             }
@@ -87,7 +69,7 @@ struct AISettingsView: View {
                     onRefresh: { await triggerFetchModels(openSheetOnSuccess: false) },
                     onSelect: { chosenID in
                         assignModel(chosenID, to: modelAssignTarget)
-                        showFeedback("已设定模型：\(chosenID)")
+                        showStatus("已选定 \(chosenID)")
                     }
                 )
             }
@@ -95,348 +77,155 @@ struct AISettingsView: View {
                 AIPlaygroundAndArenaSheet()
                     .environmentObject(appState)
             }
-            .sheet(isPresented: $showStyleClonerSheet) {
-                StyleDNAClonerSheet { samples in
-                    let dna = await appState.cloneStyleDNA(fromSamples: samples)
-                    showFeedback("✓ 文风 DNA 克隆完成：\(dna.clonedStyleSummary.prefix(24))…")
-                }
-            }
-            .sheet(isPresented: $showNewPromptSheet) {
-                CustomPromptEditorSheet(initial: nil) { created in
-                    appState.addOrUpdateCustomPrompt(created)
-                    showFeedback("已新建「\(created.title)」并同步至键盘 AI 栏")
-                }
-            }
-            .sheet(isPresented: $showPromptMarketplace) {
-                AIPromptMarketplaceSheet(
-                    existingTitles: Set(appState.aiConfig.customPrompts.map(\.title)),
-                    onInstall: { templates in
-                        let added = appState.importSuggestedPrompts(templates)
-                        if added > 0 {
-                            showFeedback("已从指令市场装入 \(added) 条技能到键盘 AI 栏")
-                        } else {
-                            showFeedback("所选技能均已在你的键盘 AI 栏中")
-                        }
-                    }
-                )
-            }
-            .sheet(item: $editingPrompt) { item in
-                CustomPromptEditorSheet(initial: item) { updated in
-                    appState.addOrUpdateCustomPrompt(updated)
-                    showFeedback("已更新「\(updated.title)」并同步至键盘 AI 栏")
-                }
-            }
-            .sheet(isPresented: $showNewContextCardSheet) {
-                ContextCardEditorSheet(initial: nil) { created in
-                    appState.upsertContextCard(created)
-                    showFeedback("已添加背景知识卡「\(created.title)」")
-                }
-            }
-            .sheet(item: $editingContextCard) { card in
-                ContextCardEditorSheet(initial: card) { updated in
-                    appState.upsertContextCard(updated)
-                    showFeedback("已更新背景知识卡「\(updated.title)」")
-                }
-            }
         }
     }
 
-    // MARK: - 1. 多渠道模型配置（支持一键拉取远端模型 + 自由手填任意模型 ID + 双模型路由）
+    // MARK: - 1. 顶部精简状态卡（一眼看清模型、思考模式与快捷操作）
 
-    private var providerAndModelSection: some View {
+    private var heroStatusSection: some View {
         Section {
-            if !appState.aiConfig.profiles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(appState.aiConfig.profiles) { prof in
-                            let isCurrent = appState.aiConfig.activeProfileID == prof.id
-                            HStack(spacing: 5) {
-                                Button {
-                                    appState.aiConfig.activateProfile(prof)
-                                    showFeedback("已切换至渠道档案「\(prof.name)」")
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: prof.provider == .gemini ? "sparkles" : "server.rack")
-                                            .font(.caption2)
-                                        Text(prof.name)
-                                            .font(.caption.bold())
-                                    }
-                                }
-                                .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(Design.Palette.accent))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                    }
 
-                                Button {
-                                    appState.aiConfig.profiles.removeAll { $0.id == prof.id }
-                                    if appState.aiConfig.activeProfileID == prof.id {
-                                        appState.aiConfig.activeProfileID = nil
-                                    }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.caption2)
-                                        .opacity(0.65)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(isCurrent ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
-                            .foregroundStyle(isCurrent ? Color.white : Color(Design.Palette.ink))
-                            .clipShape(Capsule())
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(appState.aiConfig.activeModelName)
+                            .font(.system(size: 15.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(appState.aiConfig.isConfigured ? Color(Design.Palette.success) : Color(Design.Palette.warning))
+                                .frame(width: 7, height: 7)
+                            Text(appState.aiConfig.isConfigured ? "已就绪" : "待填 Key")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text("思考 \(appState.aiConfig.thinkingMode.shortBadge)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .padding(.vertical, 2)
+
+                    Spacer(minLength: 4)
+
+                    HStack(spacing: 6) {
+                        Button {
+                            runConnectivityTest()
+                        } label: {
+                            if isTesting {
+                                ProgressView().scaleEffect(0.75)
+                                    .frame(width: 48, height: 30)
+                            } else {
+                                Text("测速")
+                                    .font(.caption.bold())
+                                    .frame(width: 48, height: 30)
+                            }
+                        }
+                        .background(Color(Design.Palette.surface))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .clipShape(Capsule())
+                        .buttonStyle(.plain)
+                        .disabled(isTesting || !appState.aiConfig.isConfigured)
+
+                        Button("试炼场") {
+                            showPlaygroundSheet = true
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 11)
+                        .frame(height: 30)
+                        .background(Color(Design.Palette.accent))
+                        .foregroundStyle(Color.white)
+                        .clipShape(Capsule())
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                // 常用服务商一键快切
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        providerPill("Gemini", active: appState.aiConfig.provider == .gemini) {
+                            appState.aiConfig.provider = .gemini
+                            appState.aiConfig.geminiBaseURL = AIConfig.defaultGeminiBaseURL
+                            appState.aiConfig.geminiModel = GeminiModelOption.flash38.rawValue
+                        }
+                        providerPill("DeepSeek", active: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("deepseek.com")) {
+                            appState.aiConfig.provider = .openAICompatible
+                            appState.aiConfig.openAIBaseURL = "https://api.deepseek.com/v1"
+                            appState.aiConfig.openAIModel = "deepseek-chat"
+                            appState.aiConfig.deepModel = "deepseek-reasoner"
+                        }
+                        providerPill("通义千问", active: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("dashscope")) {
+                            appState.aiConfig.provider = .openAICompatible
+                            appState.aiConfig.openAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                            appState.aiConfig.openAIModel = "qwen-plus"
+                        }
+                        providerPill("SiliconFlow", active: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("siliconflow")) {
+                            appState.aiConfig.provider = .openAICompatible
+                            appState.aiConfig.openAIBaseURL = "https://api.siliconflow.cn/v1"
+                            appState.aiConfig.openAIModel = "deepseek-ai/DeepSeek-V3"
+                        }
+                        providerPill("OpenRouter", active: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("openrouter")) {
+                            appState.aiConfig.provider = .openAICompatible
+                            appState.aiConfig.openAIBaseURL = "https://openrouter.ai/api/v1"
+                            appState.aiConfig.openAIModel = "google/gemini-2.5-flash"
+                        }
+                        providerPill("Ollama", active: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("11434")) {
+                            appState.aiConfig.provider = .openAICompatible
+                            appState.aiConfig.openAIBaseURL = "http://127.0.0.1:11434/v1"
+                            appState.aiConfig.openAIModel = "qwen2.5:7b"
+                        }
+                    }
+                }
+
+                if let msg = statusMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(statusIsError ? Color(Design.Palette.error) : Color(Design.Palette.success))
+                        .lineLimit(2)
                 }
             }
+            .padding(.vertical, 4)
+        }
+    }
 
-            Picker("AI 协议类型", selection: $appState.aiConfig.provider) {
+    // MARK: - 2. 模型与连接（精简 5 行 + 高级参数默认折叠）
+
+    private var connectionSection: some View {
+        Section("模型与连接") {
+            Picker("协议", selection: $appState.aiConfig.provider) {
                 ForEach(AIProvider.allCases) { p in
                     Text(p.displayName).tag(p)
                 }
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    providerQuickPreset(
-                        "Gemini 3.8 Flash",
-                        isActive: appState.aiConfig.provider == .gemini && appState.aiConfig.geminiModel == GeminiModelOption.flash38.rawValue
-                    ) {
-                        appState.aiConfig.provider = .gemini
-                        appState.aiConfig.geminiBaseURL = AIConfig.defaultGeminiBaseURL
-                        appState.aiConfig.geminiModel = GeminiModelOption.flash38.rawValue
-                    }
-                    providerQuickPreset(
-                        "Gemini 2.5 Pro",
-                        isActive: appState.aiConfig.provider == .gemini && appState.aiConfig.geminiModel == GeminiModelOption.pro25.rawValue
-                    ) {
-                        appState.aiConfig.provider = .gemini
-                        appState.aiConfig.geminiModel = GeminiModelOption.pro25.rawValue
-                    }
-                    providerQuickPreset(
-                        "DeepSeek V3/R1",
-                        isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("deepseek.com")
-                    ) {
-                        appState.aiConfig.provider = .openAICompatible
-                        appState.aiConfig.openAIBaseURL = "https://api.deepseek.com/v1"
-                        appState.aiConfig.openAIModel = "deepseek-chat"
-                        appState.aiConfig.deepModel = "deepseek-reasoner"
-                    }
-                    providerQuickPreset(
-                        "通义千问 Qwen",
-                        isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("dashscope.aliyuncs.com")
-                    ) {
-                        appState.aiConfig.provider = .openAICompatible
-                        appState.aiConfig.openAIBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-                        appState.aiConfig.openAIModel = "qwen-plus"
-                    }
-                    providerQuickPreset(
-                        "SiliconFlow",
-                        isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("siliconflow.cn")
-                    ) {
-                        appState.aiConfig.provider = .openAICompatible
-                        appState.aiConfig.openAIBaseURL = "https://api.siliconflow.cn/v1"
-                        appState.aiConfig.openAIModel = "deepseek-ai/DeepSeek-V3"
-                    }
-                    providerQuickPreset(
-                        "OpenRouter",
-                        isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("openrouter.ai")
-                    ) {
-                        appState.aiConfig.provider = .openAICompatible
-                        appState.aiConfig.openAIBaseURL = "https://openrouter.ai/api/v1"
-                        appState.aiConfig.openAIModel = "google/gemini-2.5-flash"
-                    }
-                    providerQuickPreset(
-                        "本地 Ollama",
-                        isActive: appState.aiConfig.provider == .openAICompatible && appState.aiConfig.openAIBaseURL.contains("11434")
-                    ) {
-                        appState.aiConfig.provider = .openAICompatible
-                        appState.aiConfig.openAIBaseURL = "http://127.0.0.1:11434/v1"
-                        appState.aiConfig.openAIModel = "qwen2.5:7b"
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-
             if appState.aiConfig.provider == .gemini {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Gemini 接口 Base URL（支持官方直连或自建反代）")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField(AIConfig.defaultGeminiBaseURL, text: $appState.aiConfig.geminiBaseURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 13.5, design: .monospaced))
-                }
-
-                apiKeyField(title: "Gemini API Key", placeholder: "AIza...", text: $appState.aiConfig.geminiAPIKey)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("主模型 ID（可手填或下方一键获取）")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Menu("快捷选择") {
-                            ForEach(GeminiModelOption.allCases) { opt in
-                                Button(opt.displayName) {
-                                    appState.aiConfig.geminiModel = opt.rawValue
-                                }
-                            }
-                        }
-                        .font(.caption.bold())
-                    }
-                    TextField("如 gemini-3.8-flash / gemini-2.5-pro", text: $appState.aiConfig.geminiModel)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                }
+                labeledField("地址", placeholder: AIConfig.defaultGeminiBaseURL, text: $appState.aiConfig.geminiBaseURL, isURL: true)
+                apiKeyRow(placeholder: "AIza...", text: $appState.aiConfig.geminiAPIKey)
+                modelInputRow(placeholder: "gemini-3.8-flash", text: $appState.aiConfig.geminiModel)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("OpenAI 兼容接口 Base URL")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("https://api.deepseek.com/v1", text: $appState.aiConfig.openAIBaseURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 13.5, design: .monospaced))
-                }
-
-                apiKeyField(title: "API Key", placeholder: "sk-...（本地 Ollama 可留空）", text: $appState.aiConfig.openAIAPIKey)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("主模型 ID（支持任意手动输入或一键拉取）")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("如 deepseek-chat / deepseek-reasoner / qwen3-235b", text: $appState.aiConfig.openAIModel)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                }
+                labeledField("地址", placeholder: "https://api.deepseek.com/v1", text: $appState.aiConfig.openAIBaseURL, isURL: true)
+                apiKeyRow(placeholder: "sk-...", text: $appState.aiConfig.openAIAPIKey)
+                modelInputRow(placeholder: "deepseek-chat", text: $appState.aiConfig.openAIModel)
             }
 
-            // 核心能力：一键获取远端可用模型列表 + 从已拉取列表挑选 + 保存为多渠道档案
-            HStack(spacing: 10) {
-                Button {
-                    modelAssignTarget = .primary
-                    Task { await triggerFetchModels(openSheetOnSuccess: true) }
-                } label: {
-                    HStack(spacing: 6) {
-                        if appState.isFetchingAIModels {
-                            ProgressView().scaleEffect(0.85)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                        }
-                        Text(appState.isFetchingAIModels ? "正在拉取模型…" : "获取可用模型")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 38)
-                    .background(Color(Design.Palette.accent))
-                    .foregroundStyle(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(appState.isFetchingAIModels || !appState.aiConfig.isConfigured)
-
-                if !appState.aiConfig.fetchedModels.isEmpty {
-                    Button {
-                        modelAssignTarget = .primary
-                        showModelPicker = true
-                    } label: {
-                        Text("已拉取 \(appState.aiConfig.fetchedModels.count) 个")
-                            .font(.caption.bold())
-                            .padding(.horizontal, 12)
-                            .frame(height: 38)
-                            .background(Color(Design.Palette.surface))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                Button {
-                    newProfileName = appState.aiConfig.provider == .gemini ? "Gemini 通道" : "自定义通道"
-                    showSaveProfileAlert = true
-                } label: {
-                    Image(systemName: "bookmark.fill")
-                        .font(.subheadline)
-                        .frame(width: 38, height: 38)
-                        .background(Color(Design.Palette.surface))
-                        .foregroundStyle(Color(Design.Palette.accent))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("保存为多渠道档案")
-            }
-
-            if let msg = fetchModelStatus {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(msg.hasPrefix("✓") ? Color(Design.Palette.success) : Color(Design.Palette.error))
-            }
-
-            // 快/深双模型路由配置（可折叠）
-            DisclosureGroup("双模型智能路由（极速快模型 / 深度思考模型）", isExpanded: $showDualModelDisclosure) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        TextField("极速快模型（如 flash-lite，留空用主模型）", text: $appState.aiConfig.fastModel)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(size: 13, design: .monospaced))
-                        if !appState.aiConfig.fetchedModels.isEmpty {
-                            Button("选") {
-                                modelAssignTarget = .fast
-                                showModelPicker = true
-                            }
-                            .font(.caption.bold())
-                        }
-                    }
-                    HStack {
-                        TextField("深度思考模型（如 deepseek-reasoner / pro）", text: $appState.aiConfig.deepModel)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(size: 13, design: .monospaced))
-                        if !appState.aiConfig.fetchedModels.isEmpty {
-                            Button("选") {
-                                modelAssignTarget = .deep
-                                showModelPicker = true
-                            }
-                            .font(.caption.bold())
-                        }
-                    }
-                    Text("实时边打边译自动走「极速快模型」降延迟；博弈军师、自动诊断与链式流水线自动走「深度思考模型」提质量。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 4)
-            }
-            .font(.subheadline)
-        } header: {
-            Text("模型渠道与动态拉取（支持多档案秒切与手动填模型）")
-        } footer: {
-            Text("支持从 Gemini /v1beta/models、OpenAI /models、Ollama /api/tags 动态拉取完整模型列表，也支持直接手填任意新发布或中转站私有模型 ID。")
-        }
-    }
-
-    // MARK: - 2. 思考模式与推理参数（全协议自动适配）
-
-    private var thinkingAndParamsSection: some View {
-        Section {
-            Picker("🧠 思考模式（深度推理档位）", selection: $appState.aiConfig.thinkingMode) {
+            Picker("思考模式", selection: $appState.aiConfig.thinkingMode) {
                 ForEach(AIThinkingMode.allCases) { mode in
                     Text(mode.displayName).tag(mode)
                 }
             }
 
             if appState.aiConfig.thinkingMode == .customBudget {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("思考 Token 预算 (thinking_budget)")
-                            .font(.subheadline)
-                        Spacer()
-                        Text("\(appState.aiConfig.thinkingBudget) tokens")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+                HStack {
+                    Text("思考预算")
                     Slider(
                         value: Binding(
                             get: { Double(appState.aiConfig.thinkingBudget) },
@@ -445,739 +234,327 @@ struct AISettingsView: View {
                         in: 256...16384,
                         step: 256
                     )
+                    Text("\(appState.aiConfig.thinkingBudget)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
                 }
             }
 
-            Toggle("在面板中展示可折叠「思考过程」", isOn: $appState.aiConfig.showThinkingProcess)
+            DisclosureGroup("高级参数与渠道档案", isExpanded: $showAdvancedParams) {
+                if !appState.aiConfig.profiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(appState.aiConfig.profiles) { prof in
+                                let isCurrent = appState.aiConfig.activeProfileID == prof.id
+                                HStack(spacing: 4) {
+                                    Button(prof.name) {
+                                        appState.aiConfig.activateProfile(prof)
+                                        showStatus("已切至「\(prof.name)」")
+                                    }
+                                    .font(.caption.bold())
+                                    .buttonStyle(.plain)
+                                    Button {
+                                        appState.aiConfig.profiles.removeAll { $0.id == prof.id }
+                                        if appState.aiConfig.activeProfileID == prof.id {
+                                            appState.aiConfig.activeProfileID = nil
+                                        }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill").font(.caption2).opacity(0.6)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(isCurrent ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
+                                .foregroundStyle(isCurrent ? Color.white : Color(Design.Palette.ink))
+                                .clipShape(Capsule())
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
 
-            Picker("默认沟通关系场景", selection: $appState.aiConfig.activeScenePersona) {
+                HStack {
+                    Text("快模型").font(.subheadline).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+                    TextField("可选（翻译/短回复）", text: $appState.aiConfig.fastModel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 13, design: .monospaced))
+                    if !appState.aiConfig.fetchedModels.isEmpty {
+                        Button("选") {
+                            modelAssignTarget = .fast
+                            showModelPicker = true
+                        }
+                        .font(.caption.bold())
+                    }
+                }
+
+                HStack {
+                    Text("深模型").font(.subheadline).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+                    TextField("可选（军师/分析）", text: $appState.aiConfig.deepModel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 13, design: .monospaced))
+                    if !appState.aiConfig.fetchedModels.isEmpty {
+                        Button("选") {
+                            modelAssignTarget = .deep
+                            showModelPicker = true
+                        }
+                        .font(.caption.bold())
+                    }
+                }
+
+                Toggle("展示可折叠思考过程", isOn: $appState.aiConfig.showThinkingProcess)
+                Toggle("连通后自动分析画像", isOn: $appState.aiConfig.autoAnalyzeOnConnect)
+
+                compactSliderRow("创造力", valueText: String(format: "%.1f", appState.aiConfig.temperature)) {
+                    Slider(value: $appState.aiConfig.temperature, in: 0.0...1.5, step: 0.1)
+                }
+                compactSliderRow("Top-P", valueText: String(format: "%.2f", appState.aiConfig.topP)) {
+                    Slider(value: $appState.aiConfig.topP, in: 0.1...1.0, step: 0.05)
+                }
+                compactSliderRow("最大字数", valueText: "\(appState.aiConfig.maxOutputTokens)") {
+                    Slider(
+                        value: Binding(
+                            get: { Double(appState.aiConfig.maxOutputTokens) },
+                            set: { appState.aiConfig.maxOutputTokens = Int($0) }
+                        ),
+                        in: 256...8192,
+                        step: 256
+                    )
+                }
+            }
+            .font(.subheadline)
+        }
+    }
+
+    // MARK: - 3. 核心能力中心（5 个干净二级页入口，告别满屏文字）
+
+    private var modulesHubSection: some View {
+        let historyCount = AIRecentHistoryStore.load().count
+        let geoCtx = GeoLocationContext.load()
+        return Section("能力中心") {
+            NavigationLink {
+                AIPromptsHubView()
+            } label: {
+                moduleRow(
+                    icon: "wand.and.stars",
+                    title: "提示词与指令市场",
+                    badge: "\(appState.aiConfig.customPrompts.count) 条 · 市场 \(AIPromptMarketplaceCatalog.allTemplates.count)"
+                )
+            }
+
+            NavigationLink {
+                AIStyleAndContextView()
+            } label: {
+                let dnaStatus = appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty ? "未克隆" : "已克隆"
+                moduleRow(
+                    icon: "waveform.path.ecg",
+                    title: "文风 DNA 与知识卡",
+                    badge: "\(dnaStatus) · \(appState.aiConfig.contextCards.count) 卡"
+                )
+            }
+
+            NavigationLink {
+                AIAutoInsightView()
+            } label: {
+                moduleRow(
+                    icon: "brain.head.profile",
+                    title: "智能画像诊断",
+                    badge: appState.aiInsightReport?.personaTitle ?? "一键分析"
+                )
+            }
+
+            NavigationLink {
+                AIHistoryAndUsageView()
+            } label: {
+                moduleRow(
+                    icon: "clock.arrow.circlepath",
+                    title: "生成历史与账本",
+                    badge: "\(historyCount) 历史 · \(appState.aiUsageLedger.count) 次"
+                )
+            }
+
+            NavigationLink {
+                LocationLexiconView()
+            } label: {
+                moduleRow(
+                    icon: "location.fill",
+                    title: "实时城市与地标",
+                    badge: geoCtx.isPopulated ? "\(geoCtx.shortCityName) · \(geoCtx.pois.count)" : "未开启"
+                )
+            }
+        }
+    }
+
+    // MARK: - 4. 高频偏好（4 行极简开关）
+
+    private var quickPreferencesSection: some View {
+        Section("常用偏好") {
+            Picker("沟通对象", selection: $appState.aiConfig.activeScenePersona) {
                 ForEach(AIScenePersona.allCases) { scene in
                     Text(scene.shortTitle).tag(scene)
                 }
             }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Temperature（创造力）")
-                    Spacer()
-                    Text(String(format: "%.1f", appState.aiConfig.temperature))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(value: $appState.aiConfig.temperature, in: 0.0...1.5, step: 0.1)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Top-P（核采样多样性）")
-                    Spacer()
-                    Text(String(format: "%.2f", appState.aiConfig.topP))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(value: $appState.aiConfig.topP, in: 0.1...1.0, step: 0.05)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("最大输出长度 (Max Tokens)")
-                    Spacer()
-                    Text("\(appState.aiConfig.maxOutputTokens)")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(
-                    value: Binding(
-                        get: { Double(appState.aiConfig.maxOutputTokens) },
-                        set: { appState.aiConfig.maxOutputTokens = Int($0) }
-                    ),
-                    in: 256...8192,
-                    step: 256
-                )
-            }
-
-            Picker("译 · 默认翻译目标语种", selection: $appState.settings.translateTargetLang) {
+            Picker("默认译文", selection: $appState.settings.translateTargetLang) {
                 ForEach(TranslateTargetLanguage.allCases) { lang in
                     Text(lang.rawValue).tag(lang.rawValue)
                 }
             }
-
-            Toggle("键盘内自动识别语境并置顶推荐提示词", isOn: $appState.aiConfig.smartContextRecommendEnabled)
-            Toggle("AI 写作自动融合当前所在城市与时段", isOn: $appState.settings.aiGeoContextEnabled)
-            NavigationLink {
-                LocationLexiconView()
-            } label: {
-                let ctx = GeoLocationContext.load()
-                HStack {
-                    Label("实时地理位置与周边地标感知", systemImage: "location.circle.fill")
-                        .font(.subheadline)
-                    Spacer()
-                    Text(ctx.isPopulated ? "\(ctx.shortCityName) · \(ctx.pois.count)地标" : "去开启")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Toggle("测试连通成功后自动分析并生成提示词", isOn: $appState.aiConfig.autoAnalyzeOnConnect)
-        } header: {
-            Text("🧠 思考模式与推理参数（Gemini / DeepSeek-R1 / Qwen3 / OpenAI 全适配）")
-        } footer: {
-            Text("系统自动分离 <think> 思考链与正文输出：点击上屏时绝不会把思考过程误插入聊天框。位置感知仅在本地注入城市/时段，不上传精确坐标。")
+            Toggle("键盘语境智能推荐", isOn: $appState.aiConfig.smartContextRecommendEnabled)
+            Toggle("融合当前城市与时段", isOn: $appState.settings.aiGeoContextEnabled)
         }
     }
 
-    // MARK: - 3. 连通性诊断与 AI 实战试炼场 / 双模型 Arena PK
+    // MARK: - 精简行组件
 
-    private var playgroundAndConnectivitySection: some View {
-        Section {
-            HStack(spacing: 10) {
-                Button {
-                    runConnectivityTest()
-                } label: {
-                    HStack(spacing: 6) {
-                        if isTesting {
-                            ProgressView().scaleEffect(0.85)
-                        } else {
-                            Image(systemName: "bolt.horizontal.circle.fill")
-                        }
-                        Text(isTesting ? "正在测试…" : "一键测速连通")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 40)
-                    .background(Color(Design.Palette.surface))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(isTesting || !appState.aiConfig.isConfigured)
+    private func moduleRow(icon: String, title: String, badge: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 28, height: 28)
+                .background(Color(Design.Palette.accentSoft))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color(Design.Palette.ink))
+            Spacer(minLength: 6)
+            Text(badge)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 1)
+    }
 
-                Button {
-                    showPlaygroundSheet = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "flame.fill")
-                        Text("试炼场 / 模型 PK")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 40)
-                    .background(Color(Design.Palette.accent))
-                    .foregroundStyle(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if let msg = testStatusMessage {
-                Text(msg)
-                    .font(.footnote)
-                    .foregroundStyle(testSucceeded ? Color(Design.Palette.success) : Color(Design.Palette.error))
-            }
-        } header: {
-            Text("连通测试与双模型对比试炼场")
-        } footer: {
-            Text("在「试炼场 / 模型 PK」中可直接实测思考过程折叠流式输出、首字延迟 TTFT，以及两个模型同题并排 PK。")
+    private func labeledField(_ label: String, placeholder: String, text: Binding<String>, isURL: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            TextField(placeholder, text: text)
+                .keyboardType(isURL ? .URL : .default)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: 13.5, design: .monospaced))
         }
     }
 
-    // MARK: - 4. 个人文风 DNA 克隆、去 AI 腔黑名单 & 个人背景知识卡 (RAG-Lite)
-
-    private var styleDNAAndContextCardsSection: some View {
-        Section {
-            // 10 秒文风 DNA 克隆
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label("个人文风 DNA 指纹", systemImage: "waveform.path.ecg")
-                        .font(.subheadline.bold())
-                    Spacer()
-                    Button {
-                        showStyleClonerSheet = true
-                    } label: {
-                        Text(appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty ? "10秒克隆文风" : "重新克隆")
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color(Design.Palette.accent))
-                            .foregroundStyle(Color.white)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty {
-                    Text("粘贴 3~5 句你平时发的真实微信或工作消息，灵犀会提取你的语气温度、标点习惯与句长节奏，让 AI 写出来的字像你本人。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(appState.aiConfig.styleDNA.clonedStyleSummary)
-                        .font(.caption)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(Design.Palette.surface))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-            }
-            .padding(.vertical, 2)
-
-            // 去 AI 腔黑名单
-            Toggle("自动去除生硬「AI 腔」套话词", isOn: $appState.aiConfig.styleDNA.removeAIClicheEnabled)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("禁用 AI 腔词条（点按删除，可新增）")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(appState.aiConfig.styleDNA.bannedAICliches, id: \.self) { word in
-                            Button {
-                                appState.aiConfig.styleDNA.bannedAICliches.removeAll { $0 == word }
-                            } label: {
-                                HStack(spacing: 3) {
-                                    Text(word)
-                                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                }
-                                .font(.caption2.bold())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color(Design.Palette.error).opacity(0.12))
-                                .foregroundStyle(Color(Design.Palette.error))
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                HStack(spacing: 8) {
-                    TextField("添加禁用词（如：综上所述 / 旨在）", text: $newBannedCliche)
-                        .font(.caption)
-                    Button("添加") {
-                        let w = newBannedCliche.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !w.isEmpty && !appState.aiConfig.styleDNA.bannedAICliches.contains(w) {
-                            appState.aiConfig.styleDNA.bannedAICliches.insert(w, at: 0)
-                            newBannedCliche = ""
-                        }
-                    }
-                    .font(.caption.bold())
-                    .disabled(newBannedCliche.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-
-            // 个人常用口癖/高频收尾
-            VStack(alignment: .leading, spacing: 8) {
-                Text("个人自然口癖（让回复更有本人味道）")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(appState.aiConfig.styleDNA.personalCatchphrases, id: \.self) { phrase in
-                            Button {
-                                appState.aiConfig.styleDNA.personalCatchphrases.removeAll { $0 == phrase }
-                            } label: {
-                                HStack(spacing: 3) {
-                                    Text(phrase)
-                                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                }
-                                .font(.caption2.bold())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color(Design.Palette.accentSoft))
-                                .foregroundStyle(Color(Design.Palette.accent))
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                HStack(spacing: 8) {
-                    TextField("添加口癖（如：收到啦～ / 没问题）", text: $newCatchphrase)
-                        .font(.caption)
-                    Button("添加") {
-                        let w = newCatchphrase.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !w.isEmpty && !appState.aiConfig.styleDNA.personalCatchphrases.contains(w) {
-                            appState.aiConfig.styleDNA.personalCatchphrases.insert(w, at: 0)
-                            newCatchphrase = ""
-                        }
-                    }
-                    .font(.caption.bold())
-                    .disabled(newCatchphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-
-            if !appState.aiConfig.styleDNA.learnedDiffRules.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("自动从你的手动改写中学到的规则：")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    ForEach(appState.aiConfig.styleDNA.learnedDiffRules, id: \.self) { rule in
-                        Text("• \(rule)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("全局人设补充（可选）")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                TextField("例如：偏科技从业者，结论先行，不用感叹号", text: $appState.aiConfig.customPersonaPrompt, axis: .vertical)
-                    .lineLimit(2...4)
-                    .font(.subheadline)
-            }
-
-            // 个人背景知识卡片 (RAG-Lite)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label("个人背景知识卡 (\(appState.aiConfig.contextCards.filter(\.isEnabled).count) 启用)", systemImage: "rectangle.stack.person.crop")
-                        .font(.subheadline.bold())
-                    Spacer()
-                    Button {
-                        showNewContextCardSheet = true
-                    } label: {
-                        Label("新增卡片", systemImage: "plus.circle.fill")
-                            .font(.caption.bold())
-                    }
-                }
-
-                if appState.aiConfig.contextCards.isEmpty {
-                    Text("可存入你的职业身份、公司业务、常见回复口径，键盘 AI 调用时自动挂载，不用每次重复交代背景。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(appState.aiConfig.contextCards) { card in
-                        HStack(spacing: 8) {
-                            Button {
-                                editingContextCard = card
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(card.title).font(.subheadline.bold()).foregroundStyle(.primary)
-                                        Text(card.sceneTag).font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(card.content).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { card.isEnabled },
-                                set: { val in
-                                    var updated = card
-                                    updated.isEnabled = val
-                                    appState.upsertContextCard(updated)
-                                }
-                            ))
-                            .labelsHidden()
-                        }
-                    }
-                }
-            }
-        } header: {
-            Text("🧬 个人文风 DNA · 去 AI 腔 · 知识背景卡（端到端云同步）")
-        }
-    }
-
-    // MARK: - 5. 接入 AI 自动分析与专属方案生成
-
-    private var autoInsightSection: some View {
-        Section {
-            Button {
-                triggerAutoAnalysis()
-            } label: {
-                HStack(spacing: 10) {
-                    if appState.isRunningAIInsight {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "brain.head.profile")
-                            .foregroundStyle(Color(Design.Palette.accent))
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(appState.isRunningAIInsight
-                             ? "正在自动分析你的打字画像并生成专属提示词…"
-                             : (appState.aiConfig.isConfigured
-                                ? "✨ 立即让 AI 自动分析并生成专属提示词"
-                                : "✨ 端侧即时诊断并生成推荐提示词"))
-                            .font(.subheadline.bold())
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Text("仅分析脱敏速度、词库领域与混淆统计，不上传任何聊天原文")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-            }
-            .disabled(appState.isRunningAIInsight)
-
-            if let feedback = actionFeedback {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color(Design.Palette.success))
-                    Text(feedback)
-                        .font(.caption)
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
-            }
-
-            if let report = appState.aiInsightReport {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(report.personaTitle)
-                            .font(.headline)
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Spacer()
-                        Text(report.sourceLabel)
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color(Design.Palette.surface))
-                            .clipShape(Capsule())
-                    }
-
-                    Text(report.styleSummary)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !report.efficiencyDiagnosis.isEmpty {
-                        Text("效率诊断：\(report.efficiencyDiagnosis)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.vertical, 4)
-
-                if !report.recommendedPersonaPrompt.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Label("AI 推荐专属人设提示词", systemImage: "person.text.rectangle")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            let isApplied = appState.aiConfig.customPersonaPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                                == report.recommendedPersonaPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                            Button(isApplied ? "已应用" : "一键应用") {
-                                appState.aiConfig.customPersonaPrompt = report.recommendedPersonaPrompt
-                                showFeedback("已应用专属人设提示词，键盘 AI 将按此风格输出")
-                            }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(isApplied ? Color(Design.Palette.surface) : Color(Design.Palette.accent))
-                            .foregroundStyle(isApplied ? Color.secondary : Color.white)
-                            .clipShape(Capsule())
-                            .buttonStyle(.plain)
-                        }
-
-                        Text(report.recommendedPersonaPrompt)
-                            .font(.footnote)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(Design.Palette.surface))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                }
-
-                if !report.suggestedPrompts.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Label("为你定制的键盘提示词 (\(report.suggestedPrompts.count))", systemImage: "wand.and.stars")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("全部加入键盘") {
-                                let count = appState.importSuggestedPrompts(report.suggestedPrompts)
-                                showFeedback(count > 0 ? "已添加 \(count) 条定制提示词到键盘 AI 栏" : "这些定制提示词均已在你的键盘栏中")
-                            }
-                            .font(.caption.bold())
-                            .foregroundStyle(Color(Design.Palette.accent))
-                            .buttonStyle(.plain)
-                        }
-
-                        ForEach(report.suggestedPrompts) { tpl in
-                            let alreadyAdded = appState.aiConfig.customPrompts.contains(where: { $0.title == tpl.title })
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: tpl.icon)
-                                    .font(.subheadline)
-                                    .foregroundStyle(Color(Design.Palette.accent))
-                                    .frame(width: 24, height: 24)
-                                    .background(Color(Design.Palette.surface))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Text(tpl.title).font(.subheadline.bold())
-                                        Text(tpl.category).font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(tpl.instruction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                }
-                                Spacer(minLength: 4)
-                                Button(alreadyAdded ? "已加入" : "加入") {
-                                    let count = appState.importSuggestedPrompts([tpl])
-                                    showFeedback(count > 0 ? "已将「\(tpl.title)」加入键盘 AI 技能栏" : "「\(tpl.title)」已在键盘栏中")
-                                }
-                                .font(.caption.bold())
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                                .background(alreadyAdded ? Color(Design.Palette.surface) : Color(Design.Palette.accent))
-                                .foregroundStyle(alreadyAdded ? Color.secondary : Color.white)
-                                .clipShape(Capsule())
-                                .buttonStyle(.plain)
-                                .disabled(alreadyAdded)
-                            }
-                        }
-                    }
-                }
-
-                if !report.suggestedPhrases.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Label("AI 推荐高频快捷短语", systemImage: "text.quote")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("一键导入短语库") {
-                                let count = appState.importSuggestedPhrases(report.suggestedPhrases)
-                                showFeedback(count > 0 ? "已导入 \(count) 条快捷短语" : "推荐短语已在你的短语库中")
-                            }
-                            .font(.caption.bold())
-                            .foregroundStyle(Color(Design.Palette.accent))
-                            .buttonStyle(.plain)
-                        }
-
-                        ForEach(report.suggestedPhrases) { phrase in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(phrase.title).font(.caption.bold())
-                                Text(phrase.content).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                if !report.suggestedFuzzyKeys.isEmpty {
-                    Button {
-                        let applied = appState.applySuggestedFuzzyKeys(report.suggestedFuzzyKeys)
-                        let names = report.suggestedFuzzyKeys.map(AIAutoInsightService.fuzzyDisplayName(for:)).joined(separator: "、")
-                        showFeedback(applied > 0 ? "已一键开启模糊音：\(names)" : "推荐模糊音均已开启")
-                    } label: {
-                        Label(
-                            "一键开启高频混淆模糊音（\(report.suggestedFuzzyKeys.map(AIAutoInsightService.fuzzyDisplayName(for:)).joined(separator: " / "))）",
-                            systemImage: "waveform.path.ecg"
-                        )
-                        .font(.subheadline.bold())
-                    }
-                }
-            }
-        } header: {
-            Text("🧠 AI 自动分析与专属提示词生成")
-        }
-    }
-
-    // MARK: - 6. 我的键盘自定义提示词库（含链式流水线）
-
-    private var customPromptsStudioSection: some View {
-        Section {
-            ForEach(appState.aiConfig.customPrompts) { tpl in
-                HStack(alignment: .center, spacing: 10) {
-                    Button {
-                        editingPrompt = tpl
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: tpl.icon)
-                                .font(.subheadline)
-                                .foregroundStyle(Color(Design.Palette.accent))
-                                .frame(width: 24, height: 24)
-                                .background(Color(Design.Palette.surface))
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(tpl.title).font(.subheadline.bold()).foregroundStyle(.primary)
-                                    if tpl.useDeepModel {
-                                        Text("深度").font(.caption2.bold())
-                                            .padding(.horizontal, 5).padding(.vertical, 1)
-                                            .background(Color(Design.Palette.accentSoft))
-                                            .foregroundStyle(Color(Design.Palette.accent))
-                                            .clipShape(Capsule())
-                                    }
-                                    if tpl.isAIGenerated {
-                                        Text("AI定制").font(.caption2.bold())
-                                            .padding(.horizontal, 5).padding(.vertical, 1)
-                                            .background(Color(Design.Palette.surface))
-                                            .clipShape(Capsule())
-                                    }
-                                    Text(tpl.category).font(.caption2).foregroundStyle(.secondary)
-                                }
-                                Text(tpl.instruction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-
-                    Button {
-                        appState.togglePinCustomPrompt(id: tpl.id)
-                    } label: {
-                        Image(systemName: tpl.isPinned ? "pin.fill" : "pin")
-                            .font(.caption)
-                            .foregroundStyle(tpl.isPinned ? Color(Design.Palette.accent) : Color.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .onDelete { offsets in
-                let ids = offsets.map { appState.aiConfig.customPrompts[$0].id }
-                for id in ids { appState.deleteCustomPrompt(id: id) }
-            }
-
-            Button {
-                showPromptMarketplace = true
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "square.grid.2x2.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.white)
-                        .frame(width: 28, height: 28)
-                        .background(Color(Design.Palette.accent))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("✨ AI 场景指令市场（\(AIPromptMarketplaceCatalog.allTemplates.count) 条精选一键装入）")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Text("微信高情商 · 职场办公 · 社交种草 · 本地生活 · 跨境多语 · 极客效率")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.vertical, 2)
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                showNewPromptSheet = true
-            } label: {
-                Label("新建专属键盘提示词 / 链式流水线", systemImage: "plus.circle.fill")
-                    .font(.subheadline.bold())
-            }
-        } header: {
-            Text("✨ 我的键盘自定义提示词库（实时同步至键盘 AI 栏）")
-        }
-    }
-
-    // MARK: - 6.5 最近键盘 AI 生成历史（防误关找回 · 一键收藏短语）
-
-    private var recentAIHistorySection: some View {
-        Section {
-            if recentAIHistory.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("暂无最近生成记录")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text("在任意 App 键盘中输入「@ai 你的指令」或使用键盘 AI 面板后，最近 12 条精彩文案会自动留存在本机，防误关丢失。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 2)
+    private func apiKeyRow(placeholder: String, text: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Text("Key")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            if revealKey {
+                TextField(placeholder, text: text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 13.5, design: .monospaced))
             } else {
-                ForEach(recentAIHistory.prefix(6)) { item in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(item.title)
-                                .font(.caption.bold())
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color(Design.Palette.accentSoft))
-                                .foregroundStyle(Color(Design.Palette.accent))
-                                .clipShape(Capsule())
-                            Spacer()
-                            Text(item.createdAt, style: .time)
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(item.output)
-                            .font(.subheadline)
-                            .foregroundStyle(.primary)
-                            .lineLimit(3)
-                        HStack(spacing: 12) {
-                            Button {
-                                UIPasteboard.general.string = item.output
-                                showFeedback("已复制「\(item.title)」生成内容")
-                            } label: {
-                                Label("复制", systemImage: "doc.on.doc")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(Color(Design.Palette.accent))
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                let title = String(item.title.prefix(8))
-                                appState.addQuickPhrase(title: title, content: item.output, category: "AI收藏")
-                                showFeedback("已收藏至快捷短语库「AI收藏」")
-                            } label: {
-                                Label("存为快捷短语", systemImage: "star.fill")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(Color(Design.Palette.accent))
-                            }
-                            .buttonStyle(.plain)
-                        }
+                SecureField(placeholder, text: text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 13.5, design: .monospaced))
+            }
+            if text.wrappedValue.isEmpty {
+                Button("粘贴") {
+                    if let p = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
+                        text.wrappedValue = p
                     }
-                    .padding(.vertical, 3)
-                }
-
-                Button("清空最近 AI 生成历史", role: .destructive) {
-                    AIRecentHistoryStore.clear()
-                    recentAIHistory = []
                 }
                 .font(.caption.bold())
+                .foregroundStyle(Color(Design.Palette.accent))
+                .buttonStyle(.plain)
             }
-        } header: {
-            Text("🕒 最近键盘 AI 生成历史（仅存本机）")
+            Button {
+                revealKey.toggle()
+            } label: {
+                Image(systemName: revealKey ? "eye.slash" : "eye")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
         }
     }
 
-    // MARK: - 7. AI 调用耗时与用量账本
+    private func modelInputRow(placeholder: String, text: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Text("模型")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            TextField(placeholder, text: text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: 13.5, weight: .medium, design: .monospaced))
 
-    private var usageLedgerSection: some View {
-        let entries = appState.aiUsageLedger
-        let avgTTFT = entries.isEmpty ? 0 : entries.reduce(0) { $0 + $1.ttftMs } / entries.count
-        let totalOut = entries.reduce(0) { $0 + $1.outputChars }
-        return Section {
-            LabeledContent("累计 AI 调用", value: "\(entries.count) 次")
-            LabeledContent("平均首字响应 (TTFT)", value: avgTTFT > 0 ? "\(avgTTFT) ms" : "--")
-            LabeledContent("累计生成字数", value: "\(totalOut) 字（约省 \(max(0, totalOut / 38)) 分钟）")
-            if let latest = entries.first {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("最近调用：\(latest.model) · 思考「\(latest.thinkingMode)」")
+            Button {
+                modelAssignTarget = .primary
+                if appState.aiConfig.fetchedModels.isEmpty {
+                    Task { await triggerFetchModels(openSheetOnSuccess: true) }
+                } else {
+                    showModelPicker = true
+                }
+            } label: {
+                if appState.isFetchingAIModels {
+                    ProgressView().scaleEffect(0.75)
+                } else {
+                    Text(appState.aiConfig.fetchedModels.isEmpty ? "拉取" : "选(\(appState.aiConfig.fetchedModels.count))")
                         .font(.caption.bold())
-                    Text("首字 \(latest.ttftMs)ms · 总计 \(latest.totalMs)ms · 输出 \(latest.outputChars) 字（思考 \(latest.thoughtChars) 字）")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
             }
-            if !entries.isEmpty {
-                Button("清空本地用量账本", role: .destructive) {
-                    appState.clearAIUsageLedger()
-                }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Color(Design.Palette.accentSoft))
+            .foregroundStyle(Color(Design.Palette.accent))
+            .clipShape(Capsule())
+            .buttonStyle(.plain)
+            .disabled(appState.isFetchingAIModels || !appState.aiConfig.isConfigured)
+
+            Button {
+                newProfileName = appState.aiConfig.provider == .gemini ? "Gemini" : "自定义"
+                showSaveProfileAlert = true
+            } label: {
+                Image(systemName: "bookmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(Design.Palette.accent))
             }
-        } header: {
-            Text("📊 AI 速度与消耗账本（仅记录数值元数据）")
+            .buttonStyle(.plain)
+            .accessibilityLabel("保存渠道档案")
         }
     }
 
-    // MARK: - 8. 键盘内置技能一览
-
-    private var builtInSkillsSection: some View {
-        Section("键盘内置基础 AI 技能（含博弈军师 & 框选即改）") {
-            ForEach(AIPresetAction.allCases) { action in
-                Label(action.title, systemImage: action.icon)
-            }
+    private func compactSliderRow<S: View>(_ title: String, valueText: String, @ViewBuilder slider: () -> S) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+            slider()
+            Text(valueText).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
         }
     }
 
-    // MARK: - Helpers
+    private func providerPill(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(.caption.bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
+            .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+            .clipShape(Capsule())
+            .buttonStyle(.plain)
+    }
+
+    // MARK: - Actions
+
+    private func showStatus(_ msg: String, isError: Bool = false) {
+        withAnimation {
+            statusMessage = msg
+            statusIsError = isError
+        }
+    }
 
     private func currentModelFor(target: ModelAssignTarget) -> String {
         switch target {
@@ -1195,94 +572,23 @@ struct AISettingsView: View {
             } else {
                 appState.aiConfig.openAIModel = id
             }
-        case .fast:
-            appState.aiConfig.fastModel = id
-        case .deep:
-            appState.aiConfig.deepModel = id
+        case .fast: appState.aiConfig.fastModel = id
+        case .deep: appState.aiConfig.deepModel = id
         }
-    }
-
-    private func providerQuickPreset(_ title: String, isActive: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.bold())
-                .padding(.horizontal, 11)
-                .padding(.vertical, 6)
-                .background(isActive ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
-                .foregroundStyle(isActive ? Color.white : Color(Design.Palette.ink))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule().stroke(isActive ? Color.clear : Color(Design.Palette.hairline), lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private func apiKeyField(title: String, placeholder: String, text: Binding<String>) -> some View {
-        HStack(spacing: 8) {
-            if revealKey {
-                TextField(placeholder, text: text)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            } else {
-                SecureField(placeholder, text: text)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
-            if text.wrappedValue.isEmpty {
-                Button("粘贴") {
-                    if let pasted = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !pasted.isEmpty {
-                        text.wrappedValue = pasted
-                    }
-                }
-                .font(.caption.bold())
-                .foregroundStyle(Color(Design.Palette.accent))
-                .buttonStyle(.plain)
-            }
-            Button {
-                revealKey.toggle()
-            } label: {
-                Image(systemName: revealKey ? "eye.slash" : "eye")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func showFeedback(_ message: String) {
-        withAnimation { actionFeedback = message }
     }
 
     private func triggerFetchModels(openSheetOnSuccess: Bool) async {
-        fetchModelStatus = nil
         do {
             let models = try await appState.fetchAvailableAIModels()
-            fetchModelStatus = "✓ 已拉取 \(models.count) 个远端可用模型，可点按挑选或继续手动输入"
-            if openSheetOnSuccess {
-                showModelPicker = true
-            }
+            showStatus("✓ 已拉取 \(models.count) 个模型")
+            if openSheetOnSuccess { showModelPicker = true }
         } catch {
-            fetchModelStatus = "拉取失败：\(error.localizedDescription)（您仍可直接手动输入模型 ID）"
-        }
-    }
-
-    private func triggerAutoAnalysis() {
-        actionFeedback = nil
-        Task {
-            let report = await appState.runAIAutoAnalysis()
-            await MainActor.run {
-                showFeedback(report.isFromLLM
-                             ? "AI 深度分析完成！已为你定制 \(report.suggestedPrompts.count) 条提示词"
-                             : "已完成端侧智能诊断，为你生成 \(report.suggestedPrompts.count) 条推荐提示词")
-            }
+            showStatus("拉取失败：\(error.localizedDescription)", isError: true)
         }
     }
 
     private func runConnectivityTest() {
         isTesting = true
-        testStatusMessage = nil
         let snapshot = appState.aiConfig
         Task {
             do {
@@ -1291,23 +597,544 @@ struct AISettingsView: View {
                 let ms = Int(Date().timeIntervalSince(start) * 1000)
                 await MainActor.run {
                     isTesting = false
-                    testSucceeded = true
-                    testStatusMessage = "✓ 连接成功 (\(ms)ms)：\(reply)"
+                    showStatus("✓ 连通 (\(ms)ms)：\(reply.prefix(24))")
                     appState.refreshAll()
                 }
                 if snapshot.autoAnalyzeOnConnect {
-                    let report = await appState.runAIAutoAnalysis()
-                    await MainActor.run {
-                        showFeedback("连通后已自动分析：生成「\(report.personaTitle)」方案")
-                    }
+                    _ = await appState.runAIAutoAnalysis()
                 }
             } catch {
                 await MainActor.run {
                     isTesting = false
-                    testSucceeded = false
-                    testStatusMessage = "测试失败：\(error.localizedDescription)"
+                    showStatus("测试失败：\(error.localizedDescription)", isError: true)
                 }
             }
+        }
+    }
+}
+
+// MARK: - 子页 1：提示词与指令市场
+
+private struct AIPromptsHubView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var showMarketplace = false
+    @State private var showNewPrompt = false
+    @State private var editingPrompt: CustomAIPromptTemplate?
+    @State private var feedback: String?
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    showMarketplace = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.grid.2x2.fill")
+                            .foregroundStyle(Color.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color(Design.Palette.accent))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("AI 场景指令市场")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Text("\(AIPromptMarketplaceCatalog.allTemplates.count) 条精选 · 一键装入键盘")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showNewPrompt = true
+                } label: {
+                    Label("新建自定义技能", systemImage: "plus.circle.fill")
+                        .font(.subheadline.bold())
+                }
+            }
+
+            if let fb = feedback {
+                Section {
+                    Text(fb).font(.caption).foregroundStyle(Color(Design.Palette.success))
+                }
+            }
+
+            Section("我的键盘技能 (\(appState.aiConfig.customPrompts.count))") {
+                ForEach(appState.aiConfig.customPrompts) { tpl in
+                    HStack(spacing: 10) {
+                        Button {
+                            editingPrompt = tpl
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: tpl.icon)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 5) {
+                                        Text(tpl.title).font(.subheadline.bold()).foregroundStyle(.primary)
+                                        if tpl.useDeepModel {
+                                            Text("深度").font(.caption2.bold())
+                                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                                .background(Color(Design.Palette.accentSoft))
+                                                .foregroundStyle(Color(Design.Palette.accent))
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                    Text(tpl.instruction).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        Spacer()
+                        Button {
+                            appState.togglePinCustomPrompt(id: tpl.id)
+                        } label: {
+                            Image(systemName: tpl.isPinned ? "pin.fill" : "pin")
+                                .font(.caption)
+                                .foregroundStyle(tpl.isPinned ? Color(Design.Palette.accent) : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .onDelete { offsets in
+                    let ids = offsets.map { appState.aiConfig.customPrompts[$0].id }
+                    for id in ids { appState.deleteCustomPrompt(id: id) }
+                }
+            }
+
+            Section("内置技能") {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(AIPresetAction.allCases) { act in
+                            Label(act.title, systemImage: act.icon)
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color(Design.Palette.surface))
+                                .clipShape(Capsule())
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("提示词与指令市场")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showMarketplace) {
+            AIPromptMarketplaceSheet(
+                existingTitles: Set(appState.aiConfig.customPrompts.map(\.title)),
+                onInstall: { templates in
+                    let added = appState.importSuggestedPrompts(templates)
+                    feedback = added > 0 ? "✓ 已装入 \(added) 条技能" : "所选技能已存在"
+                }
+            )
+        }
+        .sheet(isPresented: $showNewPrompt) {
+            CustomPromptEditorSheet(initial: nil) { created in
+                appState.addOrUpdateCustomPrompt(created)
+                feedback = "✓ 已新建「\(created.title)」"
+            }
+        }
+        .sheet(item: $editingPrompt) { item in
+            CustomPromptEditorSheet(initial: item) { updated in
+                appState.addOrUpdateCustomPrompt(updated)
+                feedback = "✓ 已更新「\(updated.title)」"
+            }
+        }
+    }
+}
+
+// MARK: - 子页 2：文风 DNA 与个人背景知识卡
+
+private struct AIStyleAndContextView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var showCloner = false
+    @State private var showNewCard = false
+    @State private var editingCard: PersonalContextCard?
+    @State private var newBanned = ""
+    @State private var newCatchphrase = ""
+    @State private var feedback: String?
+
+    var body: some View {
+        List {
+            Section("文风 DNA") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty ? "尚未克隆个人文风" : "已提取文风 DNA")
+                            .font(.subheadline.bold())
+                        Text(appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty
+                             ? "粘贴 3~5 句真实消息，让 AI 更像你"
+                             : appState.aiConfig.styleDNA.clonedStyleSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                    Spacer()
+                    Button(appState.aiConfig.styleDNA.clonedStyleSummary.isEmpty ? "克隆" : "重克") {
+                        showCloner = true
+                    }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6)
+                    .background(Color(Design.Palette.accent))
+                    .foregroundStyle(Color.white)
+                    .clipShape(Capsule())
+                    .buttonStyle(.plain)
+                }
+
+                Toggle("自动去除生硬 AI 腔", isOn: $appState.aiConfig.styleDNA.removeAIClicheEnabled)
+
+                if let fb = feedback {
+                    Text(fb).font(.caption).foregroundStyle(Color(Design.Palette.success))
+                }
+            }
+
+            Section("禁用 AI 腔词条") {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(appState.aiConfig.styleDNA.bannedAICliches, id: \.self) { w in
+                            Button {
+                                appState.aiConfig.styleDNA.bannedAICliches.removeAll { $0 == w }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text(w)
+                                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                                }
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color(Design.Palette.error).opacity(0.12))
+                                .foregroundStyle(Color(Design.Palette.error))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                HStack {
+                    TextField("新增禁用词（如：赋能）", text: $newBanned).font(.subheadline)
+                    Button("添加") {
+                        let w = newBanned.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !w.isEmpty && !appState.aiConfig.styleDNA.bannedAICliches.contains(w) {
+                            appState.aiConfig.styleDNA.bannedAICliches.insert(w, at: 0)
+                            newBanned = ""
+                        }
+                    }
+                    .font(.caption.bold())
+                    .disabled(newBanned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            Section("个人口癖与人设") {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(appState.aiConfig.styleDNA.personalCatchphrases, id: \.self) { phrase in
+                            Button {
+                                appState.aiConfig.styleDNA.personalCatchphrases.removeAll { $0 == phrase }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text(phrase)
+                                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                                }
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color(Design.Palette.accentSoft))
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                HStack {
+                    TextField("新增口癖（如：收到啦～）", text: $newCatchphrase).font(.subheadline)
+                    Button("添加") {
+                        let w = newCatchphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !w.isEmpty && !appState.aiConfig.styleDNA.personalCatchphrases.contains(w) {
+                            appState.aiConfig.styleDNA.personalCatchphrases.insert(w, at: 0)
+                            newCatchphrase = ""
+                        }
+                    }
+                    .font(.caption.bold())
+                    .disabled(newCatchphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                TextField("全局人设补充（可选）", text: $appState.aiConfig.customPersonaPrompt, axis: .vertical)
+                    .lineLimit(2...4)
+                    .font(.subheadline)
+
+                if !appState.aiConfig.styleDNA.learnedDiffRules.isEmpty {
+                    ForEach(appState.aiConfig.styleDNA.learnedDiffRules, id: \.self) { rule in
+                        Text("✓ \(rule)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section {
+                if appState.aiConfig.contextCards.isEmpty {
+                    Text("可存入岗位、业务口径，调用 AI 时自动挂载")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(appState.aiConfig.contextCards) { card in
+                        HStack {
+                            Button {
+                                editingCard = card
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(card.title).font(.subheadline.bold()).foregroundStyle(.primary)
+                                    Text(card.content).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { card.isEnabled },
+                                set: { val in
+                                    var updated = card
+                                    updated.isEnabled = val
+                                    appState.upsertContextCard(updated)
+                                }
+                            ))
+                            .labelsHidden()
+                        }
+                    }
+                }
+                Button {
+                    showNewCard = true
+                } label: {
+                    Label("新增背景知识卡", systemImage: "plus.circle.fill")
+                        .font(.subheadline.bold())
+                }
+            } header: {
+                Text("背景知识卡 (\(appState.aiConfig.contextCards.filter(\.isEnabled).count) 启用)")
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("文风 DNA 与知识卡")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showCloner) {
+            StyleDNAClonerSheet { samples in
+                _ = await appState.cloneStyleDNA(fromSamples: samples)
+                feedback = "✓ 文风 DNA 已更新"
+            }
+        }
+        .sheet(isPresented: $showNewCard) {
+            ContextCardEditorSheet(initial: nil) { created in
+                appState.upsertContextCard(created)
+            }
+        }
+        .sheet(item: $editingCard) { card in
+            ContextCardEditorSheet(initial: card) { updated in
+                appState.upsertContextCard(updated)
+            }
+        }
+    }
+}
+
+// MARK: - 子页 3：智能画像诊断
+
+private struct AIAutoInsightView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var feedback: String?
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    Task {
+                        let report = await appState.runAIAutoAnalysis()
+                        await MainActor.run {
+                            feedback = "✓ 已生成「\(report.personaTitle)」"
+                        }
+                    }
+                } label: {
+                    HStack {
+                        if appState.isRunningAIInsight {
+                            ProgressView().padding(.trailing, 4)
+                        } else {
+                            Image(systemName: "sparkles").foregroundStyle(Color(Design.Palette.accent))
+                        }
+                        Text(appState.isRunningAIInsight ? "分析中…" : "立即生成专属打字画像")
+                            .font(.subheadline.bold())
+                    }
+                }
+                .disabled(appState.isRunningAIInsight)
+
+                if let fb = feedback {
+                    Text(fb).font(.caption).foregroundStyle(Color(Design.Palette.success))
+                }
+            }
+
+            if let report = appState.aiInsightReport {
+                Section("诊断摘要") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(report.personaTitle).font(.headline)
+                            Spacer()
+                            Text(report.sourceLabel).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Text(report.styleSummary).font(.caption).foregroundStyle(.primary)
+                        if !report.efficiencyDiagnosis.isEmpty {
+                            Text(report.efficiencyDiagnosis).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if !report.recommendedPersonaPrompt.isEmpty {
+                        Button("一键应用推荐人设") {
+                            appState.aiConfig.customPersonaPrompt = report.recommendedPersonaPrompt
+                            feedback = "✓ 已应用人设"
+                        }
+                        .font(.subheadline.bold())
+                    }
+                    if !report.suggestedFuzzyKeys.isEmpty {
+                        Button("一键开启推荐模糊音（\(report.suggestedFuzzyKeys.map(AIAutoInsightService.fuzzyDisplayName(for:)).joined(separator: "/"))）") {
+                            let n = appState.applySuggestedFuzzyKeys(report.suggestedFuzzyKeys)
+                            feedback = n > 0 ? "✓ 已开启 \(n) 项模糊音" : "推荐模糊音已全部开启"
+                        }
+                        .font(.subheadline.bold())
+                    }
+                }
+
+                if !report.suggestedPrompts.isEmpty {
+                    Section {
+                        ForEach(report.suggestedPrompts) { tpl in
+                            let added = appState.aiConfig.customPrompts.contains(where: { $0.title == tpl.title })
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tpl.title).font(.subheadline.bold())
+                                    Text(tpl.instruction).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer()
+                                Button(added ? "已装" : "装入") {
+                                    _ = appState.importSuggestedPrompts([tpl])
+                                    feedback = "✓ 已装入「\(tpl.title)」"
+                                }
+                                .font(.caption.bold())
+                                .disabled(added)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text("定制技能 (\(report.suggestedPrompts.count))")
+                            Spacer()
+                            Button("全部装入") {
+                                let n = appState.importSuggestedPrompts(report.suggestedPrompts)
+                                feedback = n > 0 ? "✓ 已装入 \(n) 条" : "均已在键盘栏中"
+                            }
+                            .font(.caption.bold())
+                        }
+                    }
+                }
+
+                if !report.suggestedPhrases.isEmpty {
+                    Section {
+                        ForEach(report.suggestedPhrases) { p in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(p.title).font(.caption.bold())
+                                Text(p.content).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text("推荐短语")
+                            Spacer()
+                            Button("一键导入") {
+                                let n = appState.importSuggestedPhrases(report.suggestedPhrases)
+                                feedback = n > 0 ? "✓ 已导入 \(n) 条短语" : "短语均已存在"
+                            }
+                            .font(.caption.bold())
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("智能画像诊断")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - 子页 4：生成历史与用量账本
+
+private struct AIHistoryAndUsageView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var recentHistory: [AIRecentResultItem] = []
+    @State private var feedback: String?
+
+    var body: some View {
+        let entries = appState.aiUsageLedger
+        let avgTTFT = entries.isEmpty ? 0 : entries.reduce(0) { $0 + $1.ttftMs } / entries.count
+        let totalOut = entries.reduce(0) { $0 + $1.outputChars }
+
+        List {
+            Section("用量概览") {
+                LabeledContent("累计调用", value: "\(entries.count) 次")
+                LabeledContent("平均首字延迟", value: avgTTFT > 0 ? "\(avgTTFT) ms" : "--")
+                LabeledContent("累计生成", value: "\(totalOut) 字（省 \(max(0, totalOut / 38)) 分钟）")
+                if !entries.isEmpty {
+                    Button("清空账本", role: .destructive) {
+                        appState.clearAIUsageLedger()
+                    }
+                }
+            }
+
+            if let fb = feedback {
+                Section {
+                    Text(fb).font(.caption).foregroundStyle(Color(Design.Palette.success))
+                }
+            }
+
+            Section("最近键盘生成 (\(recentHistory.count))") {
+                if recentHistory.isEmpty {
+                    Text("在键盘使用 AI 或 @ai 指令后，最近 12 条结果会自动留存在此。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(recentHistory) { item in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(item.title)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                                Spacer()
+                                Text(item.createdAt, style: .time)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(item.output)
+                                .font(.subheadline)
+                                .lineLimit(3)
+                            HStack(spacing: 14) {
+                                Button("复制") {
+                                    UIPasteboard.general.string = item.output
+                                    feedback = "✓ 已复制"
+                                }
+                                Button("存短语") {
+                                    appState.addQuickPhrase(title: String(item.title.prefix(8)), content: item.output, category: "AI收藏")
+                                    feedback = "✓ 已存为短语"
+                                }
+                            }
+                            .font(.caption.bold())
+                            .foregroundStyle(Color(Design.Palette.accent))
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    Button("清空历史", role: .destructive) {
+                        AIRecentHistoryStore.clear()
+                        recentHistory = []
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("历史与用量")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            recentHistory = AIRecentHistoryStore.load()
         }
     }
 }
@@ -1339,9 +1166,9 @@ private struct AIModelPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("直接手动输入任意模型 ID") {
+                Section("手动输入模型 ID") {
                     HStack {
-                        TextField("输入自定义模型名称…", text: $manualModelID)
+                        TextField("输入任意模型 ID…", text: $manualModelID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .font(.system(size: 14, design: .monospaced))
@@ -1358,15 +1185,15 @@ private struct AIModelPickerSheet: View {
                 }
 
                 Section {
-                    TextField("搜索模型 ID 或名称…", text: $query)
+                    TextField("搜索模型…", text: $query)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Toggle("仅显示支持深度思考 (🧠) 的推理模型", isOn: $thinkingOnly)
+                    Toggle("仅看思考模型 (🧠)", isOn: $thinkingOnly)
                 }
 
-                Section("远端可用模型 (\(filtered.count))") {
+                Section("远端模型 (\(filtered.count))") {
                     if filtered.isEmpty {
-                        Text("未匹配到模型，可点右上角刷新或在上方直接手动输入。")
+                        Text("无匹配模型，可点右上角刷新或在上方手动输入。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
@@ -1376,30 +1203,20 @@ private struct AIModelPickerSheet: View {
                                 dismiss()
                             } label: {
                                 HStack {
-                                    VStack(alignment: .leading, spacing: 3) {
+                                    VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 6) {
                                             Text(item.id)
                                                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
                                                 .foregroundStyle(.primary)
                                             if item.supportsThinking {
-                                                Text("🧠 思考")
-                                                    .font(.caption2.bold())
-                                                    .padding(.horizontal, 6)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color(Design.Palette.accentSoft))
-                                                    .foregroundStyle(Color(Design.Palette.accent))
-                                                    .clipShape(Capsule())
+                                                Text("🧠")
+                                                    .font(.caption2)
                                             }
                                         }
-                                        HStack(spacing: 8) {
-                                            if item.displayName != item.id {
-                                                Text(item.displayName).font(.caption2).foregroundStyle(.secondary)
-                                            }
-                                            if let ctx = item.contextLength, ctx > 0 {
-                                                Text("上下文 \(ctx >= 1000 ? "\(ctx / 1000)K" : "\(ctx)")")
-                                                    .font(.caption2.monospacedDigit())
-                                                    .foregroundStyle(.secondary)
-                                            }
+                                        if let ctx = item.contextLength, ctx > 0 {
+                                            Text("\(ctx >= 1000 ? "\(ctx / 1000)K" : "\(ctx)") 上下文")
+                                                .font(.caption2.monospacedDigit())
+                                                .foregroundStyle(.secondary)
                                         }
                                     }
                                     Spacer()
@@ -1416,18 +1233,10 @@ private struct AIModelPickerSheet: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await onRefresh() }
-                    } label: {
-                        if isFetching {
-                            ProgressView()
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
+                    Button { Task { await onRefresh() } } label: {
+                        if isFetching { ProgressView() } else { Image(systemName: "arrow.clockwise") }
                     }
                     .disabled(isFetching)
                 }
@@ -1436,21 +1245,20 @@ private struct AIModelPickerSheet: View {
     }
 }
 
-// MARK: - Live AI 试炼场 & 双模型同题 Arena PK Sheet
+// MARK: - Live AI 试炼场 & 双模型 Arena PK Sheet
 
 private struct AIPlaygroundAndArenaSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
-    @State private var tab = 0 // 0=单模型思考试炼场, 1=双模型 Arena PK
-    @State private var inputText = "领导刚发消息说这周六临时加班赶一下方案，但我家里已经约好聚餐了，帮我高情商回复一下。"
+    @State private var tab = 0
+    @State private var inputText = "领导说周六临时加班，但我家里约好了聚餐，帮我委婉回复。"
     @State private var thoughtText = ""
     @State private var answerText = ""
     @State private var showThought = false
     @State private var isRunning = false
     @State private var statusMetrics = ""
 
-    // Arena PK
     @State private var modelA = ""
     @State private var modelB = ""
     @State private var outA = ""
@@ -1464,22 +1272,17 @@ private struct AIPlaygroundAndArenaSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Picker("试炼模式", selection: $tab) {
-                        Text("思考模式试炼场").tag(0)
-                        Text("双模型 Arena PK").tag(1)
+                    Picker("模式", selection: $tab) {
+                        Text("流式试炼").tag(0)
+                        Text("双模型 PK").tag(1)
                     }
                     .pickerStyle(.segmented)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("测试输入内容")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                        TextEditor(text: $inputText)
-                            .frame(minHeight: 88)
-                            .padding(8)
-                            .background(Color(.secondarySystemGroupedBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
+                    TextEditor(text: $inputText)
+                        .frame(minHeight: 80)
+                        .padding(8)
+                        .background(Color(.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                     if tab == 0 {
                         singlePlaygroundBody
@@ -1490,12 +1293,10 @@ private struct AIPlaygroundAndArenaSheet: View {
                 .padding()
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("AI 试炼场与模型 PK")
+            .navigationTitle("AI 试炼场")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("完成") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } }
             }
             .onAppear {
                 modelA = appState.aiConfig.activeModelName
@@ -1509,14 +1310,11 @@ private struct AIPlaygroundAndArenaSheet: View {
     private var singlePlaygroundBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("当前模型：\(appState.aiConfig.activeModelName)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                Text(appState.aiConfig.activeModelName).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Spacer()
-                Text("思考：\(appState.aiConfig.thinkingMode.displayName)")
+                Text("思考 \(appState.aiConfig.thinkingMode.shortBadge)")
                     .font(.caption.bold())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color(Design.Palette.accentSoft))
                     .foregroundStyle(Color(Design.Palette.accent))
                     .clipShape(Capsule())
@@ -1527,10 +1325,9 @@ private struct AIPlaygroundAndArenaSheet: View {
             } label: {
                 HStack {
                     if isRunning { ProgressView().tint(.white) }
-                    Text(isRunning ? "流式推理中…" : "立即运行测试（实时查看思考链与延迟）")
-                        .font(.subheadline.bold())
+                    Text(isRunning ? "推理中…" : "运行测试").font(.subheadline.bold())
                 }
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .frame(maxWidth: .infinity, minHeight: 42)
                 .background(Color(Design.Palette.accent))
                 .foregroundStyle(Color.white)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1539,18 +1336,12 @@ private struct AIPlaygroundAndArenaSheet: View {
             .disabled(isRunning || !appState.aiConfig.isConfigured)
 
             if !statusMetrics.isEmpty {
-                Text(statusMetrics)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Text(statusMetrics).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
 
             if !thoughtText.isEmpty {
-                DisclosureGroup("💭 思考推理过程（\(thoughtText.count) 字 · 上屏时自动剥离）", isExpanded: $showThought) {
-                    Text(thoughtText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 6)
+                DisclosureGroup("💭 思考 (\(thoughtText.count)字)", isExpanded: $showThought) {
+                    Text(thoughtText).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
                 }
                 .padding(12)
                 .background(Color(.secondarySystemGroupedBackground))
@@ -1560,18 +1351,11 @@ private struct AIPlaygroundAndArenaSheet: View {
             if !answerText.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("✨ 最终可上屏正文")
-                            .font(.caption.bold())
-                            .foregroundStyle(Color(Design.Palette.accent))
+                        Text("正文").font(.caption.bold()).foregroundStyle(Color(Design.Palette.accent))
                         Spacer()
-                        Button("复制") {
-                            UIPasteboard.general.string = answerText
-                        }
-                        .font(.caption.bold())
+                        Button("复制") { UIPasteboard.general.string = answerText }.font(.caption.bold())
                     }
-                    Text(answerText)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(answerText).font(.body).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(12)
                 .background(Color(.secondarySystemGroupedBackground))
@@ -1584,16 +1368,14 @@ private struct AIPlaygroundAndArenaSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 TextField("模型 A", text: $modelA)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(.system(size: 13, design: .monospaced))
                     .padding(10)
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 Text("VS").font(.caption.bold()).foregroundStyle(.secondary)
                 TextField("模型 B", text: $modelB)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(.system(size: 13, design: .monospaced))
                     .padding(10)
                     .background(Color(.secondarySystemGroupedBackground))
@@ -1605,10 +1387,9 @@ private struct AIPlaygroundAndArenaSheet: View {
             } label: {
                 HStack {
                     if isRunning { ProgressView().tint(.white) }
-                    Text(isRunning ? "双模型并行 PK 中…" : "🔥 同题并排 PK 对比")
-                        .font(.subheadline.bold())
+                    Text(isRunning ? "PK 中…" : "🔥 并排对比").font(.subheadline.bold())
                 }
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .frame(maxWidth: .infinity, minHeight: 42)
                 .background(Color(Design.Palette.accent))
                 .foregroundStyle(Color.white)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1616,11 +1397,11 @@ private struct AIPlaygroundAndArenaSheet: View {
             .buttonStyle(.plain)
             .disabled(isRunning || !appState.aiConfig.isConfigured)
 
-            arenaResultCard(label: "模型 A：\(modelA)", metrics: metricsA, output: outA) {
+            arenaResultCard(label: modelA, metrics: metricsA, output: outA) {
                 if appState.aiConfig.provider == .gemini { appState.aiConfig.geminiModel = modelA }
                 else { appState.aiConfig.openAIModel = modelA }
             }
-            arenaResultCard(label: "模型 B：\(modelB)", metrics: metricsB, output: outB) {
+            arenaResultCard(label: modelB, metrics: metricsB, output: outB) {
                 if appState.aiConfig.provider == .gemini { appState.aiConfig.geminiModel = modelB }
                 else { appState.aiConfig.openAIModel = modelB }
             }
@@ -1632,11 +1413,9 @@ private struct AIPlaygroundAndArenaSheet: View {
             HStack {
                 Text(label).font(.caption.bold())
                 Spacer()
-                if !metrics.isEmpty {
-                    Text(metrics).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                }
+                if !metrics.isEmpty { Text(metrics).font(.caption2.monospacedDigit()).foregroundStyle(.secondary) }
                 if !output.isEmpty {
-                    Button("选用为主模型", action: onChoose)
+                    Button("选用", action: onChoose)
                         .font(.caption2.bold())
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(Color(Design.Palette.accentSoft))
@@ -1656,30 +1435,22 @@ private struct AIPlaygroundAndArenaSheet: View {
     }
 
     private func runSingleTest() async {
-        isRunning = true
-        thoughtText = ""
-        answerText = ""
-        statusMetrics = "正在连接模型…"
-        let start = Date()
-        var firstTokenMs: Int?
+        isRunning = true; thoughtText = ""; answerText = ""; statusMetrics = "连接中…"
+        let start = Date(); var firstTokenMs: Int?
         defer { isRunning = false }
         do {
             for try await chunk in client.streamEvents(
-                prompt: inputText,
-                systemInstruction: AIPresetAction.eqReply.systemPrompt,
-                config: appState.aiConfig,
-                featureTag: "playground"
+                prompt: inputText, systemInstruction: AIPresetAction.eqReply.systemPrompt,
+                config: appState.aiConfig, featureTag: "playground"
             ) {
-                if firstTokenMs == nil {
-                    firstTokenMs = Int(Date().timeIntervalSince(start) * 1000)
-                }
+                if firstTokenMs == nil { firstTokenMs = Int(Date().timeIntervalSince(start) * 1000) }
                 switch chunk {
                 case .thought(let t): thoughtText += t
                 case .answer(let a): answerText += a
                 }
             }
             let totalMs = Int(Date().timeIntervalSince(start) * 1000)
-            statusMetrics = "✓ 完成 · 首字延迟 \(firstTokenMs ?? totalMs)ms · 总耗时 \(totalMs)ms · 正文 \(answerText.count) 字"
+            statusMetrics = "✓ 首字 \(firstTokenMs ?? totalMs)ms · 总 \(totalMs)ms · \(answerText.count)字"
             appState.refreshAll()
         } catch {
             statusMetrics = "失败：\(error.localizedDescription)"
@@ -1687,28 +1458,21 @@ private struct AIPlaygroundAndArenaSheet: View {
     }
 
     private func runArenaPK() async {
-        isRunning = true
-        outA = ""; outB = ""; metricsA = "推理中…"; metricsB = "推理中…"
+        isRunning = true; outA = ""; outB = ""; metricsA = "…"; metricsB = "…"
         defer { isRunning = false }
         let baseCfg = appState.aiConfig
-        var cfgA = baseCfg
-        var cfgB = baseCfg
-        if baseCfg.provider == .gemini {
-            cfgA.geminiModel = modelA; cfgB.geminiModel = modelB
-        } else {
-            cfgA.openAIModel = modelA; cfgB.openAIModel = modelB
-        }
+        var cfgA = baseCfg; var cfgB = baseCfg
+        if baseCfg.provider == .gemini { cfgA.geminiModel = modelA; cfgB.geminiModel = modelB }
+        else { cfgA.openAIModel = modelA; cfgB.openAIModel = modelB }
         async let taskA: Void = {
             let s = Date()
             do {
                 var acc = ""
                 for try await c in client.streamText(prompt: inputText, systemInstruction: AIPresetAction.eqReply.systemPrompt, config: cfgA, featureTag: "arena_a") {
-                    acc += c
-                    let snap = acc
-                    await MainActor.run { outA = snap }
+                    acc += c; let snap = acc; await MainActor.run { outA = snap }
                 }
                 let ms = Int(Date().timeIntervalSince(s) * 1000)
-                await MainActor.run { metricsA = "\(ms)ms · \(acc.count)字" }
+                await MainActor.run { metricsA = "\(ms)ms" }
             } catch {
                 await MainActor.run { metricsA = "失败"; outA = error.localizedDescription }
             }
@@ -1718,12 +1482,10 @@ private struct AIPlaygroundAndArenaSheet: View {
             do {
                 var acc = ""
                 for try await c in client.streamText(prompt: inputText, systemInstruction: AIPresetAction.eqReply.systemPrompt, config: cfgB, featureTag: "arena_b") {
-                    acc += c
-                    let snap = acc
-                    await MainActor.run { outB = snap }
+                    acc += c; let snap = acc; await MainActor.run { outB = snap }
                 }
                 let ms = Int(Date().timeIntervalSince(s) * 1000)
-                await MainActor.run { metricsB = "\(ms)ms · \(acc.count)字" }
+                await MainActor.run { metricsB = "\(ms)ms" }
             } catch {
                 await MainActor.run { metricsB = "失败"; outB = error.localizedDescription }
             }
@@ -1738,18 +1500,16 @@ private struct AIPlaygroundAndArenaSheet: View {
 private struct StyleDNAClonerSheet: View {
     @Environment(\.dismiss) private var dismiss
     let onClone: (String) async -> Void
-
     @State private var samples = ""
     @State private var isCloning = false
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("粘贴 3~5 条你平时发的真实聊天或工作消息") {
-                    TextEditor(text: $samples)
-                        .frame(minHeight: 160)
-                    Button("填入示例看看效果") {
-                        samples = "收到啦，我下午开完会马上看一下，有进展第一时间同步你～\n哈哈这事不急，你先忙手头的，咱们明天碰一下就行。\n刚核对完了，整体没啥大问题，有两处小细节我标在文档里了。"
+                Section("粘贴 3~5 条你平时发的真实消息") {
+                    TextEditor(text: $samples).frame(minHeight: 150)
+                    Button("填入示例") {
+                        samples = "收到啦，开完会马上看，有进展同步你～\n哈哈不急，明天碰一下就行。\n刚核对完了，整体没问题，两处细节标文档里了。"
                     }
                     .font(.caption.bold())
                 }
@@ -1765,21 +1525,16 @@ private struct StyleDNAClonerSheet: View {
                         HStack {
                             Spacer()
                             if isCloning { ProgressView().padding(.trailing, 6) }
-                            Text(isCloning ? "正在提取你的语言基因…" : "✨ 立即克隆我的文风 DNA")
-                                .font(.headline)
+                            Text(isCloning ? "提取中…" : "✨ 克隆我的文风").font(.headline)
                             Spacer()
                         }
                     }
                     .disabled(isCloning || samples.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .navigationTitle("10 秒文风 DNA 克隆")
+            .navigationTitle("文风 DNA 克隆")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
-                }
-            }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
         }
     }
 }
@@ -1797,8 +1552,7 @@ private struct ContextCardEditorSheet: View {
     @State private var isEnabled: Bool
 
     init(initial: PersonalContextCard?, onSave: @escaping (PersonalContextCard) -> Void) {
-        self.initial = initial
-        self.onSave = onSave
+        self.initial = initial; self.onSave = onSave
         _title = State(initialValue: initial?.title ?? "")
         _sceneTag = State(initialValue: initial?.sceneTag ?? "职场")
         _content = State(initialValue: initial?.content ?? "")
@@ -1808,15 +1562,14 @@ private struct ContextCardEditorSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("卡片标题（如：我的岗位与汇报口径）", text: $title)
-                TextField("场景标签（如：职场 / 销售 / 个人介绍）", text: $sceneTag)
-                Toggle("调用 AI 时自动挂载此背景", isOn: $isEnabled)
-                Section("背景知识正文") {
-                    TextField("例如：我是一名 iOS 架构师，负责灵犀输入法项目，向研发总监汇报时偏好用「进展/风险/下一步」三段式。", text: $content, axis: .vertical)
-                        .lineLimit(4...8)
+                TextField("标题（如：岗位与汇报口径）", text: $title)
+                TextField("标签（职场 / 销售）", text: $sceneTag)
+                Toggle("自动挂载", isOn: $isEnabled)
+                Section("内容") {
+                    TextField("输入背景信息…", text: $content, axis: .vertical).lineLimit(4...8)
                 }
             }
-            .navigationTitle(initial == nil ? "新增背景知识卡" : "编辑背景知识卡")
+            .navigationTitle(initial == nil ? "新增知识卡" : "编辑知识卡")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
@@ -1861,8 +1614,7 @@ private struct CustomPromptEditorSheet: View {
     ]
 
     init(initial: CustomAIPromptTemplate?, onSave: @escaping (CustomAIPromptTemplate) -> Void) {
-        self.initial = initial
-        self.onSave = onSave
+        self.initial = initial; self.onSave = onSave
         _title = State(initialValue: initial?.title ?? "")
         _category = State(initialValue: initial?.category ?? "效率沟通")
         _icon = State(initialValue: initial?.icon ?? "sparkles")
@@ -1875,22 +1627,18 @@ private struct CustomPromptEditorSheet: View {
         NavigationStack {
             Form {
                 Section("基本信息") {
-                    TextField("键盘按钮名称（建议 2-6 字，如：周报润色）", text: $title)
-                    Picker("场景分类", selection: $category) {
-                        ForEach(categories, id: \.self) { cat in
-                            Text(cat).tag(cat)
-                        }
+                    TextField("名称（2~6 字）", text: $title)
+                    Picker("分类", selection: $category) {
+                        ForEach(categories, id: \.self) { Text($0).tag($0) }
                     }
-                    Toggle("置顶显示在键盘 AI 栏前排", isOn: $isPinned)
-                    Toggle("优先路由至「深度思考模型」执行", isOn: $useDeepModel)
+                    Toggle("置顶至前排", isOn: $isPinned)
+                    Toggle("走深度思考模型", isOn: $useDeepModel)
                 }
 
-                Section("图标样式") {
+                Section("图标") {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 10) {
                         ForEach(icons, id: \.self) { sym in
-                            Button {
-                                icon = sym
-                            } label: {
+                            Button { icon = sym } label: {
                                 Image(systemName: sym)
                                     .font(.headline)
                                     .frame(width: 42, height: 36)
@@ -1904,16 +1652,11 @@ private struct CustomPromptEditorSheet: View {
                     .padding(.vertical, 4)
                 }
 
-                Section("AI 执行提示词（支持多步链式指令）") {
-                    TextField(
-                        "例如：第1步去掉口语词并提炼为3条进展；第2步附上英文同步版本。",
-                        text: $instruction,
-                        axis: .vertical
-                    )
-                    .lineLimit(4...8)
+                Section("提示词指令") {
+                    TextField("描述 AI 要做什么…", text: $instruction, axis: .vertical).lineLimit(4...8)
                 }
             }
-            .navigationTitle(initial == nil ? "新建键盘提示词" : "编辑键盘提示词")
+            .navigationTitle(initial == nil ? "新建技能" : "编辑技能")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
@@ -1935,17 +1678,14 @@ private struct CustomPromptEditorSheet: View {
                         onSave(tpl)
                         dismiss()
                     }
-                    .disabled(
-                        title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                        instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    )
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
     }
 }
 
-// MARK: - AI 场景指令市场 Sheet（20 条精选模板按场景筛选一键装入键盘）
+// MARK: - AI 场景指令市场 Sheet（20 条精选一键装入）
 
 private struct AIPromptMarketplaceSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -1956,18 +1696,14 @@ private struct AIPromptMarketplaceSheet: View {
     @State private var searchText: String = ""
     @State private var localAddedTitles: Set<String> = []
 
-    private var allCategories: [String] {
-        ["全部"] + AIPromptMarketplaceCatalog.categories
-    }
+    private var allCategories: [String] { ["全部"] + AIPromptMarketplaceCatalog.categories }
 
     private var filteredTemplates: [CustomAIPromptTemplate] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return AIPromptMarketplaceCatalog.allTemplates.filter { tpl in
             if selectedCategory != "全部" && tpl.category != selectedCategory { return false }
             if q.isEmpty { return true }
-            return tpl.title.lowercased().contains(q)
-                || tpl.instruction.lowercased().contains(q)
-                || tpl.category.lowercased().contains(q)
+            return tpl.title.lowercased().contains(q) || tpl.instruction.lowercased().contains(q)
         }
     }
 
@@ -1979,26 +1715,20 @@ private struct AIPromptMarketplaceSheet: View {
         NavigationStack {
             List {
                 Section {
-                    TextField("搜索场景或技能（如：催进度 / 周报 / 砍价 / 朋友圈）", text: $searchText)
+                    TextField("搜索技能（催进度 / 周报 / 朋友圈…）", text: $searchText)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 7) {
                             ForEach(allCategories, id: \.self) { cat in
                                 let active = selectedCategory == cat
-                                Button {
-                                    selectedCategory = cat
-                                } label: {
-                                    Text(cat)
-                                        .font(.caption.bold())
-                                        .padding(.horizontal, 11)
-                                        .padding(.vertical, 6)
-                                        .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
-                                        .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
-                                        .clipShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
+                                Button(cat) { selectedCategory = cat }
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 10).padding(.vertical, 5)
+                                    .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
+                                    .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                                    .clipShape(Capsule())
+                                    .buttonStyle(.plain)
                             }
                         }
                         .padding(.vertical, 2)
@@ -2008,62 +1738,48 @@ private struct AIPromptMarketplaceSheet: View {
                 Section {
                     ForEach(filteredTemplates) { tpl in
                         let added = isInstalled(tpl)
-                        HStack(alignment: .top, spacing: 10) {
+                        HStack(spacing: 10) {
                             Image(systemName: tpl.icon)
                                 .font(.subheadline)
                                 .foregroundStyle(Color(Design.Palette.accent))
-                                .frame(width: 28, height: 28)
+                                .frame(width: 26, height: 26)
                                 .background(Color(Design.Palette.accentSoft))
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(tpl.title)
-                                        .font(.subheadline.bold())
-                                        .foregroundStyle(.primary)
-                                    Text(tpl.category)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 5) {
+                                    Text(tpl.title).font(.subheadline.bold())
                                     if tpl.useDeepModel {
-                                        Text("深度")
-                                            .font(.caption2.bold())
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 1)
+                                        Text("深度").font(.caption2.bold())
+                                            .padding(.horizontal, 5).padding(.vertical, 1)
                                             .background(Color(Design.Palette.accentSoft))
                                             .foregroundStyle(Color(Design.Palette.accent))
                                             .clipShape(Capsule())
                                     }
                                 }
-                                Text(tpl.instruction)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(tpl.instruction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                             }
-
                             Spacer(minLength: 6)
-
-                            Button(added ? "已装入" : "装入") {
+                            Button(added ? "已装" : "装入") {
                                 onInstall([tpl])
                                 localAddedTitles.insert(tpl.title)
                             }
                             .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                            .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(added ? Color(Design.Palette.surface) : Color(Design.Palette.accent))
                             .foregroundStyle(added ? Color.secondary : Color.white)
                             .clipShape(Capsule())
                             .buttonStyle(.plain)
                             .disabled(added)
                         }
-                        .padding(.vertical, 2)
                     }
                 } header: {
                     HStack {
-                        Text("\(selectedCategory)（\(filteredTemplates.count) 条）")
+                        Text("\(selectedCategory) (\(filteredTemplates.count))")
                         Spacer()
                         let pending = filteredTemplates.filter { !isInstalled($0) }
                         if !pending.isEmpty {
-                            Button("一键装入本组 (\(pending.count))") {
+                            Button("全部装入 (\(pending.count))") {
                                 onInstall(pending)
                                 for item in pending { localAddedTitles.insert(item.title) }
                             }
@@ -2073,13 +1789,9 @@ private struct AIPromptMarketplaceSheet: View {
                     }
                 }
             }
-            .navigationTitle("AI 场景指令市场")
+            .navigationTitle("场景指令市场")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("完成") { dismiss() }
-                }
-            }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
         }
     }
 }
