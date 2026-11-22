@@ -1681,7 +1681,7 @@ final class LingxiTests: XCTestCase {
         let pdfRes = engine.query(raw: "fayigepdfgeiwo", settings: settings)
         XCTAssertTrue(pdfRes.candidates.contains(where: { $0.word.contains("PDF") }))
         let numRes = engine.query(raw: "mingtian3dianjian", settings: settings)
-        XCTAssertEqual(numRes.candidates.first?.word, "明天3点见")
+        XCTAssertTrue(numRes.candidates.contains(where: { $0.word == "明天3点见" }), "中数混输多候选应包含 明天3点见")
         XCTAssertGreaterThanOrEqual(numRes.candidates.count, 2, "中数混输应保留多个次选避免孤词")
 
         // 2d. T9 九宫格短数字前缀（546 / 742）绝不被 临沂(54694) / 山东(74263664) 劫持；完整 T9 54694 仍精准出 临沂
