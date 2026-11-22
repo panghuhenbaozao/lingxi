@@ -1,6 +1,6 @@
 import { DASHBOARD_HTML } from "./dashboard.js";
 
-const VERSION = "4.2.0";
+const VERSION = "4.3.0";
 const ACCESS_TTL_SEC = 86400;
 const REFRESH_TTL_SEC = 86400 * 30;
 const PBKDF2_ITERATIONS = 100000;

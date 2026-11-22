@@ -22,6 +22,9 @@ final class AIAssistantPanelView: UIView {
     private var clipboardText = ""
     private var sourceMode: SourceMode = .inputContext
     private var lastAction: AIPresetAction = .polish
+    private var lastCustomTemplateID: String?
+    private var cachedCustomPrompts: [CustomAIPromptTemplate] = []
+    private var currentRecommendation: SmartContextRecommendation?
     private var generatedText = ""
 
     // UI
@@ -121,6 +124,7 @@ final class AIAssistantPanelView: UIView {
 
         let refinements: [(String, String)] = [
             ("精简一半", "把这段内容精简一半，保留核心信息，只输出修改结果。"),
+            ("更正式", "把这段内容改写得更加专业、正式、条理清晰，适合职场/商务沟通，只输出修改结果。"),
             ("更委婉", "把这段内容改写得更加委婉礼貌、高情商，只输出修改结果。"),
             ("更幽默", "把这段内容改写得更风趣幽默一点，只输出修改结果。"),
             ("转英文", "Translate this into natural, idiomatic English. Output only the translation."),
@@ -221,6 +225,7 @@ final class AIAssistantPanelView: UIView {
         }
 
         applyTheme(theme)
+        reloadPromptsAndRecommendation()
         rebuildActionButtons(theme: theme)
         refreshContextPreview()
 
@@ -228,6 +233,21 @@ final class AIAssistantPanelView: UIView {
             runAction(preferredAction)
         } else if generatedText.isEmpty {
             showIdleGuidance()
+        }
+    }
+
+    private func reloadPromptsAndRecommendation() {
+        let cfg = AIConfig.load()
+        cachedCustomPrompts = cfg.customPrompts
+        if cfg.smartContextRecommendEnabled {
+            let text = sourceMode == .inputContext ? beforeCursorText : clipboardText
+            currentRecommendation = SmartContextPromptDetector.analyze(
+                text: text,
+                isClipboard: sourceMode == .clipboard,
+                customPrompts: cachedCustomPrompts
+            )
+        } else {
+            currentRecommendation = nil
         }
     }
 
@@ -268,20 +288,100 @@ final class AIAssistantPanelView: UIView {
             actionsStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        for action in AIPresetAction.allCases {
+
+        let recCustomIDs = currentRecommendation?.recommendedCustomIDs ?? []
+        let recPresets = currentRecommendation?.recommendedPresets ?? []
+        let recCustomSet = Set(recCustomIDs)
+        let recPresetSet = Set(recPresets)
+
+        // 1. 语境智能推荐的自定义提示词优先置顶
+        var orderedCustom: [CustomAIPromptTemplate] = []
+        var seenCustom = Set<String>()
+        for id in recCustomIDs {
+            if let tpl = cachedCustomPrompts.first(where: { $0.id == id }), seenCustom.insert(tpl.id).inserted {
+                orderedCustom.append(tpl)
+            }
+        }
+        // 2. 其余置顶/AI 定制提示词
+        for tpl in cachedCustomPrompts where (tpl.isPinned || tpl.isAIGenerated) && seenCustom.insert(tpl.id).inserted {
+            orderedCustom.append(tpl)
+        }
+        for tpl in cachedCustomPrompts where seenCustom.insert(tpl.id).inserted {
+            orderedCustom.append(tpl)
+        }
+
+        // 3. 语境智能推荐的内置预设技能放前排，其余内置技能紧随其后
+        var orderedPresets: [AIPresetAction] = []
+        var seenPresets = Set<AIPresetAction>()
+        for act in recPresets where seenPresets.insert(act).inserted {
+            orderedPresets.append(act)
+        }
+        for act in AIPresetAction.allCases where seenPresets.insert(act).inserted {
+            orderedPresets.append(act)
+        }
+
+        func makeSkillPill(title: String, isSelected: Bool, isRecommended: Bool, isCustom: Bool, handler: @escaping () -> Void) {
             let btn = ActionClosureButton(type: .system)
-            let isSelected = (action == lastAction && lastCustomPrompt == nil)
-            btn.setTitle(action.title, for: .normal)
+            let prefix = isRecommended ? "✦ " : (isCustom ? "★ " : "")
+            btn.setTitle("\(prefix)\(title)", for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-            btn.backgroundColor = isSelected ? theme.accentFill : theme.accentFill.withAlphaComponent(0.14)
+            btn.backgroundColor = isSelected
+                ? theme.accentFill
+                : (isRecommended ? theme.accentFill.withAlphaComponent(0.22) : theme.accentFill.withAlphaComponent(0.12))
             btn.setTitleColor(isSelected ? theme.accentText : theme.candidateHighlight, for: .normal)
             btn.layer.cornerRadius = 14
             btn.layer.cornerCurve = .continuous
+            if isRecommended && !isSelected {
+                btn.layer.borderWidth = 0.8
+                btn.layer.borderColor = theme.accentFill.withAlphaComponent(0.45).cgColor
+            } else {
+                btn.layer.borderWidth = 0
+            }
             btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 11, bottom: 5, right: 11)
-            btn.actionHandler = { [weak self] in
+            btn.actionHandler = handler
+            actionsStack.addArrangedSubview(btn)
+        }
+
+        // 先放语境推荐的内置 Top-2 与推荐自定义提示词，再放其余自定义与内置技能，兼顾顺手与发现性
+        for tpl in orderedCustom where recCustomSet.contains(tpl.id) {
+            makeSkillPill(
+                title: tpl.title,
+                isSelected: lastCustomTemplateID == tpl.id,
+                isRecommended: true,
+                isCustom: true
+            ) { [weak self] in
+                self?.runCustomTemplate(tpl)
+            }
+        }
+        for action in orderedPresets where recPresetSet.contains(action) {
+            makeSkillPill(
+                title: action.title,
+                isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil,
+                isRecommended: true,
+                isCustom: false
+            ) { [weak self] in
                 self?.runAction(action)
             }
-            actionsStack.addArrangedSubview(btn)
+        }
+        for tpl in orderedCustom where !recCustomSet.contains(tpl.id) {
+            makeSkillPill(
+                title: tpl.title,
+                isSelected: lastCustomTemplateID == tpl.id,
+                isRecommended: false,
+                isCustom: true
+            ) { [weak self] in
+                self?.runCustomTemplate(tpl)
+            }
+        }
+        for action in orderedPresets where !recPresetSet.contains(action) {
+            makeSkillPill(
+                title: action.title,
+                isSelected: action == lastAction && lastCustomPrompt == nil && lastCustomTemplateID == nil,
+                isRecommended: false,
+                isCustom: false
+            ) { [weak self] in
+                self?.runAction(action)
+            }
         }
         setNeedsLayout()
     }
@@ -300,13 +400,14 @@ final class AIAssistantPanelView: UIView {
 
     private func refreshContextPreview() {
         let text = sourceMode == .inputContext ? beforeCursorText : clipboardText
+        let badgePrefix = currentRecommendation.map { "\($0.badgeTitle)  |  " } ?? ""
         if text.isEmpty {
             sourceLabel.text = sourceMode == .inputContext
-                ? "语境：输入框为空（可先打字或切换到剪贴板）"
-                : "语境：暂无剪贴板记录"
+                ? "\(badgePrefix)语境：输入框为空（可先打字或切换到剪贴板）"
+                : "\(badgePrefix)语境：暂无剪贴板记录"
         } else {
             let compact = text.replacingOccurrences(of: "\n", with: " ")
-            sourceLabel.text = "语境：\(compact)"
+            sourceLabel.text = "\(badgePrefix)语境：\(compact)"
         }
         setNeedsLayout()
     }
@@ -318,7 +419,9 @@ final class AIAssistantPanelView: UIView {
         } else if !config.isConfigured {
             outputTextView.text = "✨ 尚未配置 API Key。请打开主 App「灵犀输入法 -> AI 助手」，填入 Gemini API Key 或 DeepSeek 等兼容接口密钥。"
         } else {
-            outputTextView.text = "点击上方任意技能（如「润色优化」「高情商回复」「译为英文」「小红书风」），即可实时流式生成并一键上屏。"
+            let customCount = config.customPrompts.count
+            let recNote = currentRecommendation.map { "（\($0.badgeTitle)）" } ?? ""
+            outputTextView.text = "点击上方带「✦」的智能推荐技能或你的 \(customCount) 个专属提示词，即可实时流式生成并一键上屏\(recNote)。"
         }
         updateActionButtonsEnabled()
     }
@@ -335,6 +438,7 @@ final class AIAssistantPanelView: UIView {
         self.beforeCursorText = nonLeading.trimmingCharacters(in: .whitespacesAndNewlines)
         self.beforeCursorReplaceCount = self.beforeCursorText.count
         applyTheme(theme)
+        reloadPromptsAndRecommendation()
         rebuildActionButtons(theme: theme)
 
         sourceLabel.text = "提问：\(question)"
@@ -342,14 +446,37 @@ final class AIAssistantPanelView: UIView {
         let fullPrompt = question + contextNote
         let sysPrompt = "你是内嵌在 iOS 输入法中的灵犀 AI 助手。请直接给出高质量、简洁、可直接发送给对方的回复或答案，不要过多客套。"
 
+        lastCustomTemplateID = nil
         lastCustomPrompt = (fullPrompt, sysPrompt)
         streamPrompt(prompt: fullPrompt, systemInstruction: sysPrompt)
     }
 
     private var lastCustomPrompt: (prompt: String, sys: String)?
 
+    private func runCustomTemplate(_ template: CustomAIPromptTemplate) {
+        lastCustomTemplateID = template.id
+        if let theme {
+            rebuildActionButtons(theme: theme)
+        }
+        let source: String
+        switch sourceMode {
+        case .inputContext:
+            source = beforeCursorText.isEmpty ? clipboardText : beforeCursorText
+        case .clipboard:
+            source = clipboardText.isEmpty ? beforeCursorText : clipboardText
+        }
+        guard !source.isEmpty else {
+            outputTextView.text = "请先在输入框中写几句话，或先复制一段内容，再点上方「\(template.title)」提示词技能。"
+            return
+        }
+        let sys = template.effectiveSystemPrompt
+        lastCustomPrompt = (source, sys)
+        streamPrompt(prompt: source, systemInstruction: sys)
+    }
+
     private func runAction(_ action: AIPresetAction) {
         lastAction = action
+        lastCustomTemplateID = nil
         lastCustomPrompt = nil
         if let theme {
             rebuildActionButtons(theme: theme)
@@ -438,6 +565,10 @@ final class AIAssistantPanelView: UIView {
 
     @objc private func sourceChanged() {
         sourceMode = SourceMode(rawValue: contextSegmented.selectedSegmentIndex) ?? .inputContext
+        reloadPromptsAndRecommendation()
+        if let theme {
+            rebuildActionButtons(theme: theme)
+        }
         refreshContextPreview()
         updateActionButtonsEnabled()
     }

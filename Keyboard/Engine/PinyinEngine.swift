@@ -202,7 +202,7 @@ final class PinyinEngine {
         raw: String,
         settings: LingxiSettings,
         contextBeforeCursor: String? = nil,
-        limit: Int = 72
+        limit: Int = 96
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], correctedHint: String?) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ([], [], nil) }
@@ -639,7 +639,7 @@ final class PinyinEngine {
         lockedSyllables: [String],
         settings: LingxiSettings,
         contextBeforeCursor: String? = nil,
-        limit: Int = 72
+        limit: Int = 96
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], leftSyllables: [String]) {
         let ctxMap = settings.bigramPredictionEnabled
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
@@ -1121,14 +1121,66 @@ final class PinyinEngine {
             output.insert(multi, at: min(3, output.count))
         }
 
-        for c in extendedFull { appendUnique(c) }
-
         let prefixUpper = min(bestSeg.count - 1, maxPhraseLen)
-        if prefixUpper >= 1 {
-            for k in stride(from: prefixUpper, through: 1, by: -1) {
-                let prefixCands = lookup(tokens: bestSeg, start: 0, end: k, openEnd: false, isT9: isT9, settings: settings)
-                for c in prefixCands { appendUnique(c) }
+        if bestSeg.count >= 2 && limit >= 12 {
+            // 长拼音/多音节保护：避免 extendedFull 与 2~7 字中间前缀词把候选上限填满，导致首音节单字完全消失
+            let immediateExtendedCap = 12
+            for c in extendedFull.prefix(immediateExtendedCap) { appendUnique(c) }
+            let overflowExtended = extendedFull.count > immediateExtendedCap ? Array(extendedFull.dropFirst(immediateExtendedCap)) : []
+
+            let singleChars = lookup(tokens: bestSeg, start: 0, end: 1, openEnd: false, isT9: isT9, settings: settings)
+            let guaranteedSingleQuota = min(singleChars.count, max(16, limit / 3))
+            var deferredPrefixes: [PinyinCandidate] = []
+
+            if prefixUpper >= 2 {
+                for k in stride(from: prefixUpper, through: 2, by: -1) {
+                    let prefixCands = lookup(tokens: bestSeg, start: 0, end: k, openEnd: false, isT9: isT9, settings: settings)
+                    let tierCap = (k >= 4) ? 4 : (k == 3 ? 5 : 6)
+                    for c in prefixCands.prefix(tierCap) {
+                        if output.count < max(1, limit - guaranteedSingleQuota) {
+                            appendUnique(c)
+                        } else {
+                            deferredPrefixes.append(c)
+                        }
+                    }
+                    if prefixCands.count > tierCap {
+                        deferredPrefixes.append(contentsOf: prefixCands.dropFirst(tierCap).prefix(14))
+                    }
+                }
+            }
+
+            // 1) 将首音节高频前 8 个单字放入靠前位置，确保顶部横向候选栏无需展开即可直接滑动选到单字
+            let topSingleCount = min(8, guaranteedSingleQuota)
+            for c in singleChars.prefix(topSingleCount) { appendUnique(c) }
+
+            // 2) 追加剩余保底单字（共至多 32 个），确保展开面板「只看单字」在任意长度拼音下都有完整单字库
+            if guaranteedSingleQuota > topSingleCount {
+                for c in singleChars[topSingleCount..<guaranteedSingleQuota] { appendUnique(c) }
+            }
+
+            // 3) 用剩余配额回填更多中间词组、补全词与其余生僻单字
+            for c in deferredPrefixes {
                 if output.count >= limit { break }
+                appendUnique(c)
+            }
+            for c in overflowExtended {
+                if output.count >= limit { break }
+                appendUnique(c)
+            }
+            if singleChars.count > guaranteedSingleQuota {
+                for c in singleChars.dropFirst(guaranteedSingleQuota) {
+                    if output.count >= limit { break }
+                    appendUnique(c)
+                }
+            }
+        } else {
+            for c in extendedFull { appendUnique(c) }
+            if prefixUpper >= 1 {
+                for k in stride(from: prefixUpper, through: 1, by: -1) {
+                    let prefixCands = lookup(tokens: bestSeg, start: 0, end: k, openEnd: false, isT9: isT9, settings: settings)
+                    for c in prefixCands { appendUnique(c) }
+                    if output.count >= limit { break }
+                }
             }
         }
 

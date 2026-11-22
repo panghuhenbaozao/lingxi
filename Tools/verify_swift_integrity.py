@@ -72,6 +72,8 @@ def main() -> int:
     system_members = {
         "shared", "rawValue", "allCases", "init", "self", "count", "isEmpty", "first", "last",
         "map", "filter", "sorted", "contains", "prefix", "suffix", "joined", "values", "keys",
+        "firstIndex", "removeAll", "insert", "append", "enumerated", "indices", "compactMap", "reduce",
+        "max", "min",
         "id", "frame", "bounds", "isHidden", "alpha", "layer", "backgroundColor", "textColor",
         "tintColor", "font", "text", "toggle", "withAlphaComponent", "cgColor", "topAnchor",
         "leadingAnchor", "trailingAnchor", "bottomAnchor", "heightAnchor", "widthAnchor",

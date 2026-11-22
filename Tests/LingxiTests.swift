@@ -1210,4 +1210,107 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(client.isAuthenticatedOrHasAPIKey)
         await client.signOut()
     }
+
+    func testLongPinyinPreservesSingleCharacters() throws {
+        guard let dbURL = findTestDBURL() else {
+            throw XCTSkip("未找到测试词库 pinyin.sqlite")
+        }
+        let engine = PinyinEngine(dbURL: dbURL)
+        var settings = LingxiSettings()
+        settings.userLearningEnabled = false
+
+        // 1. 6 音节与 10 音节长全拼：整句仍居首位，且单字既出现在前 36 位候选栏，也完整保留在展开面板「只看单字」中
+        let longQueries = [
+            ("jintiantianqizhenhao", "今天天气真好", "今"),
+            ("woxiangquchifanzuijintianqizhenhao", "我想去吃饭最近天气真好", "我"),
+            ("zhhrmghg", "中华人民共和国", "这"),
+        ]
+        for (raw, expectedTop, expectedSingle) in longQueries {
+            let res = engine.query(raw: raw, settings: settings)
+            XCTAssertEqual(res.candidates.first?.word, expectedTop, "\(raw) 首选应保持整句准确")
+            let barSingles = res.candidates.prefix(36).filter { $0.word.count == 1 }.map(\.word)
+            let allSingles = res.candidates.filter { $0.word.count == 1 }.map(\.word)
+            XCTAssertGreaterThanOrEqual(barSingles.count, 5, "\(raw) 顶部横向候选栏前 36 项应包含高频单字")
+            XCTAssertTrue(allSingles.contains(expectedSingle), "\(raw) 单字列表中应包含首音节核心单字 \(expectedSingle)")
+            XCTAssertGreaterThanOrEqual(allSingles.count, 12, "\(raw) 展开单字池应保留至少 12 个单字")
+        }
+
+        // 2. T9 九宫格长句同样保底返回首音节单字
+        let t9Res = engine.queryT9(digits: "54684268426749436426", lockedSyllables: [], settings: settings)
+        let t9Singles = t9Res.candidates.filter { $0.word.count == 1 }
+        XCTAssertGreaterThanOrEqual(t9Singles.count, 10, "T9 长输入也必须保底返回单字")
+    }
+
+    func testAIAutoInsightAndSmartContextDetector() throws {
+        // 1. 旧版 AIConfig JSON 向后兼容解码（无 customPrompts 字段时自动补齐默认模板并保留原 API Key）
+        let legacyAIJSON = Data("{\"provider\":\"gemini\",\"geminiAPIKey\":\"AIza_test_key\",\"temperature\":0.6}".utf8)
+        let decodedAI = try JSONDecoder().decode(AIConfig.self, from: legacyAIJSON)
+        XCTAssertEqual(decodedAI.geminiAPIKey, "AIza_test_key")
+        XCTAssertEqual(decodedAI.temperature, 0.6, accuracy: 0.001)
+        XCTAssertFalse(decodedAI.customPrompts.isEmpty)
+        XCTAssertTrue(decodedAI.smartContextRecommendEnabled)
+
+        // 2. 端侧自动诊断报告：结合混淆矩阵与领域生成专属人设、定制提示词、短语与模糊音建议
+        var profile = UserTypingHabitProfile()
+        profile.totalChars = 2600
+        profile.totalWords = 900
+        profile.avgCPM = 68
+        profile.backspaceRate = 0.19
+        profile.confusionMatrix = ["zh_z": 6, "en_eng": 4]
+        profile.domainAffinity = LexiconDomainAffinity(primaryDomain: "科技开发", preferredTone: "简洁高效")
+        let stats = TypingStatsStore.Summary(
+            totalChars: 2600,
+            totalActiveSeconds: 2200,
+            averageCharsPerMinute: 68,
+            streakDays: 7,
+            todayChars: 320,
+            dayCount: 10
+        )
+        var settings = LingxiSettings()
+        let localReport = AIAutoInsightService.generateLocalReport(profile: profile, stats: stats, settings: settings)
+        XCTAssertFalse(localReport.personaTitle.isEmpty)
+        XCTAssertFalse(localReport.recommendedPersonaPrompt.isEmpty)
+        XCTAssertGreaterThanOrEqual(localReport.suggestedPrompts.count, 4)
+        XCTAssertGreaterThanOrEqual(localReport.suggestedPhrases.count, 3)
+        XCTAssertEqual(Set(localReport.suggestedFuzzyKeys), Set(["zh_z", "en_eng"]))
+
+        let appliedFuzzy = AIAutoInsightService.applyFuzzyKeys(localReport.suggestedFuzzyKeys, to: &settings)
+        XCTAssertEqual(appliedFuzzy, 2)
+        XCTAssertTrue(settings.fuzzy.zhZ)
+        XCTAssertTrue(settings.fuzzy.enEng)
+
+        // 3. 大模型 Markdown JSON 响应健壮解析
+        let mockLLM = """
+        ```json
+        {
+          "personaTitle": "极客效率建筑师",
+          "styleSummary": "节奏极快且表达直接。",
+          "efficiencyDiagnosis": "平翘舌与前后鼻音偶有误拼。",
+          "recommendedPersonaPrompt": "保持极简专业的工程师口吻。",
+          "suggestedPrompts": [
+            {"title": "代码评审", "icon": "sparkles", "category": "职场商务", "instruction": "整理成温和专业的代码评审意见"}
+          ],
+          "suggestedPhrases": [
+            {"title": "已修复", "content": "已修复并验证通过，请查收", "category": "AI推荐"}
+          ],
+          "actionableTips": ["开启模糊音 zh/z 提速"]
+        }
+        ```
+        """
+        let parsed = AIAutoInsightService.parseLLMResponse(mockLLM, fallback: localReport, sourceLabel: "AI 深度分析 · gemini-3.8-flash")
+        XCTAssertTrue(parsed.isFromLLM)
+        XCTAssertEqual(parsed.personaTitle, "极客效率建筑师")
+        XCTAssertEqual(parsed.suggestedPrompts.first?.title, "代码评审")
+        XCTAssertEqual(parsed.suggestedPhrases.first?.title, "已修复")
+
+        // 4. 键盘内零延迟语境感知器
+        let enRec = SmartContextPromptDetector.analyze(text: "Could you please share the updated API spec before Friday?", isClipboard: false, customPrompts: CustomAIPromptTemplate.defaultTemplates)
+        XCTAssertEqual(enRec.recommendedPresets.first, .translateZh)
+
+        let bizRec = SmartContextPromptDetector.analyze(text: "下午项目评审的排期和汇报方案麻烦同步一下", isClipboard: false, customPrompts: CustomAIPromptTemplate.defaultTemplates)
+        XCTAssertTrue(bizRec.recommendedCustomIDs.contains("preset_work_report"))
+
+        let askRec = SmartContextPromptDetector.analyze(text: "今晚有空一起吃饭吗？", isClipboard: true, customPrompts: CustomAIPromptTemplate.defaultTemplates)
+        XCTAssertEqual(askRec.recommendedPresets.first, .replyClipboard)
+    }
 }

@@ -524,13 +524,54 @@ class Engine:
                 out = [c for c in out if c.word != multi_exact[0].word]
                 out.insert(min(3, len(out)), multi_exact[0])
 
-        for c in extended_full:
-            add(c)
-
         n = len(best_seg)
-        for k in range(min(n - 1, MAX_PHRASE_LEN), 0, -1):
-            for c in self.lookup(best_seg, 0, k, open_end=False, is_t9=is_t9):
+        prefix_upper = min(n - 1, MAX_PHRASE_LEN)
+        if n >= 2 and limit >= 12:
+            immediate_ext_cap = 12
+            for c in extended_full[:immediate_ext_cap]:
                 add(c)
+            overflow_ext = extended_full[immediate_ext_cap:]
+
+            single_chars = self.lookup(best_seg, 0, 1, open_end=False, is_t9=is_t9)
+            guaranteed_singles = min(len(single_chars), max(12, limit // 3))
+            deferred_prefixes: list[Candidate] = []
+
+            for k in range(prefix_upper, 1, -1):
+                prefix_cands = self.lookup(best_seg, 0, k, open_end=False, is_t9=is_t9)
+                tier_cap = 4 if k >= 4 else (5 if k == 3 else 6)
+                for c in prefix_cands[:tier_cap]:
+                    if len(out) < max(1, limit - guaranteed_singles):
+                        add(c)
+                    else:
+                        deferred_prefixes.append(c)
+                if len(prefix_cands) > tier_cap:
+                    deferred_prefixes.extend(prefix_cands[tier_cap:tier_cap + 14])
+
+            top_single_count = min(8, guaranteed_singles)
+            for c in single_chars[:top_single_count]:
+                add(c)
+            for c in single_chars[top_single_count:guaranteed_singles]:
+                add(c)
+            for c in deferred_prefixes:
+                if len(out) >= limit:
+                    break
+                add(c)
+            for c in overflow_ext:
+                if len(out) >= limit:
+                    break
+                add(c)
+            for c in single_chars[guaranteed_singles:]:
+                if len(out) >= limit:
+                    break
+                add(c)
+        else:
+            for c in extended_full:
+                add(c)
+            for k in range(prefix_upper, 0, -1):
+                for c in self.lookup(best_seg, 0, k, open_end=False, is_t9=is_t9):
+                    add(c)
+                if len(out) >= limit:
+                    break
         return best_seg, out[:limit]
 
     def candidates(

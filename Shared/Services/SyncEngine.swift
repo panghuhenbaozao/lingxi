@@ -248,7 +248,8 @@ public final class SyncEngine {
                 .init(namespace: .phrases, fileName: "lingxi_custom_words.json"),
                 .init(namespace: .quickPhrases, fileName: "lingxi_phrases.json"),
                 .init(namespace: .recentEmojis, fileName: "lingxi_recent_emojis.json"),
-                .init(namespace: .typingStats, fileName: "typing_stats.json")
+                .init(namespace: .typingStats, fileName: "typing_stats.json"),
+                .init(namespace: .aiPrompts, fileName: "lingxi_ai_prompts_sync.json")
             ]),
             UserLexiconSyncSource()
         ])

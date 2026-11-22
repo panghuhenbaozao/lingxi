@@ -150,6 +150,15 @@ pre.tsv{background:var(--card);border:1px solid var(--line);border-radius:8px;pa
 
     <div class="card">
       <div class="ch">
+        <div class="ct">✨ AI 自动分析与专属提示词方案（基于云端脱敏习惯画像实时推导）</div>
+        <button class="btn btn-p" onclick="copySuggestedPersona()">📋 一键复制专属人设提示词</button>
+      </div>
+      <div class="cd" id="ai-prompt-summary">依据云端聚合的打字速度、易混音矩阵与词库领域权重，自动为你生成个人 AI 人设 System Prompt 与 4 套高频场景提示词（iPhone 端接入 AI Key 后同样支持大模型深度定制与一键写入键盘 AI 栏）。</div>
+      <div class="grid" id="ai-prompt-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="ch">
         <div class="ct">👤 用户打字习惯画像与智能引擎调优报表</div>
         <div class="row" style="margin:0">
           <input id="prof-q" class="in" style="min-width:200px" placeholder="搜索昵称、邮箱、方案或标签…" oninput="renderProfiles()" />
@@ -276,6 +285,7 @@ let SSE = null;
 let MY_TOKEN = localStorage.getItem('lx_cf_token') || '';
 const NS_NAMES = {
   lexicon: '🧠 个人自学习词库',
+  ai_prompts: '✨ AI 专属提示词与人设',
   settings: '⚙️ 输入法全局设置',
   theme: '🎨 外观主题与调色',
   phrases: '📝 自定义编码短语',
@@ -327,6 +337,7 @@ async function refreshAll() {
     renderSchemeAI(OV.aggregate?.schemeBreakdown || {}, OV.aggregate?.aiBreakdown || {});
     renderCM(OV.aggregate?.confusionMatrix || {});
     renderDomains(OV.aggregate?.domainScores || {});
+    renderAIInsights(OV.aggregate?.domainScores || {}, OV.aggregate?.confusionMatrix || {}, OV.profiles || []);
     renderProfiles();
     renderPacks(OV.communityPacks || []);
     renderB2B(OV.b2bClients || []);
@@ -386,6 +397,54 @@ function renderDomains(ds) {
     const n = ds[d] || 0, p = Math.min(100, Math.round(n / mx * 100));
     return '<div class="cell"><div class="c-t">' + d + '</div><div class="c-v">' + n + ' 词命中</div><div class="pbar"><div class="pfill" style="width:' + p + '%"></div></div></div>';
   }).join('');
+}
+
+let LAST_SUGGESTED_PERSONA = '';
+function renderAIInsights(ds, cm, profiles) {
+  const topDomain = Object.entries(ds).sort((a, b) => b[1] - a[1])[0]?.[0] || '综合日常';
+  const topConf = Object.entries(cm).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k.replace('_', '/'));
+  const avgCpm = profiles.length ? (profiles.reduce((s, p) => s + (p.avgCPM || 0), 0) / profiles.length).toFixed(1) : '0.0';
+  let persona = '口吻自然真诚、表达清晰利落，少用冗长客套，直接输出可发送文本。';
+  let prompts = [
+    { t: '✦ 高情商答', c: '日常社交', p: '用自然真诚、高情商且有分寸感的口吻回复这段消息，直接可发送。' },
+    { t: '✦ 顺句去冗', c: '效率沟通', p: '保留原意，去掉口水词与生硬语病，使语句流畅简洁。' },
+    { t: '✦ 职场汇报', c: '职场商务', p: '把零散要点整理为结论先行、条理清晰的工作同步消息。' },
+    { t: '✦ 一句话说清', c: '效率沟通', p: '将较长内容浓缩为重点明确、礼貌易懂的简短表达。' }
+  ];
+  if (topDomain.includes('科技')) {
+    persona = '保持逻辑清晰、结论先行的科技从业者口吻，技术专有名词保留英文原词，句式精炼干脆。';
+    prompts = [
+      { t: '✦ 技术同步', c: '科技研发', p: '改写为简洁专业的研发进度/问题同步消息，明确现状、根因与下一步动作。' },
+      { t: '✦ 问题复盘', c: '效率沟通', p: '整理为结构化排查记录：现象、根因、修复方案与验证结果。' },
+      { t: '✦ 中英精译', c: '学习创作', p: '保留技术术语前提下进行地道中英互译，适合文档与 Issue 沟通。' },
+      { t: '✦ 温和催促', c: '职场商务', p: '用友好合作不急躁的语气跟进同事进度，并给出清晰时间节点。' }
+    ];
+  } else if (topDomain.includes('商务')) {
+    persona = '表达礼貌得体、重点突出、有分寸感，既体现专业度又保持亲和力，适合客户与团队协作。';
+    prompts = [
+      { t: '✦ 会议纪要', c: '商务职场', p: '将记录提炼为标准会议纪要：核心结论、待办事项、责任人与节点。' },
+      { t: '✦ 客户回复', c: '商务职场', p: '用专业真诚的商务口吻回复客户，回应关切并明确后续安排。' },
+      { t: '✦ 邮件润色', c: '商务职场', p: '润色成结构完整、措辞得体的正式商务消息或邮件正文。' },
+      { t: '✦ 体面婉拒', c: '效率沟通', p: '高情商委婉拒绝时间或需求冲突，提供替代方案并保持好关系。' }
+    ];
+  }
+  LAST_SUGGESTED_PERSONA = persona;
+  const confTip = topConf.length ? (' · 建议开启模糊音：' + topConf.join('、')) : '';
+  document.getElementById('ai-prompt-summary').textContent = '主领域：' + topDomain + ' · 均值速度：' + avgCpm + ' CPM' + confTip + ' ｜ 推荐人设：「' + persona + '」';
+  document.getElementById('ai-prompt-grid').innerHTML = prompts.map((item, idx) =>
+    '<div class="cell" style="cursor:pointer" data-p="' + esc(item.p) + '" onclick="copyPromptCell(this)"><div class="c-t">' + esc(item.t) + ' · ' + esc(item.c) + '</div><div style="font-size:12px;color:var(--ink);margin-top:4px;line-height:1.45">' + esc(item.p) + '</div><div class="c-s">点击复制该提示词</div></div>'
+  ).join('');
+}
+function copySuggestedPersona() {
+  if (!LAST_SUGGESTED_PERSONA) return;
+  navigator.clipboard?.writeText(LAST_SUGGESTED_PERSONA);
+  toast('已复制专属人设提示词，可粘贴到 iPhone 灵犀 AI 人设');
+}
+function copyPromptCell(el) {
+  const txt = el.getAttribute('data-p') || '';
+  if (!txt) return;
+  navigator.clipboard?.writeText(txt);
+  toast('已复制提示词模板');
 }
 
 function renderProfiles() {

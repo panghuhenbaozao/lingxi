@@ -115,6 +115,95 @@ enum AIPresetAction: String, CaseIterable, Identifiable {
     }
 }
 
+/// 用户自定义 / AI 自动生成的键盘快捷提示词模板（直接同步至键盘「✨ 灵犀 AI」面板技能栏）。
+struct CustomAIPromptTemplate: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String
+    var icon: String = "sparkles"
+    var instruction: String
+    var category: String = "效率沟通"
+    var isAIGenerated: Bool = false
+    var isPinned: Bool = false
+
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        icon: String = "sparkles",
+        instruction: String,
+        category: String = "效率沟通",
+        isAIGenerated: Bool = false,
+        isPinned: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.icon = icon
+        self.instruction = instruction
+        self.category = category
+        self.isAIGenerated = isAIGenerated
+        self.isPinned = isPinned
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "自定义技能"
+        icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? "sparkles"
+        instruction = try c.decodeIfPresent(String.self, forKey: .instruction) ?? ""
+        category = try c.decodeIfPresent(String.self, forKey: .category) ?? "效率沟通"
+        isAIGenerated = try c.decodeIfPresent(Bool.self, forKey: .isAIGenerated) ?? false
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+    }
+
+    /// 供端侧系统 Prompt 注入使用，确保直接产出可发送文本。
+    var effectiveSystemPrompt: String {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rule = "只直接输出最终可直接发送的文本，不要解释过程，不要加多余引号或Markdown标题。"
+        if trimmed.isEmpty {
+            return "你是灵犀智能输入法写作助手，请优化用户内容使其自然得体。\(rule)"
+        }
+        return "\(trimmed)\n\(rule)"
+    }
+
+    static let defaultTemplates: [CustomAIPromptTemplate] = [
+        CustomAIPromptTemplate(
+            id: "preset_work_report",
+            title: "职场汇报",
+            icon: "briefcase.fill",
+            instruction: "请把这段草稿整理为结论先行、条理清晰的职场简洁汇报，适合在微信/企微/钉钉直接发给领导或同事。",
+            category: "职场商务",
+            isAIGenerated: false,
+            isPinned: true
+        ),
+        CustomAIPromptTemplate(
+            id: "preset_polite_decline",
+            title: "温柔拒绝",
+            icon: "hand.raised.fill",
+            instruction: "请用礼貌得体、高情商、不伤和气的语气委婉拒绝对方，同时保留后续合作或沟通的余地。",
+            category: "效率沟通",
+            isAIGenerated: false,
+            isPinned: false
+        ),
+        CustomAIPromptTemplate(
+            id: "preset_extract_todo",
+            title: "拆解待办",
+            icon: "checklist",
+            instruction: "请从内容中提取出清晰可执行的待办清单（用简洁序号列出事项、负责人与时间节点）。",
+            category: "效率沟通",
+            isAIGenerated: false,
+            isPinned: false
+        ),
+    ]
+}
+
+/// 仅含提示词与人设的无密钥同步载荷（绝不把明文 API Key 放入云端同步快照）。
+struct AIPromptsSyncPayload: Codable, Equatable {
+    var customPersonaPrompt: String = ""
+    var customPrompts: [CustomAIPromptTemplate] = []
+    var temperature: Double = 0.7
+    var smartContextRecommendEnabled: Bool = true
+    var updatedAt: Int = Int(Date().timeIntervalSince1970)
+}
+
 /// AI 配置与密钥持久化（存于 App Group 受保护文件中，兼容侧载签名）。
 struct AIConfig: Codable, Equatable {
     var provider: AIProvider = .gemini
@@ -125,16 +214,54 @@ struct AIConfig: Codable, Equatable {
     var openAIModel: String = "deepseek-chat"
     var customPersonaPrompt: String = ""
     var temperature: Double = 0.7
+    var customPrompts: [CustomAIPromptTemplate] = CustomAIPromptTemplate.defaultTemplates
+    var autoAnalyzeOnConnect: Bool = true
+    var smartContextRecommendEnabled: Bool = true
 
     private static let fileName = "lingxi_ai_config.json"
+    static let promptsSyncFileName = "lingxi_ai_prompts_sync.json"
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decodeIfPresent(AIProvider.self, forKey: .provider) ?? .gemini
+        geminiAPIKey = try c.decodeIfPresent(String.self, forKey: .geminiAPIKey) ?? ""
+        geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? GeminiModelOption.flash38.rawValue
+        openAIBaseURL = try c.decodeIfPresent(String.self, forKey: .openAIBaseURL) ?? "https://api.deepseek.com/v1"
+        openAIAPIKey = try c.decodeIfPresent(String.self, forKey: .openAIAPIKey) ?? ""
+        openAIModel = try c.decodeIfPresent(String.self, forKey: .openAIModel) ?? "deepseek-chat"
+        customPersonaPrompt = try c.decodeIfPresent(String.self, forKey: .customPersonaPrompt) ?? ""
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.7
+        customPrompts = try c.decodeIfPresent([CustomAIPromptTemplate].self, forKey: .customPrompts) ?? CustomAIPromptTemplate.defaultTemplates
+        autoAnalyzeOnConnect = try c.decodeIfPresent(Bool.self, forKey: .autoAnalyzeOnConnect) ?? true
+        smartContextRecommendEnabled = try c.decodeIfPresent(Bool.self, forKey: .smartContextRecommendEnabled) ?? true
+    }
 
     static func load() -> AIConfig {
-        AppGroup.readJSON(AIConfig.self, from: fileName) ?? AIConfig()
+        var cfg = AppGroup.readJSON(AIConfig.self, from: fileName) ?? AIConfig()
+        // 若云端 E2EE 同步拉取了更新的无密钥提示词快照，自动合入自定义提示词与人设
+        if let synced = AppGroup.readJSON(AIPromptsSyncPayload.self, from: promptsSyncFileName) {
+            if !synced.customPrompts.isEmpty && cfg.customPrompts == CustomAIPromptTemplate.defaultTemplates && synced.customPrompts != CustomAIPromptTemplate.defaultTemplates {
+                cfg.customPrompts = synced.customPrompts
+            }
+            if cfg.customPersonaPrompt.isEmpty && !synced.customPersonaPrompt.isEmpty {
+                cfg.customPersonaPrompt = synced.customPersonaPrompt
+            }
+        }
+        return cfg
     }
 
     @discardableResult
     func save() -> Bool {
-        AppGroup.writeJSON(self, to: Self.fileName, protected: true)
+        let syncPayload = AIPromptsSyncPayload(
+            customPersonaPrompt: customPersonaPrompt,
+            customPrompts: customPrompts,
+            temperature: temperature,
+            smartContextRecommendEnabled: smartContextRecommendEnabled
+        )
+        _ = AppGroup.writeJSON(syncPayload, to: Self.promptsSyncFileName, protected: true)
+        return AppGroup.writeJSON(self, to: Self.fileName, protected: true)
     }
 
     var activeAPIKey: String {

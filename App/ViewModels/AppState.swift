@@ -17,12 +17,17 @@ final class AppState: ObservableObject {
         }
     }
     @Published var aiConfig: AIConfig {
-        didSet { aiConfig.save() }
+        didSet {
+            aiConfig.save()
+            scheduleAutoSyncIfNeeded()
+        }
     }
     @Published var cloudConfig: CloudBackendConfig {
         didSet { cloudConfig.save() }
     }
     @Published var habitProfile: UserTypingHabitProfile = TypingHabitTracker.shared.currentProfile()
+    @Published var aiInsightReport: AIAutoInsightReport? = AIAutoInsightService.loadCachedReport()
+    @Published var isRunningAIInsight: Bool = false
     @Published var isCloudAuthenticated: Bool = false
     @Published var activeCustomerAPIKey: String = ""
     @Published var clipboardItems: [ClipboardItem] = []
@@ -55,6 +60,7 @@ final class AppState: ObservableObject {
         aiConfig = AIConfig.load()
         cloudConfig = CloudBackendConfig.load()
         habitProfile = TypingHabitTracker.shared.currentProfile()
+        aiInsightReport = AIAutoInsightService.loadCachedReport()
         isCloudAuthenticated = CloudBackendClient.shared.isAuthenticatedOrHasAPIKey
         activeCustomerAPIKey = CloudCredentialStore.loadAPIKey() ?? ""
         clipboardItems = ClipboardStore.items()
@@ -346,6 +352,7 @@ final class AppState: ObservableObject {
             }
         }
         habitProfile = TypingHabitTracker.shared.currentProfile()
+        aiInsightReport = AIAutoInsightService.loadCachedReport()
     }
 
     func clearAllHabitAnalytics() async {
@@ -354,6 +361,7 @@ final class AppState: ObservableObject {
         } else {
             TypingHabitTracker.shared.clearAllLocalHabits()
             habitProfile = TypingHabitTracker.shared.currentProfile()
+            aiInsightReport = AIAutoInsightService.loadCachedReport()
         }
     }
 
@@ -393,5 +401,78 @@ final class AppState: ObservableObject {
         default:
             break
         }
+    }
+
+    // MARK: - AI 自动分析诊断与专属提示词工坊
+
+    @discardableResult
+    func runAIAutoAnalysis() async -> AIAutoInsightReport {
+        isRunningAIInsight = true
+        defer { isRunningAIInsight = false }
+        let currentHabit = TypingHabitTracker.shared.currentProfile()
+        habitProfile = currentHabit
+        let report = await AIAutoInsightService.runAutoAnalysis(
+            config: aiConfig,
+            profile: currentHabit,
+            stats: TypingStatsStore.shared.summary(),
+            settings: settings
+        )
+        aiInsightReport = report
+        return report
+    }
+
+    func addOrUpdateCustomPrompt(_ template: CustomAIPromptTemplate) {
+        if let idx = aiConfig.customPrompts.firstIndex(where: { $0.id == template.id }) {
+            aiConfig.customPrompts[idx] = template
+        } else {
+            aiConfig.customPrompts.insert(template, at: 0)
+        }
+    }
+
+    func deleteCustomPrompt(id: String) {
+        aiConfig.customPrompts.removeAll { $0.id == id }
+    }
+
+    func togglePinCustomPrompt(id: String) {
+        if let idx = aiConfig.customPrompts.firstIndex(where: { $0.id == id }) {
+            aiConfig.customPrompts[idx].isPinned.toggle()
+        }
+    }
+
+    @discardableResult
+    func importSuggestedPrompts(_ prompts: [CustomAIPromptTemplate]) -> Int {
+        var added = 0
+        var existingTitles = Set(aiConfig.customPrompts.map(\.title))
+        for item in prompts {
+            if existingTitles.insert(item.title).inserted {
+                aiConfig.customPrompts.insert(item, at: 0)
+                added += 1
+            }
+        }
+        return added
+    }
+
+    @discardableResult
+    func importSuggestedPhrases(_ phrases: [AISuggestedPhrase]) -> Int {
+        var added = 0
+        var existingContents = Set(QuickPhraseStore.load().map(\.content))
+        for phrase in phrases where !phrase.content.isEmpty {
+            if existingContents.insert(phrase.content).inserted {
+                QuickPhraseStore.add(title: phrase.title, content: phrase.content, category: phrase.category)
+                added += 1
+            }
+        }
+        quickPhrases = QuickPhraseStore.load()
+        return added
+    }
+
+    @discardableResult
+    func applySuggestedFuzzyKeys(_ keys: [String]) -> Int {
+        var copy = settings
+        let count = AIAutoInsightService.applyFuzzyKeys(keys, to: &copy)
+        if count > 0 {
+            settings = copy
+        }
+        return count
     }
 }

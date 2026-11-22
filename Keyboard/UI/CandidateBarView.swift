@@ -172,7 +172,7 @@ final class CandidateBarView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        let visibleCount = min(candidates.count, 24)
+        let visibleCount = min(candidates.count, 36)
 
         for idx in 0..<visibleCount {
             let cand = candidates[idx]
