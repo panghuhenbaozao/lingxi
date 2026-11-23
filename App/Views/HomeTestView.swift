@@ -81,7 +81,7 @@ struct HomeTestView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(appState.isKeyboardEnabled ? "灵犀 5.2 已就绪" : "尚未启用灵犀键盘")
+                        Text(appState.isKeyboardEnabled ? "灵犀键盘已就绪" : "尚未启用灵犀键盘")
                             .font(.system(size: 15.5, weight: .semibold))
                             .foregroundStyle(Color(Design.Palette.ink))
                         Circle()
@@ -251,6 +251,23 @@ struct HomeTestView: View {
                     .foregroundStyle(Color(Design.Palette.ink))
 
                 Spacer()
+
+                Button {
+                    appState.showVoiceTranslator = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "mic.fill")
+                            .font(.caption2.bold())
+                        Text("语音互译")
+                            .font(.caption.bold())
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color(Design.Palette.accentSoft))
+                    .foregroundStyle(Color(Design.Palette.accent))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
 
                 if !sandboxText.isEmpty {
                     Text("\(sandboxText.count) 字")

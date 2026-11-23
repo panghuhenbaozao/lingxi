@@ -21,6 +21,7 @@ final class TopToolbarView: UIView {
     enum Action {
         case toggleAI
         case toggleTranslateMode
+        case openVoiceTranslator
         case cycleTranslateTarget
         case toggleTranslateTone
         case commitTranslatedText
@@ -70,6 +71,7 @@ final class TopToolbarView: UIView {
     private let rightClusterStack = UIStackView()
     private let aiButton = UIButton(type: .system)
     private let translateButton = UIButton(type: .system)
+    private let voiceButton = UIButton(type: .system)
     private let clipboardButton = UIButton(type: .system)
     private let layoutButton = UIButton(type: .system)
     private let editPadButton = UIButton(type: .system)
@@ -189,10 +191,10 @@ final class TopToolbarView: UIView {
         rightClusterStack.spacing = 6
         idleScrollView.addSubview(rightClusterStack)
 
-        // 左侧核心胶囊：灵犀 AI + 译
+        // 左侧核心胶囊：AI + 译 + 语音互译
         configurePrimaryPillButton(
             aiButton,
-            title: "灵犀 AI",
+            title: "AI",
             symbol: "sparkles",
             action: #selector(didTapAI)
         )
@@ -201,6 +203,12 @@ final class TopToolbarView: UIView {
             title: "译",
             symbol: "character.bubble",
             action: #selector(didTapTranslate)
+        )
+        configurePrimaryPillButton(
+            voiceButton,
+            title: "语音",
+            symbol: "mic.fill",
+            action: #selector(didTapVoice)
         )
 
         // 右侧工具胶囊：撤销、九键切换、剪贴板、快捷设置
@@ -249,6 +257,7 @@ final class TopToolbarView: UIView {
 
         leftClusterStack.addArrangedSubview(aiButton)
         leftClusterStack.addArrangedSubview(translateButton)
+        leftClusterStack.addArrangedSubview(voiceButton)
         [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton].forEach {
             rightClusterStack.addArrangedSubview($0)
         }
@@ -407,6 +416,7 @@ final class TopToolbarView: UIView {
         switch id {
         case .ai: return aiButton
         case .translate: return translateButton
+        case .voice: return voiceButton
         case .clipboard: return clipboardButton
         case .layout: return layoutButton
         case .editPad: return editPadButton
@@ -575,7 +585,7 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        for btn in [clipboardButton, layoutButton, editPadButton, settingsButton] {
+        for btn in [voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
@@ -684,50 +694,10 @@ final class TopToolbarView: UIView {
 
         layoutButton.setTitle(layoutMode == .qwerty26 ? "九键" : "26键", for: .normal)
 
-        if let draft = aiPromptDraft, !hasCandidates {
-            aiPromptBar.isHidden = false
-            aiPromptLabel.text = draft.isEmpty ? "✨ 输入要问 AI 的问题…" : "✨ 问AI：\(draft)"
-            aiPromptSendBtn.isEnabled = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            aiPromptSendBtn.alpha = aiPromptSendBtn.isEnabled ? 1.0 : 0.45
-        } else {
-            aiPromptBar.isHidden = true
-        }
-
-        if let tr = translateState, !hasCandidates, aiPromptDraft == nil {
-            translateBar.isHidden = false
-            let srcShow = tr.sourceText.isEmpty ? "请照常输入中文（停顿或标点自动译）" : tr.sourceText
-            translateSourceLabel.text = "译 · 中→\(tr.targetLanguage) | \(srcShow)"
-            if let err = tr.errorText, !err.isEmpty {
-                translateResultLabel.text = "⚠️ \(err)"
-            } else if tr.isTranslating && tr.translatedText.isEmpty {
-                translateResultLabel.text = "正在流式翻译…"
-            } else if tr.translatedText.isEmpty {
-                translateResultLabel.text = "翻译预览将实时显示在这里（空格/回车上屏）"
-            } else {
-                translateResultLabel.text = tr.isTranslating ? "\(tr.translatedText) ▍" : tr.translatedText
-            }
-            let hasForeign = tr.sourceText.range(of: "[A-Za-z]", options: .regularExpression) != nil
-            let hasChinese = tr.sourceText.range(of: "[\\u4e00-\\u9fff]", options: .regularExpression) != nil
-            let directionLabel = (hasForeign && !hasChinese) ? "英→中" : "中→\(tr.targetLanguage)"
-            translateLangBtn.setTitle(directionLabel, for: .normal)
-            translateLangBtn.accessibilityLabel = "翻译方向：\(directionLabel)"
-            translateToneBtn.setTitle(tr.formalTone ? "正式" : "口语", for: .normal)
-            translateToneBtn.accessibilityLabel = "译文语气：\(tr.formalTone ? "正式" : "口语")"
-            if let theme {
-                translateToneBtn.backgroundColor = tr.formalTone
-                    ? theme.accentFill.withAlphaComponent(0.20)
-                    : theme.specialKeyFill
-                translateToneBtn.setTitleColor(tr.formalTone ? theme.candidateHighlight : theme.keyText, for: .normal)
-            }
-            let canCommitTranslated = !tr.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            translateCommitBtn.isEnabled = canCommitTranslated
-            translateCommitBtn.alpha = canCommitTranslated ? 1.0 : 0.45
-            let canCommitSource = !tr.sourceText.isEmpty
-            translateSourceBtn.isEnabled = canCommitSource
-            translateSourceBtn.alpha = canCommitSource ? 1.0 : 0.45
-        } else {
-            translateBar.isHidden = true
-        }
+        // 实时翻译栏与 AI 输入框现已升级为位于候选词栏正上方的常驻 LiveInputDockView（绝不被候选词挡住），
+        // 顶栏自身保持专注展示拼音音节/候选词，并在空闲时高亮当前激活状态。
+        aiPromptBar.isHidden = true
+        translateBar.isHidden = true
 
         if showComposingStrip && composingSyllables.count >= 2 {
             composingLabel.text = ""
@@ -740,7 +710,7 @@ final class TopToolbarView: UIView {
             composingLabel.text = showComposingStrip ? composingDisplay : ""
         }
         candidateBar.isHidden = !hasCandidates
-        idleContainer.isHidden = hasCandidates || (!aiPromptBar.isHidden) || (!translateBar.isHidden)
+        idleContainer.isHidden = hasCandidates
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
         if let cmd = activeInlineCommand {
@@ -748,7 +718,7 @@ final class TopToolbarView: UIView {
         }
 
         if let theme {
-            stylePrimaryButtons(theme: theme, aiActive: aiPanelActive, translateActive: isTranslateBarActive)
+            stylePrimaryButtons(theme: theme, aiActive: aiPanelActive || isAIPromptMode, translateActive: isTranslateBarActive)
         }
 
         if hasCandidates {
@@ -1111,6 +1081,7 @@ final class TopToolbarView: UIView {
 
     @objc private func didTapAI() { onAction?(.toggleAI) }
     @objc private func didTapTranslate() { onAction?(.toggleTranslateMode) }
+    @objc private func didTapVoice() { onAction?(.openVoiceTranslator) }
     @objc private func didTapClipboard() { onAction?(.toggleClipboard) }
     @objc private func didTapLayout() { onAction?(.toggleLayoutQuick) }
     @objc private func didTapEditPad() { onAction?(.toggleEditPad) }

@@ -454,6 +454,17 @@ struct AISettingsView: View {
     private var modulesHubSection: some View {
         let historyCount = AIRecentHistoryStore.load().count
         return Section("能力中心") {
+            Button {
+                appState.showVoiceTranslator = true
+            } label: {
+                moduleRow(
+                    icon: "mic.fill",
+                    title: "实时语音同传转换",
+                    badge: "中⇄英 · 中⇄日 · 语音朗读"
+                )
+            }
+            .buttonStyle(.plain)
+
             NavigationLink {
                 AIPromptsHubView()
             } label: {

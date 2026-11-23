@@ -50,5 +50,9 @@ struct ContentView: View {
             PermissionsCenterSheet()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showVoiceTranslator) {
+            VoiceLiveTranslatorView()
+                .environmentObject(appState)
+        }
     }
 }

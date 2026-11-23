@@ -25,8 +25,8 @@ struct ToolbarSettingsView: View {
         }
     }
 
-    /// v4 极简方案：与 defaultToolbarLayout 一致——AI/译/剪贴板/设置/撤销上栏，低频按钮收纳
-    private static let minimalVisible: Set<ToolbarButtonID> = [.ai, .translate, .clipboard, .settings, .undo]
+    /// v5.3 极简方案：与 defaultToolbarLayout 一致——AI/译/语音/剪贴板/设置/撤销上栏，低频按钮收纳
+    private static let minimalVisible: Set<ToolbarButtonID> = [.ai, .translate, .voice, .clipboard, .settings, .undo]
 
     private var sortedItems: [ToolbarItemConfig] {
         LingxiSettings.normalizedToolbarLayout(appState.settings.toolbarLayout)

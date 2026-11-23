@@ -21,6 +21,8 @@ struct LingxiApp: App {
                         appState.requestedTab = 2
                     case "permissions":
                         appState.showPermissionsCenter = true
+                    case "voice-translate":
+                        appState.showVoiceTranslator = true
                     default:
                         break
                     }

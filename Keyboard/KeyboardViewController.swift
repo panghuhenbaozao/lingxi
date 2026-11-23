@@ -33,12 +33,15 @@ final class KeyboardViewController: UIInputViewController {
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
     private var aiConfigDarwinObserver: AppGroupNotifications.Observer?
     private var heightConstraint: NSLayoutConstraint?
+    /// 顶部常驻实时输入坞高度约束（实时翻译 88pt / AI 打字框 50pt / 平时 0pt，绝不被候选词遮挡）
+    private var liveDockHeightConstraint: NSLayoutConstraint?
     /// 顶部工具栏（候选栏）高度约束：设置页调整候选栏高度后需同步更新，否则键盘总高变了但候选栏区域不变
     private var toolbarHeightConstraint: NSLayoutConstraint?
 
     // 视图层级
     private let rootContainer = LingxiInputRootView()
     private let backdropView = KeyboardBackdropView()
+    private let liveDockView = LiveInputDockView()
     private lazy var toolbarView = TopToolbarView { [weak self] text in
         self?.handleCapturedPasteFromToolbar(text)
     }
@@ -358,6 +361,9 @@ final class KeyboardViewController: UIInputViewController {
             backdropView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
         ])
 
+        liveDockView.translatesAutoresizingMaskIntoConstraints = false
+        rootContainer.addSubview(liveDockView)
+
         toolbarView.translatesAutoresizingMaskIntoConstraints = false
         rootContainer.addSubview(toolbarView)
 
@@ -365,7 +371,12 @@ final class KeyboardViewController: UIInputViewController {
         rootContainer.addSubview(bodyContainer)
 
         NSLayoutConstraint.activate([
-            toolbarView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
+            liveDockView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
+            liveDockView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
+            liveDockView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+            { let c = liveDockView.heightAnchor.constraint(equalToConstant: 0); self.liveDockHeightConstraint = c; return c }(),
+
+            toolbarView.topAnchor.constraint(equalTo: liveDockView.bottomAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
             toolbarView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
             { let c = toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight); self.toolbarHeightConstraint = c; return c }(),
@@ -527,11 +538,59 @@ final class KeyboardViewController: UIInputViewController {
         }
         let bodyH: CGFloat
         if activePanel == .ai || activePanel == .clipboard {
-            bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 252)
+            bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 258)
         } else {
             bodyH = baseH
         }
-        heightConstraint?.constant = effectiveToolbarHeight + bodyH
+        let dockH = currentLiveDockMode().preferredHeight
+        liveDockHeightConstraint?.constant = dockH
+        heightConstraint?.constant = dockH + effectiveToolbarHeight + bodyH
+    }
+
+    private var currentLiveComposingPreview: String {
+        if !rawComposing.isEmpty {
+            return currentTokens.isEmpty ? rawComposing : PinyinSegmenter.displayPinyin(for: currentTokens)
+        }
+        return ""
+    }
+
+    private func currentLiveDockMode() -> LiveInputDockView.Mode {
+        if activePanel != .ai, let draft = aiPromptDraft {
+            return .aiDraft(draft: draft, liveComposing: currentLiveComposingPreview)
+        }
+        if isTranslateMode && activePanel != .ai {
+            return .translate(LiveInputDockView.TranslateState(
+                targetLanguage: settings.translateTargetLang,
+                formalTone: settings.translateFormalTone,
+                sourceText: translateSourceBuffer,
+                liveComposing: currentLiveComposingPreview,
+                translatedText: translatePreviewText,
+                isTranslating: translateIsStreaming,
+                errorText: translateErrorText
+            ))
+        }
+        return .hidden
+    }
+
+    private func readLatestClipboardForDock() -> String? {
+        if hasFullAccess,
+           let sys = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sys.isEmpty,
+           !ClipboardClassifier.isSensitiveContent(sys) {
+            return sys
+        }
+        return ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func openHostVoiceTranslator() {
+        guard let url = URL(string: "lingxi://voice-translate") else { return }
+        openURLFromExtension(url) { [weak self] opened in
+            guard let self, !opened else { return }
+            if self.isTranslateMode {
+                self.translateErrorText = "请打开「灵犀输入法 App → 语音互译」使用实时双语语音转换"
+                self.refreshToolbar()
+            }
+        }
     }
 
     // MARK: - 事件绑定
@@ -622,7 +681,83 @@ final class KeyboardViewController: UIInputViewController {
             }
             self.switchToPanel(.letters)
         }
-        aiPanel.onRequestPromptInput = { [weak self] in
+        liveDockView.onAction = { [weak self] action in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            switch action {
+            case .cycleTranslateTarget:
+                self.cycleTranslateTargetLanguage()
+            case .toggleTranslateTone:
+                self.settings.translateFormalTone.toggle()
+                self.settings.save()
+                self.translateErrorText = nil
+                if !self.translateSourceBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.triggerTranslation(immediately: true)
+                } else {
+                    self.refreshToolbar()
+                }
+            case .pasteIntoTranslate:
+                if let clip = self.readLatestClipboardForDock(), !clip.isEmpty {
+                    self.clearAllComposing()
+                    self.translateSourceBuffer = clip
+                    self.triggerTranslation(immediately: true)
+                } else {
+                    self.translateErrorText = self.hasFullAccess ? "剪贴板为空，请先复制要翻译的内容" : "需开启「允许完全访问」才可读取剪贴板"
+                    self.refreshToolbar()
+                }
+            case .openVoiceTranslator:
+                self.openHostVoiceTranslator()
+            case .clearTranslateSource:
+                self.cancelLiveTranslation()
+                self.clearAllComposing()
+                self.translateSourceBuffer = ""
+                self.translatePreviewText = ""
+                self.translateIsStreaming = false
+                self.translateErrorText = nil
+                self.refreshUI()
+            case .closeTranslate:
+                self.toggleTranslateMode()
+            case .commitTranslatedText:
+                self.commitTranslatedOutput()
+            case .commitTranslateSource:
+                self.commitTranslateSourceOutput()
+            case .tapTranslateErrorFix:
+                if !self.hasFullAccess {
+                    if let url = URL(string: "app-settings:") {
+                        self.openURLFromExtension(url) { _ in }
+                    }
+                } else if let url = URL(string: "lingxi://ai-settings") {
+                    self.openURLFromExtension(url) { _ in }
+                }
+            case .pasteIntoAIDraft:
+                if let clip = self.readLatestClipboardForDock(), !clip.isEmpty {
+                    let existing = self.aiPromptDraft ?? ""
+                    self.aiPromptDraft = existing.isEmpty ? clip : (existing + " " + clip)
+                    self.refreshUI()
+                }
+            case .clearAIDraft:
+                self.clearAllComposing()
+                self.aiPromptDraft = ""
+                self.refreshUI()
+            case .sendAIDraft:
+                self.handleToolbarAction(.sendAIPrompt)
+            case .returnToAIPanel:
+                self.commitRawIfNeeded()
+                let draft = self.aiPromptDraft ?? ""
+                self.aiPromptDraft = nil
+                self.switchToPanel(.ai)
+                self.aiPanel.prepare(
+                    theme: self.resolvedTheme,
+                    hasFullAccess: self.hasFullAccess,
+                    beforeCursor: self.textDocumentProxy.documentContextBeforeInput ?? "",
+                    clipboardText: nil,
+                    preferredAction: nil,
+                    preservedDraft: draft
+                )
+            }
+        }
+
+        aiPanel.onBeginTypingPrompt = { [weak self] existingDraft in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             if self.isTranslateMode {
@@ -633,7 +768,7 @@ final class KeyboardViewController: UIInputViewController {
                 self.translateErrorText = nil
             }
             self.clearAllComposing()
-            self.aiPromptDraft = ""
+            self.aiPromptDraft = existingDraft
             self.switchToPanel(.letters)
         }
         aiPanel.onOpenFullAccessSettings = { [weak self] done in
@@ -1056,11 +1191,25 @@ final class KeyboardViewController: UIInputViewController {
             if activePanel == .ai {
                 aiPromptDraft = nil
                 switchToPanel(.letters)
+            } else if let draft = aiPromptDraft {
+                commitRawIfNeeded()
+                aiPromptDraft = nil
+                switchToPanel(.ai)
+                aiPanel.prepare(
+                    theme: resolvedTheme,
+                    hasFullAccess: hasFullAccess,
+                    beforeCursor: textDocumentProxy.documentContextBeforeInput ?? "",
+                    clipboardText: nil,
+                    preferredAction: nil,
+                    preservedDraft: draft
+                )
             } else {
                 openAIPanel(preferredAction: nil, explicitClipboard: nil)
             }
         case .toggleTranslateMode:
             toggleTranslateMode()
+        case .openVoiceTranslator:
+            openHostVoiceTranslator()
         case .cycleTranslateTarget:
             cycleTranslateTargetLanguage()
         case .toggleTranslateTone:
@@ -1350,11 +1499,11 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        if isTranslateMode && !translateSourceBuffer.isEmpty {
-            if !translatePreviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                commitTranslatedOutput()
-            } else {
-                triggerTranslation(immediately: true)
+        if isTranslateMode {
+            // 实时翻译模式下按空格自然输入空格（不误断英文句子）；按回车「译·上屏」或点上方「上屏」提交译文
+            if !translateSourceBuffer.isEmpty {
+                insertFinalText(" ", checkPairing: false)
+                refreshUI()
             }
             return
         }
@@ -2214,6 +2363,9 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             aiPromptDraft = nil
             clearAllComposing()
+            if !AppGroup.isAvailable && hasFullAccess {
+                _ = tryImportBridgeTokenFromPasteboardIfPresent()
+            }
             isTranslateMode = true
             translateSourceBuffer = ""
             translatePreviewText = ""
@@ -2290,7 +2442,7 @@ final class KeyboardViewController: UIInputViewController {
             self?.triggerTranslation(immediately: true)
         }
         translateDebounceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: work)
     }
 
     private func triggerTranslation(immediately: Bool) {
@@ -2350,7 +2502,8 @@ final class KeyboardViewController: UIInputViewController {
                     prompt: sourceSnapshot,
                     systemInstruction: system,
                     config: cfg,
-                    featureTag: "live_translate"
+                    featureTag: "live_translate",
+                    preferFast: true
                 ) {
                     try Task.checkCancellation()
                     accumulated += chunk
@@ -2580,6 +2733,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func applyThemeAndSettings() {
         backdropView.apply(theme: resolvedTheme)
+        liveDockView.apply(theme: resolvedTheme)
         toolbarView.apply(theme: resolvedTheme)
         expandedCandidates.apply(theme: resolvedTheme)
         editPadPanel.apply(theme: resolvedTheme)
@@ -2665,6 +2819,9 @@ final class KeyboardViewController: UIInputViewController {
         let inlineAICmd: InlineAICommandMatch? = (!isSecureField && !isActivelyComposing && activePanel == .letters)
             ? InlineAICommandDetector.detect(in: textDocumentProxy.documentContextBeforeInput ?? "")
             : nil
+
+        liveDockView.update(mode: currentLiveDockMode())
+        updatePreferredHeight()
 
         toolbarView.update(
             composingDisplay: composingDisplay,

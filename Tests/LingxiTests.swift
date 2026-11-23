@@ -541,8 +541,8 @@ final class LingxiTests: XCTestCase {
         let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data(legacyJSON.utf8))
         XCTAssertEqual(legacy.toolbarLayout.count, ToolbarButtonID.allCases.count)
         XCTAssertEqual(legacy.toolbarLayout.map({ $0.buttonID }), ToolbarButtonID.allCases)
-        // v4 新默认：AI/译/剪贴板/设置/撤销可见，表情/编辑面板/九键切换默认收纳进『⋯』
-        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .clipboard, .settings, .undo]
+        // v5.3 极简默认：AI/译/语音/剪贴板/设置/撤销可见，编辑面板/九键切换默认隐藏
+        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .voice, .clipboard, .settings, .undo]
         let visibleByDefault = Set(legacy.toolbarLayout.filter(\.isVisible).map(\.buttonID))
         XCTAssertEqual(visibleByDefault, expectedVisible)
         XCTAssertTrue(legacy.showComposingStrip)
@@ -2022,5 +2022,34 @@ final class LingxiTests: XCTestCase {
         let hb = try XCTUnwrap(KeyboardPermissionHeartbeat.load())
         XCTAssertTrue(hb.hasFullAccess)
         XCTAssertTrue(hb.aiConfigured)
+    }
+
+    func testV530VoiceTranslateModesAndToolbarVoiceButton() throws {
+        // 1. 实时语音双语互译模式校验（说中文→英语 / 说英语→中文 / 中日互译 / 语音转文字）
+        XCTAssertEqual(VoiceTranslateMode.zhToEn.sourceLocaleID, "zh-CN")
+        XCTAssertEqual(VoiceTranslateMode.zhToEn.outputSpeechLocaleID, "en-US")
+        XCTAssertEqual(VoiceTranslateMode.zhToEn.flipped, .enToZh)
+
+        XCTAssertEqual(VoiceTranslateMode.enToZh.sourceLocaleID, "en-US")
+        XCTAssertEqual(VoiceTranslateMode.enToZh.outputSpeechLocaleID, "zh-CN")
+        XCTAssertEqual(VoiceTranslateMode.enToZh.flipped, .zhToEn)
+
+        XCTAssertEqual(VoiceTranslateMode.zhToJa.sourceLocaleID, "zh-CN")
+        XCTAssertEqual(VoiceTranslateMode.zhToJa.outputSpeechLocaleID, "ja-JP")
+        XCTAssertEqual(VoiceTranslateMode.zhToJa.flipped, .jaToZh)
+        XCTAssertEqual(VoiceTranslateMode.jaToZh.sourceLocaleID, "ja-JP")
+
+        for mode in VoiceTranslateMode.allCases {
+            XCTAssertFalse(mode.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            XCTAssertEqual(mode.flipped.flipped, mode, "双击翻转语种必须严格对称还原")
+        }
+        XCTAssertTrue(VoiceTranslateMode.zhToEn.isTranslationMode)
+        XCTAssertTrue(VoiceTranslateMode.enToZh.isTranslationMode)
+        XCTAssertFalse(VoiceTranslateMode.zhDictation.isTranslationMode)
+        XCTAssertFalse(VoiceTranslateMode.enDictation.isTranslationMode)
+
+        // 2. 键盘顶栏新增语音同传主入口按钮
+        XCTAssertTrue(ToolbarButtonID.voice.isPrimaryLeftAction)
+        XCTAssertTrue(defaultToolbarLayout.contains(where: { $0.buttonID == .voice && $0.isVisible }))
     }
 }

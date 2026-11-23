@@ -875,3 +875,103 @@ enum TranslateTargetLanguage: String, CaseIterable, Identifiable {
         """
     }
 }
+
+/// 实时语音同传转换模式（支持中英日实时双语互译及纯语音转文字，动态切换 Apple SpeechRecognizer 源语言）。
+enum VoiceTranslateMode: String, Codable, CaseIterable, Identifiable {
+    case zhToEn
+    case enToZh
+    case zhToJa
+    case jaToZh
+    case zhDictation
+    case enDictation
+
+    var id: String { rawValue }
+
+    var shortTitle: String {
+        switch self {
+        case .zhToEn: return "说中文 → 英语"
+        case .enToZh: return "说英语 → 中文"
+        case .zhToJa: return "说中文 → 日语"
+        case .jaToZh: return "说日语 → 中文"
+        case .zhDictation: return "中文转文字"
+        case .enDictation: return "英语转文字"
+        }
+    }
+
+    var pillTitle: String {
+        switch self {
+        case .zhToEn: return "中 → 英"
+        case .enToZh: return "英 → 中"
+        case .zhToJa: return "中 → 日"
+        case .jaToZh: return "日 → 中"
+        case .zhDictation: return "中文转字"
+        case .enDictation: return "英语转字"
+        }
+    }
+
+    var sourceLocaleID: String {
+        switch self {
+        case .zhToEn, .zhToJa, .zhDictation: return "zh-CN"
+        case .enToZh, .enDictation: return "en-US"
+        case .jaToZh: return "ja-JP"
+        }
+    }
+
+    var outputSpeechLocaleID: String {
+        switch self {
+        case .zhToEn, .enDictation: return "en-US"
+        case .enToZh, .jaToZh, .zhDictation: return "zh-CN"
+        case .zhToJa: return "ja-JP"
+        }
+    }
+
+    var sourceLanguageLabel: String {
+        switch self {
+        case .zhToEn, .zhToJa, .zhDictation: return "中文语音"
+        case .enToZh, .enDictation: return "English Speech"
+        case .jaToZh: return "日本語音声"
+        }
+    }
+
+    var targetLanguageLabel: String {
+        switch self {
+        case .zhToEn: return "实时英文译文"
+        case .enToZh, .jaToZh: return "实时中文译文"
+        case .zhToJa: return "实时日文译文"
+        case .zhDictation: return "AI 标点整编中文"
+        case .enDictation: return "AI 精修英文"
+        }
+    }
+
+    var isTranslationMode: Bool {
+        self != .zhDictation && self != .enDictation
+    }
+
+    var flipped: VoiceTranslateMode {
+        switch self {
+        case .zhToEn: return .enToZh
+        case .enToZh: return .zhToEn
+        case .zhToJa: return .jaToZh
+        case .jaToZh: return .zhToJa
+        case .zhDictation: return .enDictation
+        case .enDictation: return .zhDictation
+        }
+    }
+
+    var systemPrompt: String {
+        switch self {
+        case .zhToEn:
+            return "You are a real-time Chinese-to-English speech interpreter. Translate the speaker's Chinese into natural, idiomatic, fluent English. Fix minor speech-recognition slips automatically. Output ONLY the English translation without quotes or explanation."
+        case .enToZh:
+            return "你是实时英译中同声传译助手。将说话者的英语准确、自然、地道地翻译成简体中文，自动顺通语音识别断句。只直接输出中文译文，不要任何解释、引号或前缀。"
+        case .zhToJa:
+            return "你是实时中译日同声传译助手。将中文准确、自然地翻译成地道礼貌的日语（です・ます体）。只输出最终日语译文，不要解释或引号。"
+        case .jaToZh:
+            return "你是实时日译中同声传译助手。将日语准确、自然地翻译成地道简体中文。只输出最终中文译文，不要解释或引号。"
+        case .zhDictation:
+            return AIPresetAction.organizeVoice.systemPrompt
+        case .enDictation:
+            return "Clean up this raw English voice transcript: fix punctuation, capitalization, filler words, and minor recognition errors while preserving exact meaning. Output ONLY the clean English text."
+        }
+    }
+}

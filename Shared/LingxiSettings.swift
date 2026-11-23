@@ -5,6 +5,7 @@ import Foundation
 enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case ai
     case translate
+    case voice
     case clipboard
     case layout
     case editPad
@@ -14,7 +15,8 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .ai: return "灵犀 AI"
-        case .translate: return "边打边译"
+        case .translate: return "实时翻译"
+        case .voice: return "语音互译"
         case .clipboard: return "剪贴板"
         case .layout: return "九键/26键切换"
         case .editPad: return "专业编辑台"
@@ -26,6 +28,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .ai: return "sparkles"
         case .translate: return "character.bubble"
+        case .voice: return "mic.fill"
         case .clipboard: return "doc.on.clipboard"
         case .layout: return "rectangle.grid.3x2"
         case .editPad: return "cursorarrow.and.square.on.square.dashed"
@@ -33,9 +36,9 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .undo: return "arrow.uturn.backward"
         }
     }
-    /// 是否属于左侧主功能胶囊区（AI / 译），其余归于右侧工具区
+    /// 是否属于左侧主功能胶囊区（AI / 译 / 语音），其余归于右侧工具区
     var isPrimaryLeftAction: Bool {
-        self == .ai || self == .translate
+        self == .ai || self == .translate || self == .voice
     }
 }
 
