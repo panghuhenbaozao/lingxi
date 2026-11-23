@@ -71,8 +71,9 @@ final class KeyboardViewController: UIInputViewController {
     private var isCandidatesExpanded = false
     private var pendingPhraseSegments: [(word: String, py: String)] = []
     private var lastCommittedWord: String?
-    /// 精确追踪当前宿主输入框是否存在未上屏的 markedText，避免空设引起 XPC 抖动或残留幽灵拼音。
+    /// 精确追踪当前宿主输入框是否存在未上屏的 markedText 及其字符长度，避免空设引起 XPC 抖动或残留幽灵拼音。
     private var hasActiveMarkedText = false
+    private var activeMarkedTextLength = 0
 
     // 边打边译状态（译：中文边打边流式译为目标语种）
     private var isTranslateMode = false
@@ -117,11 +118,14 @@ final class KeyboardViewController: UIInputViewController {
     private var uModeDisplayBuffer: String?
     private var isLastInputFromGlide = false
 
-    // 撤销删除与双击空格句号
+    // 撤销删除、双击空格句号与防吞字时序保护
     private var undoBuffer: (deletedText: String, wasComposing: Bool)?
     private var undoHideTimer: Timer?
     private var lastSpaceTapTime: CFTimeInterval = 0
     private var lastInternalEditTime: CFTimeInterval = 0
+    private var lastUserKeystrokeTime: CFTimeInterval = 0
+    private var lastReturnTapTime: CFTimeInterval = 0
+    private var lastHostFieldSignature: String = ""
     private var lastAdaptedTraitSignature: String = ""
 
     // 打字习惯会话聚合器（仅记录数值行为指标到 App Group，绝不含输入原文）
@@ -177,6 +181,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         KeyboardPermissionHeartbeat.record(hasFullAccess: hasFullAccess, aiConfigured: AIConfig.load().isConfigured)
         reloadConfigurationIfNeeded()
+        lastHostFieldSignature = currentHostFieldSignature
         adaptToHostTraits()
         feedback.prepare()
         refreshClipboardState()
@@ -309,22 +314,87 @@ final class KeyboardViewController: UIInputViewController {
         translateCacheOrder.removeAll(keepingCapacity: false)
     }
 
+    private var currentHostFieldSignature: String {
+        let kb = (textDocumentProxy.keyboardType ?? .default).rawValue
+        let ret = (textDocumentProxy.returnKeyType ?? .default).rawValue
+        return "\(kb)|\(ret)|\(isSecureField)"
+    }
+
+    private func markUserKeystroke() {
+        lastUserKeystrokeTime = CACurrentMediaTime()
+    }
+
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        let isExternalChange = (CACurrentMediaTime() - lastInternalEditTime) >= 0.28
-        if isExternalChange && aiPromptDraft == nil {
-            lastSelectionUndo = nil
-            hasActiveMarkedText = false
-            openDoubleQuote = false
-            openSingleQuote = false
-            adaptToHostTraits()
-            if !rawComposing.isEmpty || !englishComposing.isEmpty {
-                clearAllComposing()
-                refreshUI()
-            } else {
-                updateIdleSuggestions()
+        let now = CACurrentMediaTime()
+        let fieldSig = currentHostFieldSignature
+        let hostFieldChanged = !lastHostFieldSignature.isEmpty && lastHostFieldSignature != fieldSig
+        lastHostFieldSignature = fieldSig
+
+        let sinceInternalEdit = now - lastInternalEditTime
+        let sinceKeystroke = now - lastUserKeystrokeTime
+        let sinceReturn = now - lastReturnTapTime
+
+        if aiPromptDraft == nil {
+            if hostFieldChanged {
+                adaptToHostTraits()
+            } else if sinceInternalEdit >= InputStabilityGuard.internalEditEchoWindow {
+                adaptToHostTraits()
             }
-            autoCapitalizeIfNeeded()
+
+            let shouldClearComposing = InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: !rawComposing.isEmpty,
+                hasEnglishComposing: !englishComposing.isEmpty,
+                hasActiveMarkedText: hasActiveMarkedText,
+                hostFieldChanged: hostFieldChanged,
+                secondsSinceLastInternalEdit: sinceInternalEdit,
+                secondsSinceLastKeystroke: sinceKeystroke,
+                secondsSinceLastReturn: sinceReturn
+            )
+
+            if shouldClearComposing {
+                lastSelectionUndo = nil
+                openDoubleQuote = false
+                openSingleQuote = false
+                if hostFieldChanged {
+                    // 切换到了新输入框：旧框里的 markedText 已不适用，只重置本地标志避免往新框误发空 setMarkedText
+                    hasActiveMarkedText = false
+                    activeMarkedTextLength = 0
+                    clearAllComposing(clearMarkedInHost: false)
+                } else {
+                    clearAllComposing(clearMarkedInHost: true)
+                }
+                refreshUI()
+                autoCapitalizeIfNeeded()
+            } else {
+                // 保护正在输入中的中文/拼音不被发送后的异步 textDidChange 误清空（彻底根治点发送后莫名吞字）
+                if InputStabilityGuard.shouldClearEnglishComposingOnTextDidChange(
+                    englishComposing: englishComposing,
+                    documentBeforeInput: textDocumentProxy.documentContextBeforeInput,
+                    hostFieldChanged: hostFieldChanged,
+                    secondsSinceLastInternalEdit: sinceInternalEdit,
+                    secondsSinceLastKeystroke: sinceKeystroke,
+                    secondsSinceLastReturn: sinceReturn
+                ) {
+                    englishComposing = ""
+                    currentCandidates = []
+                    refreshToolbar()
+                }
+                if InputStabilityGuard.shouldRefreshIdleSuggestionsOnTextDidChange(
+                    hasRawComposing: !rawComposing.isEmpty,
+                    hasEnglishComposing: !englishComposing.isEmpty,
+                    hostFieldChanged: hostFieldChanged,
+                    secondsSinceLastInternalEdit: sinceInternalEdit,
+                    secondsSinceLastKeystroke: sinceKeystroke,
+                    secondsSinceLastReturn: sinceReturn
+                ) {
+                    lastSelectionUndo = nil
+                    openDoubleQuote = false
+                    openSingleQuote = false
+                    updateIdleSuggestions()
+                    autoCapitalizeIfNeeded()
+                }
+            }
         }
         updateReturnKeyAppearance()
         refreshClipboardState()
@@ -876,6 +946,7 @@ final class KeyboardViewController: UIInputViewController {
             handleCharacterInput(ch)
 
         case .segmentSeparator:
+            markUserKeystroke()
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             if !rawComposing.isEmpty && rawComposing.last != "'" {
                 rawComposing.append("'")
@@ -976,6 +1047,8 @@ final class KeyboardViewController: UIInputViewController {
         keyCenters: [Character: CGPoint],
         keyPitch: CGFloat
     ) {
+        markUserKeystroke()
+        lastSpaceTapTime = 0
         guard let engine else { return }
         clearUndoBuffer()
 
@@ -1048,12 +1121,15 @@ final class KeyboardViewController: UIInputViewController {
     private func handleT9Event(_ event: T9KeyboardCanvasView.Event) {
         switch event {
         case .digit(let d):
+            markUserKeystroke()
+            lastSpaceTapTime = 0
             feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
             clearUndoBuffer()
             rawComposing.append(d)
             recomputeCandidates()
 
         case .segmentSeparator:
+            markUserKeystroke()
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             if !rawComposing.isEmpty && rawComposing.last != "'" {
                 rawComposing.append("'")
@@ -1061,11 +1137,14 @@ final class KeyboardViewController: UIInputViewController {
             }
 
         case .selectSyllable(let syl):
+            markUserKeystroke()
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             lockedT9Syllables.append(syl)
             recomputeCandidates()
 
         case .insertSymbol(let sym):
+            markUserKeystroke()
+            lastSpaceTapTime = 0
             feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
             if !rawComposing.isEmpty {
                 if let top = currentCandidates.first {
@@ -1168,6 +1247,8 @@ final class KeyboardViewController: UIInputViewController {
     private func handleNumberPadEvent(_ event: NumberPadView.Event) {
         switch event {
         case .insertText(let str):
+            markUserKeystroke()
+            lastSpaceTapTime = 0
             feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
             let finalText = isEnglishMode
                 ? str
@@ -1182,15 +1263,17 @@ final class KeyboardViewController: UIInputViewController {
             insertFinalText(finalText, checkPairing: true)
             updateIdleSuggestions()
         case .backspace:
+            markUserKeystroke()
             feedback.triggerKeyFeedback(tone: .delete, settings: settings, hasFullAccess: hasFullAccess)
             performBackspace(isRepeat: false)
             updateIdleSuggestions()
         case .space:
+            markUserKeystroke()
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             insertFinalText(" ", checkPairing: false)
         case .returnKey:
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
-            insertFinalText("\n", checkPairing: false)
+            handleReturnTap()
         case .backToLetters:
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             switchToPanel(.letters)
@@ -1365,6 +1448,8 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: - 拼音 / 英文 / 纠错处理核心
 
     private func handleCharacterInput(_ ch: String) {
+        markUserKeystroke()
+        lastSpaceTapTime = 0
         clearUndoBuffer()
         lastSelectionUndo = nil
 
@@ -1488,6 +1573,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func handleSpaceTap() {
+        markUserKeystroke()
         lastSelectionUndo = nil
 
         if !isEnglishMode && !rawComposing.isEmpty {
@@ -1550,6 +1636,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func handleReturnTap() {
+        let now = CACurrentMediaTime()
+        lastUserKeystrokeTime = now
+        lastSpaceTapTime = 0
         lastSelectionUndo = nil
 
         if aiPromptDraft != nil && rawComposing.isEmpty {
@@ -1568,24 +1657,46 @@ final class KeyboardViewController: UIInputViewController {
             }
             return
         }
-        if let aiOrig = lastAIInsertedText,
-           let finalBefore = textDocumentProxy.documentContextBeforeInput?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !finalBefore.isEmpty, finalBefore != aiOrig, finalBefore.count <= 400 {
-            var cfg = AIConfig.load()
-            AIAutoInsightService.learnFromUserEditDiff(aiOriginal: aiOrig, userFinal: finalBefore, into: &cfg.styleDNA)
-            cfg.save()
-        }
+
+        // 先快照 AI 润色差异，避免在发送临界路径上做磁盘 I/O 阻塞 "\n" 投递
+        let aiOrigSnapshot = lastAIInsertedText
+        let beforeSnapshot = (aiOrigSnapshot != nil)
+            ? textDocumentProxy.documentContextBeforeInput?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+
+        // 发送前彻底清净残留状态，并记录 lastReturnTapTime 供 textDidChange 防吞字保护窗使用
+        lastReturnTapTime = now
         lastAIInsertedText = nil
         englishComposing = ""
         lastCommittedWord = nil
+        currentCandidates = []
+        isCandidatesExpanded = false
+        pendingPhraseSegments.removeAll()
+        openDoubleQuote = false
+        openSingleQuote = false
+        clearMarkedTextIfNeeded()
+
         // 回车 / 发送键永远直接投递给宿主输入框（微信发送、Safari 搜索、备忘录换行），绝不允许被翻译框或草稿拦截吞掉！
         performEdit {
             self.textDocumentProxy.insertText("\n")
         }
         refreshUI()
+        autoCapitalizeIfNeeded()
+
+        if let aiOrig = aiOrigSnapshot,
+           let finalBefore = beforeSnapshot,
+           !finalBefore.isEmpty, finalBefore != aiOrig, finalBefore.count <= 400 {
+            DispatchQueue.global(qos: .utility).async {
+                var cfg = AIConfig.load()
+                AIAutoInsightService.learnFromUserEditDiff(aiOriginal: aiOrig, userFinal: finalBefore, into: &cfg.styleDNA)
+                cfg.save()
+            }
+        }
     }
 
     private func performBackspace(isRepeat: Bool = false) {
+        markUserKeystroke()
+        lastSpaceTapTime = 0
         if !rawComposing.isEmpty {
             lastSelectionUndo = nil
             // 若刚刚是滑行输入生成的整词，按一次退格直接清空整段滑行拼音（Gboard / 微信输入法同款手感）
@@ -1735,7 +1846,7 @@ final class KeyboardViewController: UIInputViewController {
         refreshToolbar()
     }
 
-    private func clearAllComposing() {
+    private func clearAllComposing(clearMarkedInHost: Bool = true) {
         rawComposing = ""
         lockedT9Syllables.removeAll()
         t9LeftSyllables.removeAll()
@@ -1751,12 +1862,18 @@ final class KeyboardViewController: UIInputViewController {
         isCandidatesExpanded = false
         pendingPhraseSegments.removeAll()
         englishComposing = ""
-        clearMarkedTextIfNeeded()
+        if clearMarkedInHost {
+            clearMarkedTextIfNeeded()
+        } else {
+            hasActiveMarkedText = false
+            activeMarkedTextLength = 0
+        }
     }
 
     private func clearMarkedTextIfNeeded() {
         guard hasActiveMarkedText else { return }
         hasActiveMarkedText = false
+        activeMarkedTextLength = 0
         performEdit {
             self.textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
             self.textDocumentProxy.unmarkText()
@@ -1979,6 +2096,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         hasActiveMarkedText = true
+        activeMarkedTextLength = marked.count
         performEdit {
             self.textDocumentProxy.setMarkedText(marked, selectedRange: NSRange(location: marked.utf16.count, length: 0))
         }
@@ -1986,6 +2104,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func selectCandidate(at index: Int) {
         guard currentCandidates.indices.contains(index) else { return }
+        markUserKeystroke()
+        lastSpaceTapTime = 0
         // 选词反馈：一次按键级震动 + 一声音效即可，不再叠加 triggerCursorTick（双震会粘连）。
         feedback.triggerKeyFeedback(tone: .letter, settings: settings, hasFullAccess: hasFullAccess)
         feedback.triggerCursorSound(settings: settings)
@@ -2022,15 +2142,15 @@ final class KeyboardViewController: UIInputViewController {
 
         // 英文模式下点选补全词或滑行替换词，替换掉已输入的前缀或刚滑行上屏的词
         if isEnglishMode && cand.source == .englishDirect {
-            let deleteLen: Int
+            let expectedPrefix: String
             if !englishComposing.isEmpty {
-                deleteLen = englishComposing.count
+                expectedPrefix = englishComposing
             } else if let glideUndo = lastSelectionUndo, glideUndo.rawComposing.isEmpty, !glideUndo.committedText.isEmpty {
-                deleteLen = glideUndo.committedText.count
+                expectedPrefix = glideUndo.committedText
             } else {
-                deleteLen = 0
+                expectedPrefix = ""
             }
-            if deleteLen > 0 {
+            if !expectedPrefix.isEmpty {
                 let prevWord = lastSelectionUndo?.prevLastCommittedWord
                 englishComposing = ""
                 currentCandidates = []
@@ -2040,17 +2160,21 @@ final class KeyboardViewController: UIInputViewController {
                 let replacement = cand.word + trailing
                 if aiPromptDraft != nil {
                     var d = aiPromptDraft ?? ""
-                    if d.count >= deleteLen { d.removeLast(deleteLen) }
+                    let del = InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: expectedPrefix, documentBeforeInput: d)
+                    if del > 0 { d.removeLast(del) }
                     aiPromptDraft = d + replacement
                     refreshUI()
                 } else if isTranslateMode {
-                    if translateSourceBuffer.count >= deleteLen {
-                        translateSourceBuffer.removeLast(deleteLen)
-                    }
+                    let del = InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: expectedPrefix, documentBeforeInput: translateSourceBuffer)
+                    if del > 0 { translateSourceBuffer.removeLast(del) }
                     appendToTranslateSource(replacement)
                 } else {
+                    let safeDeleteLen = InputStabilityGuard.safeEnglishReplacementDeleteLength(
+                        expectedPrefix: expectedPrefix,
+                        documentBeforeInput: textDocumentProxy.documentContextBeforeInput
+                    )
                     performEdit {
-                        for _ in 0..<deleteLen {
+                        for _ in 0..<safeDeleteLen {
                             self.textDocumentProxy.deleteBackward()
                         }
                         self.textDocumentProxy.insertText(replacement)
@@ -2091,7 +2215,17 @@ final class KeyboardViewController: UIInputViewController {
         let outputWord = (settings.traditionalChineseEnabled && cand.source != .englishDirect)
             ? ChineseScriptConverter.toTraditional(cand.word)
             : cand.word
-        clearMarkedTextIfNeeded()
+        // 关键防吞字优化：当直接上屏到宿主输入框时，绝不先发 setMarkedText("") + unmarkText() 再 insertText（3次异步XPC易丢字），
+        // 而是由 insertText 单次原子替换并取消 markedText；仅重定向到 AI 草稿/翻译框时才单独清理宿主 markedText。
+        let replacingMarkedLen: Int
+        if aiPromptDraft == nil && !isTranslateMode {
+            replacingMarkedLen = hasActiveMarkedText ? activeMarkedTextLength : 0
+            hasActiveMarkedText = false
+            activeMarkedTextLength = 0
+        } else {
+            replacingMarkedLen = 0
+            clearMarkedTextIfNeeded()
+        }
         if isLastInputFromGlide {
             sessionGlideWords += 1
         }
@@ -2104,7 +2238,7 @@ final class KeyboardViewController: UIInputViewController {
                 sessionConfusionCounts[k, default: 0] += v
             }
         }
-        let actualInserted = insertFinalText(outputWord, checkPairing: false)
+        let actualInserted = insertFinalText(outputWord, checkPairing: false, replacingMarkedLength: replacingMarkedLen)
 
         // 若用户选择了带 Emoji 的推荐候选（如「今天好开心😊」或独立「😊」），同步记入 RecentEmojiStore
         if cand.source == .smartHelper {
@@ -2173,9 +2307,11 @@ final class KeyboardViewController: UIInputViewController {
     private func commitRawIfNeeded() {
         guard !rawComposing.isEmpty else { return }
         let clean = rawComposing.replacingOccurrences(of: "'", with: "")
-        clearAllComposing()
+        let willInsertToHost = !clean.isEmpty && aiPromptDraft == nil && !isTranslateMode
+        let replacingMarkedLen = (willInsertToHost && hasActiveMarkedText) ? activeMarkedTextLength : 0
+        clearAllComposing(clearMarkedInHost: !willInsertToHost)
         if !clean.isEmpty {
-            insertFinalText(clean, checkPairing: false)
+            insertFinalText(clean, checkPairing: false, replacingMarkedLength: replacingMarkedLen)
         }
         refreshUI()
     }
@@ -2253,7 +2389,7 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: - 文本插入、盘古空格、成对标点、AI 草稿 & 边打边译拦截
 
     @discardableResult
-    private func insertFinalText(_ text: String, checkPairing: Bool) -> String {
+    private func insertFinalText(_ text: String, checkPairing: Bool, replacingMarkedLength: Int = 0) -> String {
         if text != "\n" {
             if let draft = aiPromptDraft {
                 aiPromptDraft = draft + text
@@ -2291,22 +2427,30 @@ final class KeyboardViewController: UIInputViewController {
             }
 
             if self.shouldAllowPanguSpace,
-               (self.settings.panguSpaceLetters || self.settings.panguSpaceDigits),
-               PanguSpacer.needsLeadingSpace(
-                   beforeCursor: self.textDocumentProxy.documentContextBeforeInput,
-                   inserting: text,
-                   spaceLetters: self.settings.panguSpaceLetters,
-                   spaceDigits: self.settings.panguSpaceDigits
-               ) {
-                inserted = " " + text
-                self.textDocumentProxy.insertText(inserted)
-                return
+               text != "\n",
+               (self.settings.panguSpaceLetters || self.settings.panguSpaceDigits) {
+                var effectiveBefore = self.textDocumentProxy.documentContextBeforeInput
+                if replacingMarkedLength > 0, let rawBefore = effectiveBefore {
+                    effectiveBefore = rawBefore.count >= replacingMarkedLength
+                        ? String(rawBefore.dropLast(replacingMarkedLength))
+                        : ""
+                }
+                if PanguSpacer.needsLeadingSpace(
+                    beforeCursor: effectiveBefore,
+                    inserting: text,
+                    spaceLetters: self.settings.panguSpaceLetters,
+                    spaceDigits: self.settings.panguSpaceDigits
+                ) {
+                    inserted = " " + text
+                    self.textDocumentProxy.insertText(inserted)
+                    return
+                }
             }
 
             self.textDocumentProxy.insertText(text)
         }
-        // 打字统计与实时习惯画像采样：仅统计真实上屏文本；密码/邮箱/网址等隐私框不统计
-        if self.shouldAllowPanguSpace, !inserted.isEmpty {
+        // 打字统计与实时习惯画像采样：仅统计真实上屏文本；密码/邮箱/网址等隐私框与换行键不统计
+        if self.shouldAllowPanguSpace, !inserted.isEmpty, inserted != "\n" {
             if self.settings.typingStatsEnabled {
                 TypingStatsStore.shared.recordCommit(text: inserted)
             }

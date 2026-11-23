@@ -591,7 +591,8 @@ final class KeyboardCanvasView: UIView {
 
             switch key.kind {
             case .space:
-                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= 10) {
+                let trackpadTriggerX: CGFloat = isComposing ? 18 : 10
+                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= trackpadTriggerX) {
                     if !track.trackpadActive {
                         track.trackpadActive = true
                         track.lastTrackpadX = pt.x
@@ -672,7 +673,8 @@ final class KeyboardCanvasView: UIView {
                         && track.visitedLetterKeys.count <= 2
                         && track.pathLength < 72
                         && abs(dy) > abs(dx) * 1.5
-                    if !track.glideActive && !isShortVerticalFlick && track.visitedLetterKeys.count >= 2 && track.pathLength >= 44 {
+                    let elapsed = CACurrentMediaTime() - track.startTime
+                    if !track.glideActive && !isShortVerticalFlick && elapsed >= 0.09 && track.visitedLetterKeys.count >= 2 && track.pathLength >= 52 {
                         track.glideActive = true
                         track.flickedSecondary = false
                         track.flickedDown = false
@@ -761,10 +763,25 @@ final class KeyboardCanvasView: UIView {
     }
 
     private func flushPreviousCharacterTouches(excluding newTouch: UITouch) {
-        let toFlush = activeTouches.filter { $0.key != newTouch }
+        // 按按下时间戳严格 FIFO 顺序抢先提交，覆盖字母、标点与非触控板态空格：
+        // 彻底杜绝双手快速连打「空格 → 发送」「。 → 发送」「字母 → 空格 → 发送」时后键先触发导致吞字或漏标点。
+        let toFlush = activeTouches
+            .filter { $0.key != newTouch }
+            .sorted { $0.value.startTime < $1.value.startTime }
         for (existingTouch, track) in toFlush {
             guard let key = keys.first(where: { $0.id == track.keyID }) else { continue }
-            if case .character = key.kind, !track.longPressTriggered {
+            let shouldFlush: Bool
+            switch key.kind {
+            case .character:
+                shouldFlush = !track.longPressTriggered && !track.glideActive
+            case .punctuation:
+                shouldFlush = !track.longPressTriggered
+            case .space:
+                shouldFlush = !track.longPressTriggered && !track.trackpadActive
+            default:
+                shouldFlush = false
+            }
+            if shouldFlush {
                 cancelLongPress(for: existingTouch)
                 activeTouches.removeValue(forKey: existingTouch)
                 setKeyPressed(track.keyID, pressed: false)
@@ -837,7 +854,9 @@ final class KeyboardCanvasView: UIView {
         case .punctuation(_, let alts) where !alts.isEmpty:
             delay = 0.30
         case .space:
-            delay = 0.22
+            // 正在组词选候选期间禁用长按空格触发触控板，防止手指在空格稍停顿超过 0.22s 就把上屏空格吞掉
+            guard settings.spacebarTrackpadEnabled && !isComposing else { return }
+            delay = 0.42
         default:
             return
         }
@@ -983,6 +1002,7 @@ final class KeyboardCanvasView: UIView {
         // 2. 边缘/键缝区域：紧凑扩边（Apple 原生手感 ~5pt/键宽，防误触抢占邻键）
         //    + 动态下一合法拼音按键热区加权（降低 26% 有效距离）
         let gridW = keysContainer.bounds.width
+        let gridH = keysContainer.bounds.height
         let useDynamicBias = settings.dynamicKeyHitBoxEnabled && !validNextLetters.isEmpty && !isEnglishMode
         var best: KeyModel?
         var bestDist = CGFloat.infinity
@@ -992,6 +1012,10 @@ final class KeyboardCanvasView: UIView {
                 hitRect = CGRect(x: 0, y: hitRect.minY, width: hitRect.maxX, height: hitRect.height)
             } else if key.id == "k_l" {
                 hitRect = CGRect(x: hitRect.minX, y: hitRect.minY, width: max(hitRect.width, gridW - hitRect.minX), height: hitRect.height)
+            } else if key.id == "k_123" {
+                hitRect = CGRect(x: 0, y: hitRect.minY, width: hitRect.maxX, height: max(hitRect.height, gridH - hitRect.minY))
+            } else if key.id == "k_return" {
+                hitRect = CGRect(x: hitRect.minX, y: hitRect.minY, width: max(hitRect.width, gridW - hitRect.minX), height: max(hitRect.height, gridH - hitRect.minY))
             } else if key.id == "k_space" {
                 hitRect = key.rect.insetBy(dx: -2, dy: -4)
             }

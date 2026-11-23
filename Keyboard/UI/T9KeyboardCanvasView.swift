@@ -86,6 +86,7 @@ final class T9KeyboardCanvasView: UIView {
     private struct ActiveTouch {
         var keyID: String
         let startPoint: CGPoint
+        let startTime: CFTimeInterval
         var longPressTriggered: Bool
         var trackpadActive: Bool
         var lastTrackpadX: CGFloat
@@ -454,6 +455,7 @@ final class T9KeyboardCanvasView: UIView {
             activeTouches[touch] = ActiveTouch(
                 keyID: model.id,
                 startPoint: pt,
+                startTime: CACurrentMediaTime(),
                 longPressTriggered: false,
                 trackpadActive: false,
                 lastTrackpadX: pt.x,
@@ -478,7 +480,8 @@ final class T9KeyboardCanvasView: UIView {
 
             switch model.kind {
             case .space:
-                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= 14) {
+                let trackpadTriggerX: CGFloat = isComposing ? 20 : 14
+                if settings.spacebarTrackpadEnabled && (track.trackpadActive || abs(dx) >= trackpadTriggerX) {
                     if !track.trackpadActive {
                         track.trackpadActive = true
                         track.lastTrackpadX = pt.x
@@ -533,10 +536,21 @@ final class T9KeyboardCanvasView: UIView {
     }
 
     private func flushPreviousDigits(excluding newTouch: UITouch) {
-        let toFlush = activeTouches.filter { $0.key != newTouch }
+        let toFlush = activeTouches
+            .filter { $0.key != newTouch }
+            .sorted { $0.value.startTime < $1.value.startTime }
         for (t, track) in toFlush {
             guard let model = keyModels.first(where: { $0.id == track.keyID }) else { continue }
-            if case .digit = model.kind, !track.longPressTriggered {
+            let shouldFlush: Bool
+            switch model.kind {
+            case .digit, .clearOrComma, .separatorOrPunct:
+                shouldFlush = !track.longPressTriggered
+            case .space:
+                shouldFlush = !track.longPressTriggered && !track.trackpadActive
+            default:
+                shouldFlush = false
+            }
+            if shouldFlush {
                 cancelLongPress(for: t)
                 activeTouches.removeValue(forKey: t)
                 keyViews[track.keyID]?.setPressed(false)
@@ -587,7 +601,9 @@ final class T9KeyboardCanvasView: UIView {
         switch model.kind {
         case .backspace: delay = 0.34
         case .digit: delay = 0.42
-        case .space: delay = 0.25
+        case .space:
+            guard settings.spacebarTrackpadEnabled && !isComposing else { return }
+            delay = 0.42
         default: return
         }
 

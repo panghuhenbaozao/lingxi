@@ -2093,4 +2093,111 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(decodedLegacy.prompt, "")
         XCTAssertEqual(decodedLegacy.output, "Hello world")
     }
+
+    func testV542AntiSwallowAfterSendAndExternalTextDidChange() {
+        // 1. 微信/QQ/抖音点击「发送」后 0.35s–1.4s 宿主异步清空输入框触发 textDidChange，
+        //    用户已开始打下一句拼音时绝不可清空 rawComposing（根治点发送后莫名吞字）
+        XCTAssertFalse(
+            InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: true,
+                hasEnglishComposing: false,
+                hasActiveMarkedText: false,
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 0.35,
+                secondsSinceLastKeystroke: 0.12,
+                secondsSinceLastReturn: 0.35
+            ),
+            "点完发送 0.35s 内的宿主异步 textDidChange 绝不可吞掉用户新打的拼音"
+        )
+        XCTAssertFalse(
+            InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: true,
+                hasEnglishComposing: false,
+                hasActiveMarkedText: false,
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 0.90,
+                secondsSinceLastKeystroke: 0.25,
+                secondsSinceLastReturn: 0.90
+            ),
+            "连续输入下一句期间（即使距上次 internalEdit 已超 0.45s）绝不可清空本地拼音"
+        )
+        // 2. 默认关闭内嵌拼音（hasActiveMarkedText == false）时，同一输入框即使静默 5 秒收到新群消息触发 textDidChange，也不应吞掉本地拼音
+        XCTAssertFalse(
+            InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: true,
+                hasEnglishComposing: false,
+                hasActiveMarkedText: false,
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 5.0,
+                secondsSinceLastKeystroke: 5.0,
+                secondsSinceLastReturn: 5.0
+            ),
+            "未写入宿主 markedText 的本地拼音缓冲绝不因同一输入框异步刷新被抹除"
+        )
+        // 3. 真正切换到另一个不同类型的输入框（如聊天框 -> 搜索框/密码框）时，应当清理旧组合态
+        XCTAssertTrue(
+            InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: true,
+                hasEnglishComposing: false,
+                hasActiveMarkedText: false,
+                hostFieldChanged: true,
+                secondsSinceLastInternalEdit: 0.1,
+                secondsSinceLastKeystroke: 0.1,
+                secondsSinceLastReturn: 0.1
+            ),
+            "切换到不同类型输入框应清理旧拼音缓冲"
+        )
+        // 4. 开启内嵌拼音（hasActiveMarkedText == true）且完全闲置超过所有保护窗后，允许同步清理失效 markedText
+        XCTAssertTrue(
+            InputStabilityGuard.shouldClearComposingOnTextDidChange(
+                hasRawComposing: true,
+                hasEnglishComposing: false,
+                hasActiveMarkedText: true,
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 3.0,
+                secondsSinceLastKeystroke: 3.0,
+                secondsSinceLastReturn: 3.0
+            )
+        )
+        // 5. 英文候选替换安全退格校验：宿主发送清空后 documentBeforeInput 为空，绝不能执行盲目 deleteBackward
+        XCTAssertEqual(
+            InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: "hel", documentBeforeInput: "Say hel"),
+            3
+        )
+        XCTAssertEqual(
+            InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: "Hel", documentBeforeInput: "say hel"),
+            3
+        )
+        XCTAssertEqual(
+            InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: "hel", documentBeforeInput: ""),
+            0,
+            "宿主已清空输入框时安全退格长度必须为 0，避免吞字"
+        )
+        XCTAssertEqual(
+            InputStabilityGuard.safeEnglishReplacementDeleteLength(expectedPrefix: "hel", documentBeforeInput: "world"),
+            0,
+            "宿主光标前文本不以预期前缀结尾时绝不误删"
+        )
+        // 6. 英文直输模式 textDidChange 失同步判定：宿主还以该前缀结尾时保留，宿主已清空且过静默窗后清理
+        XCTAssertFalse(
+            InputStabilityGuard.shouldClearEnglishComposingOnTextDidChange(
+                englishComposing: "hel",
+                documentBeforeInput: "hel",
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 1.0,
+                secondsSinceLastKeystroke: 1.0,
+                secondsSinceLastReturn: 5.0
+            )
+        )
+        XCTAssertTrue(
+            InputStabilityGuard.shouldClearEnglishComposingOnTextDidChange(
+                englishComposing: "hel",
+                documentBeforeInput: "",
+                hostFieldChanged: false,
+                secondsSinceLastInternalEdit: 1.0,
+                secondsSinceLastKeystroke: 1.0,
+                secondsSinceLastReturn: 5.0
+            )
+        )
+    }
 }
