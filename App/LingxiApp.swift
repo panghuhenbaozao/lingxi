@@ -11,10 +11,18 @@ struct LingxiApp: App {
             ContentView()
                 .environmentObject(appState)
                 .onOpenURL { url in
-                    if url.scheme == "lingxi", url.host == "auth-callback" {
+                    guard url.scheme == "lingxi" else { return }
+                    switch url.host {
+                    case "auth-callback":
                         Task {
                             try? await appState.completeApplePasskeySignIn(callbackURL: url)
                         }
+                    case "ai-settings":
+                        appState.requestedTab = 2
+                    case "permissions":
+                        appState.showPermissionsCenter = true
+                    default:
+                        break
                     }
                 }
                 .onChange(of: scenePhase) { newPhase in

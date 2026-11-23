@@ -83,26 +83,47 @@ enum GeminiModelOption: String, CaseIterable, Identifiable {
     }
 }
 
-/// 从远端服务商 API 动态拉取到的模型元数据。
+/// 从远端服务商 API 动态拉取到的模型元数据（完整保留原始 ID、显示名称、所属方与类型标签，绝不截断）。
 struct AIModelInfo: Codable, Identifiable, Equatable {
     var id: String
     var displayName: String
     var supportsThinking: Bool = false
     var contextLength: Int? = nil
     var provider: AIProvider = .openAICompatible
+    var isChatModel: Bool = true
+    var ownedBy: String? = nil
 
     init(
         id: String,
         displayName: String? = nil,
         supportsThinking: Bool = false,
         contextLength: Int? = nil,
-        provider: AIProvider = .openAICompatible
+        provider: AIProvider = .openAICompatible,
+        isChatModel: Bool = true,
+        ownedBy: String? = nil
     ) {
         self.id = id
-        self.displayName = (displayName?.isEmpty == false) ? displayName! : id
+        let cleanDisplay = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.displayName = cleanDisplay.isEmpty ? id : cleanDisplay
         self.supportsThinking = supportsThinking
         self.contextLength = contextLength
         self.provider = provider
+        self.isChatModel = isChatModel
+        let cleanOwner = ownedBy?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ownedBy = (cleanOwner?.isEmpty == false) ? cleanOwner : nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedID = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        self.id = decodedID
+        let rawDisplay = try c.decodeIfPresent(String.self, forKey: .displayName) ?? ""
+        self.displayName = rawDisplay.isEmpty ? decodedID : rawDisplay
+        self.supportsThinking = try c.decodeIfPresent(Bool.self, forKey: .supportsThinking) ?? false
+        self.contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
+        self.provider = try c.decodeIfPresent(AIProvider.self, forKey: .provider) ?? .openAICompatible
+        self.isChatModel = try c.decodeIfPresent(Bool.self, forKey: .isChatModel) ?? true
+        self.ownedBy = try c.decodeIfPresent(String.self, forKey: .ownedBy)
     }
 }
 
@@ -600,6 +621,7 @@ struct AIConfig: Codable, Equatable {
     var fastModel: String = ""
     var deepModel: String = ""
     var fetchedModels: [AIModelInfo] = []
+    var fetchedModelsSourceKey: String = ""
     var customHeaders: [String: String] = [:]
 
     // 思考模式与高级生成参数
@@ -641,6 +663,7 @@ struct AIConfig: Codable, Equatable {
         fastModel = try c.decodeIfPresent(String.self, forKey: .fastModel) ?? ""
         deepModel = try c.decodeIfPresent(String.self, forKey: .deepModel) ?? ""
         fetchedModels = try c.decodeIfPresent([AIModelInfo].self, forKey: .fetchedModels) ?? []
+        fetchedModelsSourceKey = try c.decodeIfPresent(String.self, forKey: .fetchedModelsSourceKey) ?? ""
         customHeaders = try c.decodeIfPresent([String: String].self, forKey: .customHeaders) ?? [:]
         thinkingMode = try c.decodeIfPresent(AIThinkingMode.self, forKey: .thinkingMode) ?? .auto
         thinkingBudget = max(0, min(32768, try c.decodeIfPresent(Int.self, forKey: .thinkingBudget) ?? 2048))
@@ -698,7 +721,26 @@ struct AIConfig: Codable, Equatable {
         )
         _ = AppGroup.writeJSON(syncPayload, to: Self.promptsSyncFileName, protected: true)
         _ = AppGroup.writeJSON(styleDNA, to: PersonalStyleDNA.fileName, protected: true)
-        return AppGroup.writeJSON(self, to: Self.fileName, protected: true)
+        let ok = AppGroup.writeJSON(self, to: Self.fileName, protected: true)
+        if ok {
+            AppGroupNotifications.post(AppGroupNotifications.aiConfigChanged)
+        }
+        return ok
+    }
+
+    var activeBaseURL: String {
+        switch provider {
+        case .gemini:
+            let u = geminiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            return u.isEmpty ? Self.defaultGeminiBaseURL : u
+        case .openAICompatible:
+            return openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    /// 标识当前渠道 + 接口地址的稳定指纹，避免切渠道后误把旧渠道的模型缓存当成新渠道模型列表。
+    var currentModelsSourceKey: String {
+        "\(provider.rawValue)|\(activeBaseURL.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/")))"
     }
 
     var activeAPIKey: String {
@@ -794,6 +836,7 @@ struct AIConfig: Codable, Equatable {
         thinkingMode = profile.thinkingMode
         thinkingBudget = profile.thinkingBudget
         fetchedModels = profile.fetchedModels
+        fetchedModelsSourceKey = profile.fetchedModels.isEmpty ? "" : currentModelsSourceKey
         customHeaders = profile.customHeaders
     }
 }

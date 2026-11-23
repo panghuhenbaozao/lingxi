@@ -48,9 +48,17 @@ final class AppState: ObservableObject {
     @Published var customWords: [CustomWordEntry] = []
     @Published var userWords: [UserWordEntry] = []
     @Published var isKeyboardEnabled: Bool = false
+    @Published var keyboardHeartbeat: KeyboardPermissionHeartbeat? = KeyboardPermissionHeartbeat.load()
+    @Published var requestedTab: Int? = nil
+    @Published var showPermissionsCenter: Bool = false
     @Published var typingStatsSummary: TypingStatsStore.Summary = TypingStatsStore.shared.summary()
     @Published var customBgPreview: UIImage?
     @Published var userAvatarImage: UIImage?
+
+    /// 键盘已通过心跳回传确认「允许完全访问」处于开启状态
+    var isKeyboardFullAccessConfirmed: Bool {
+        keyboardHeartbeat?.hasFullAccess == true
+    }
 
     static let userAvatarFileName = "lingxi_user_avatar.jpg"
 
@@ -60,6 +68,7 @@ final class AppState: ObservableObject {
     private var themeDarwinObserver: AppGroupNotifications.Observer?
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
     private var statsDarwinObserver: AppGroupNotifications.Observer?
+    private var permissionsDarwinObserver: AppGroupNotifications.Observer?
 
     init() {
         self.settings = LingxiSettings.load(force: true)
@@ -86,6 +95,12 @@ final class AppState: ObservableObject {
                 self?.reloadTypingStatsSummary()
             }
         }
+        permissionsDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.permissionsChanged) { [weak self] in
+            Task { @MainActor in
+                self?.keyboardHeartbeat = KeyboardPermissionHeartbeat.load()
+                self?.isKeyboardEnabled = self?.checkKeyboardEnabled() ?? false
+            }
+        }
     }
 
     func reloadTypingStatsSummary() {
@@ -94,17 +109,19 @@ final class AppState: ObservableObject {
         habitProfile = TypingHabitTracker.shared.currentProfile()
     }
 
-    /// 免费侧载无 App Group 时：先将主 App 外观/设置推送到云端，再把云桥接凭证复制到剪贴板供键盘一键自动认领。
+    /// 免费侧载无 App Group 时：将主 App 的 AI 密钥/模型、外观、设置（以及已登录时的云端桥接凭证）打包为一次性直传口令复制到剪贴板，切出灵犀键盘即秒速生效。
     func copySideloadBridgeTokenAndSync() async -> (ok: Bool, message: String) {
-        guard isCloudAuthenticated else {
-            return (false, "请先登录国内直连云端账号，再启用免费侧载云桥接。")
+        if isCloudAuthenticated {
+            _ = try? await syncCloudNow()
         }
-        _ = try? await syncCloudNow()
-        guard let token = SideloadConfigBridge.exportPairingTokenFromMainApp() else {
-            return (false, "未找到云端 API Key，请先在「灵犀账号」点击轮换 API Key 后重试。")
+        guard let token = SideloadConfigBridge.exportLocalConfigHandoffTokenFromMainApp() else {
+            return (false, "生成同步口令失败，请稍后重试。")
         }
         UIPasteboard.general.string = token
-        return (true, "✓ 已同步最新外观上云并复制配对凭证！切出灵犀键盘即可自动认领并同步外观与字数。")
+        if isCloudAuthenticated {
+            return (true, "✓ 已同步云端并复制直传口令（含 AI 密钥、模型、外观与设置）！切出灵犀键盘即可自动认领生效。")
+        }
+        return (true, "✓ 已复制本机直传口令（含 AI 密钥、模型、外观与设置）！切出灵犀键盘（需开启完全访问）即可自动导入生效。")
     }
 
     /// 响应键盘扩展发出的 Darwin 跨进程变更通知或切 Tab 时静默拉平 App 与键盘的外观/设置/字数状态，绝不反向覆盖写盘。
@@ -150,6 +167,7 @@ final class AppState: ObservableObject {
         secureVaultItems = SecureSnippetVault.loadAll()
         aiUsageLedger = AIUsageLedgerStore.load()
         isKeyboardEnabled = checkKeyboardEnabled()
+        keyboardHeartbeat = KeyboardPermissionHeartbeat.load()
         loadCustomBackgroundPreview()
         loadUserAvatar()
     }
@@ -390,8 +408,13 @@ final class AppState: ObservableObject {
         isFetchingAIModels = true
         defer { isFetchingAIModels = false }
         let snapshot = aiConfig
-        let models = try await AIClient(timeout: 25).fetchModels(config: snapshot)
+        let models = try await AIClient(timeout: 35).fetchModels(config: snapshot)
         aiConfig.fetchedModels = models
+        aiConfig.fetchedModelsSourceKey = snapshot.currentModelsSourceKey
+        if let aid = aiConfig.activeProfileID,
+           let idx = aiConfig.profiles.firstIndex(where: { $0.id == aid }) {
+            aiConfig.profiles[idx].fetchedModels = models
+        }
         return models
     }
 

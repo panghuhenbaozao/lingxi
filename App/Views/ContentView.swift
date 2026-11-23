@@ -40,5 +40,15 @@ struct ContentView: View {
         .onChange(of: selectedTab) { _ in
             appState.reloadSharedThemeAndSettingsIfNeeded()
         }
+        .onChange(of: appState.requestedTab) { target in
+            if let target {
+                selectedTab = target
+                appState.requestedTab = nil
+            }
+        }
+        .sheet(isPresented: $appState.showPermissionsCenter) {
+            PermissionsCenterSheet()
+                .environmentObject(appState)
+        }
     }
 }

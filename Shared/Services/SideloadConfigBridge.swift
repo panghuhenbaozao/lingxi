@@ -16,6 +16,32 @@ public enum SideloadConfigBridge {
         public let email: String
         public let apiKey: String
         public let e2eeSalt: String
+        /// 本机剪贴板直传快照（仅在同机主 App → 键盘扩展间一次性中转，不经服务器明文传输）
+        public let aiConfigJSON: Data?
+        public let themeJSON: Data?
+        public let settingsJSON: Data?
+
+        public init(
+            serverBaseURL: String,
+            userID: String,
+            username: String,
+            email: String,
+            apiKey: String,
+            e2eeSalt: String,
+            aiConfigJSON: Data? = nil,
+            themeJSON: Data? = nil,
+            settingsJSON: Data? = nil
+        ) {
+            self.serverBaseURL = serverBaseURL
+            self.userID = userID
+            self.username = username
+            self.email = email
+            self.apiKey = apiKey
+            self.e2eeSalt = e2eeSalt
+            self.aiConfigJSON = aiConfigJSON
+            self.themeJSON = themeJSON
+            self.settingsJSON = settingsJSON
+        }
     }
 
     public struct BridgeState: Codable, Equatable {
@@ -36,7 +62,7 @@ public enum SideloadConfigBridge {
         loadState().isPaired && CloudBackendClient.shared.isRealCloudAuthenticated
     }
 
-    /// 主 App 生成供键盘一键认领的加密云同步配对串（含国内直连地址、API Key 与端侧 E2EE 盐）。
+    /// 主 App 生成供键盘一键认领的加密云同步 + 本机 AI/外观/设置直传配对串（含云端凭证时同时打通持续云同步）。
     public static func exportPairingTokenFromMainApp() -> String? {
         guard CloudBackendClient.shared.isRealCloudAuthenticated,
               let apiKey = CloudCredentialStore.loadAPIKey(),
@@ -45,13 +71,65 @@ public enum SideloadConfigBridge {
         }
         let cfg = CloudBackendConfig.load()
         guard !cfg.userID.isEmpty else { return nil }
-        let payload = PairingPayload(
+        return encodePairingToken(
             serverBaseURL: cfg.normalizedBaseURL,
             userID: cfg.userID,
             username: cfg.username,
             email: cfg.email,
             apiKey: apiKey,
-            e2eeSalt: cfg.e2eeSalt
+            e2eeSalt: cfg.e2eeSalt,
+            includeLocalSnapshots: true
+        )
+    }
+
+    /// 即使未登录云端，也支持将主 App 的 AI 密钥/模型 + 外观 + 设置打包为同机一次性直传口令（供免费侧载键盘零门槛同步 AI）。
+    public static func exportLocalConfigHandoffTokenFromMainApp() -> String? {
+        if let full = exportPairingTokenFromMainApp() {
+            return full
+        }
+        return encodePairingToken(
+            serverBaseURL: "",
+            userID: "",
+            username: "",
+            email: "",
+            apiKey: "",
+            e2eeSalt: "",
+            includeLocalSnapshots: true
+        )
+    }
+
+    private static func encodePairingToken(
+        serverBaseURL: String,
+        userID: String,
+        username: String,
+        email: String,
+        apiKey: String,
+        e2eeSalt: String,
+        includeLocalSnapshots: Bool
+    ) -> String? {
+        var aiData: Data?
+        var themeData: Data?
+        var settingsData: Data?
+        if includeLocalSnapshots {
+            let encoder = JSONEncoder()
+            var aiSnap = AIConfig.load()
+            // 避免把数百条远端模型列表塞入剪贴板口令，仅同步核心密钥、当前模型、思考模式与提示词
+            aiSnap.fetchedModels = []
+            aiSnap.profiles = []
+            aiData = try? encoder.encode(aiSnap)
+            themeData = try? encoder.encode(ThemeCustomization.load(force: true))
+            settingsData = try? encoder.encode(LingxiSettings.load(force: true))
+        }
+        let payload = PairingPayload(
+            serverBaseURL: serverBaseURL,
+            userID: userID,
+            username: username,
+            email: email,
+            apiKey: apiKey,
+            e2eeSalt: e2eeSalt,
+            aiConfigJSON: aiData,
+            themeJSON: themeData,
+            settingsJSON: settingsData
         )
         guard let data = try? JSONEncoder().encode(payload) else { return nil }
         let b64u = data.base64EncodedString()
@@ -72,30 +150,61 @@ public enum SideloadConfigBridge {
         let rem = b64.count % 4
         if rem > 0 { b64 += String(repeating: "=", count: 4 - rem) }
         guard let data = Data(base64Encoded: b64),
-              let payload = try? JSONDecoder().decode(PairingPayload.self, from: data),
-              !payload.apiKey.isEmpty,
-              !payload.userID.isEmpty else {
+              let payload = try? JSONDecoder().decode(PairingPayload.self, from: data) else {
             return false
         }
 
-        CloudCredentialStore.saveAPIKey(payload.apiKey)
-        var cfg = CloudBackendConfig.load()
-        cfg.serverBaseURL = payload.serverBaseURL
-        cfg.userID = payload.userID
-        cfg.username = payload.username
-        cfg.email = payload.email
-        cfg.e2eeSalt = payload.e2eeSalt
-        cfg.apiKeyPrefix = String(payload.apiKey.prefix(14)) + "..."
-        cfg.isLocalOnlyAccount = false
-        cfg.save()
+        let hasCloudCreds = !payload.apiKey.isEmpty && !payload.userID.isEmpty
+        var importedParts: [String] = []
 
-        var relay = ClipboardRelayConfig.load()
-        relay.syncTransportMode = .e2eeCloud
-        relay.save()
+        if hasCloudCreds {
+            CloudCredentialStore.saveAPIKey(payload.apiKey)
+            var cfg = CloudBackendConfig.load()
+            cfg.serverBaseURL = payload.serverBaseURL
+            cfg.userID = payload.userID
+            cfg.username = payload.username
+            cfg.email = payload.email
+            cfg.e2eeSalt = payload.e2eeSalt
+            cfg.apiKeyPrefix = String(payload.apiKey.prefix(14)) + "..."
+            cfg.isLocalOnlyAccount = false
+            cfg.save()
+
+            var relay = ClipboardRelayConfig.load()
+            relay.syncTransportMode = .e2eeCloud
+            relay.save()
+            importedParts.append("云端桥接")
+        }
+
+        let decoder = JSONDecoder()
+        if let aiData = payload.aiConfigJSON,
+           var incomingAI = try? decoder.decode(AIConfig.self, from: aiData) {
+            let existing = AIConfig.load()
+            if incomingAI.fetchedModels.isEmpty {
+                incomingAI.fetchedModels = existing.fetchedModels
+            }
+            if incomingAI.profiles.isEmpty {
+                incomingAI.profiles = existing.profiles
+            }
+            _ = incomingAI.save()
+            importedParts.append("AI配置")
+        }
+        if let themeData = payload.themeJSON,
+           let incomingTheme = try? decoder.decode(ThemeCustomization.self, from: themeData) {
+            _ = incomingTheme.save()
+            importedParts.append("外观")
+        }
+        if let settingsData = payload.settingsJSON,
+           let incomingSettings = try? decoder.decode(LingxiSettings.self, from: settingsData) {
+            _ = incomingSettings.save()
+            importedParts.append("设置")
+        }
+
+        guard !importedParts.isEmpty else { return false }
 
         var st = loadState()
-        st.isPaired = true
-        st.lastSummary = "已绑定云桥接账号（\(payload.username.isEmpty ? "灵犀用户" : payload.username)）"
+        if hasCloudCreds { st.isPaired = true }
+        st.lastSyncedAt = Date()
+        st.lastSummary = "已导入 \(importedParts.joined(separator: "、"))"
         saveState(st)
         return true
     }

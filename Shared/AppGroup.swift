@@ -6,6 +6,8 @@ enum AppGroupNotifications {
     static let themeChanged = "com.lingxi.ime.themeChanged"
     static let settingsChanged = "com.lingxi.ime.settingsChanged"
     static let statsChanged = "com.lingxi.ime.statsChanged"
+    static let aiConfigChanged = "com.lingxi.ime.aiConfigChanged"
+    static let permissionsChanged = "com.lingxi.ime.permissionsChanged"
 
     static func post(_ name: String) {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
@@ -241,5 +243,34 @@ enum AppGroup {
         let provURL = bundleURL.appendingPathComponent("embedded.mobileprovision")
         guard let data = try? Data(contentsOf: provURL) else { return [] }
         return parseAppGroupsFromMobileProvisionData(data)
+    }
+}
+
+/// 键盘扩展权限与状态心跳（由于 iOS 禁止主 App 直接探测键盘的 hasFullAccess，由键盘在 viewWillAppear 写入共享容器供主 App 实时感知）。
+struct KeyboardPermissionHeartbeat: Codable, Equatable {
+    var hasFullAccess: Bool = false
+    var appGroupAvailable: Bool = false
+    var aiConfigured: Bool = false
+    var updatedAt: Date = Date()
+
+    static let fileName = "lingxi_keyboard_heartbeat.json"
+
+    static func load() -> KeyboardPermissionHeartbeat? {
+        AppGroup.readJSON(KeyboardPermissionHeartbeat.self, from: fileName)
+    }
+
+    @discardableResult
+    static func record(hasFullAccess: Bool, aiConfigured: Bool) -> Bool {
+        let heartbeat = KeyboardPermissionHeartbeat(
+            hasFullAccess: hasFullAccess,
+            appGroupAvailable: AppGroup.isAvailable,
+            aiConfigured: aiConfigured,
+            updatedAt: Date()
+        )
+        let ok = AppGroup.writeJSON(heartbeat, to: fileName, protected: false)
+        if ok {
+            AppGroupNotifications.post(AppGroupNotifications.permissionsChanged)
+        }
+        return ok
     }
 }

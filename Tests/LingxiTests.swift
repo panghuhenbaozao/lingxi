@@ -1888,4 +1888,139 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(CloudBackendConfig.load().e2eeSalt, "abcdef0123456789abcdef0123456789")
         XCTAssertTrue(SideloadConfigBridge.isPairedInThisProcess)
     }
+
+    func testV521AIModelDiscoveryAllPagesShapesFullNamesAndSideloadAIHandoff() throws {
+        // 1. Gemini 分页解析（保留 nextPageToken + 100% 保留非对话模型并标注 isChatModel，绝不截断完整 ID / displayName）
+        let geminiPage1 = Data("""
+        {
+          "models": [
+            {"name": "models/gemini-2.5-pro-preview-06-05", "displayName": "Gemini 2.5 Pro Preview 06-05", "inputTokenLimit": 1048576, "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/text-embedding-004", "displayName": "Text Embedding 004", "supportedGenerationMethods": ["embedContent"]},
+            {"name": "models/imagen-3.0-generate-002", "displayName": "Imagen 3.0", "supportedGenerationMethods": ["predict"]}
+          ],
+          "nextPageToken": "page_tok_2"
+        }
+        """.utf8)
+        let parsedGemini = AIClient.parseGeminiModelsPage(geminiPage1, includeNonChat: true)
+        XCTAssertEqual(parsedGemini.models.count, 3)
+        XCTAssertEqual(parsedGemini.nextPageToken, "page_tok_2")
+        XCTAssertEqual(parsedGemini.models[0].id, "gemini-2.5-pro-preview-06-05")
+        XCTAssertEqual(parsedGemini.models[0].displayName, "Gemini 2.5 Pro Preview 06-05")
+        XCTAssertTrue(parsedGemini.models[0].isChatModel)
+        XCTAssertFalse(parsedGemini.models[1].isChatModel)
+        XCTAssertFalse(parsedGemini.models[2].isChatModel)
+
+        // Gemini 中转站返回 OpenAI {"data":[...]} 格式兜底
+        let geminiRelayOpenAI = Data("""
+        {"data": [{"id": "gemini-2.5-flash", "name": "Google: Gemini 2.5 Flash", "context_length": 1000000}]}
+        """.utf8)
+        let parsedGeminiRelay = AIClient.parseGeminiModelsPage(geminiRelayOpenAI, includeNonChat: true)
+        XCTAssertEqual(parsedGeminiRelay.models.count, 1)
+        XCTAssertEqual(parsedGeminiRelay.models.first?.id, "gemini-2.5-flash")
+        XCTAssertEqual(parsedGeminiRelay.models.first?.displayName, "Google: Gemini 2.5 Flash")
+
+        // 2. OpenAI 兼容多形态响应（标准分页 + 超长完整模型名 + displayName + ownedBy + 顶层数组 + 嵌套 data.models + 字符串数组）
+        let openAIRich = Data("""
+        {
+          "data": [
+            {
+              "id": "Pro/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+              "name": "DeepSeek R1 Distill Qwen 32B (Pro)",
+              "owned_by": "siliconflow",
+              "top_provider": {"context_length": 131072},
+              "supported_parameters": ["reasoning"]
+            },
+            {"id": "BAAI/bge-m3", "owned_by": "BAAI"},
+            {"id": "whisper-1", "owned_by": "openai"}
+          ],
+          "has_more": true,
+          "last_id": "whisper-1"
+        }
+        """.utf8)
+        let oPage = AIClient.parseOpenAIModelsPage(openAIRich, includeNonChat: true)
+        XCTAssertEqual(oPage.models.count, 3, "拉取远端模型时应保留全部 3 个模型，不可静默丢弃")
+        XCTAssertTrue(oPage.hasMore)
+        XCTAssertEqual(oPage.lastID, "whisper-1")
+        XCTAssertEqual(oPage.models[0].id, "Pro/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
+        XCTAssertEqual(oPage.models[0].displayName, "DeepSeek R1 Distill Qwen 32B (Pro)")
+        XCTAssertEqual(oPage.models[0].ownedBy, "siliconflow")
+        XCTAssertEqual(oPage.models[0].contextLength, 131072)
+        XCTAssertTrue(oPage.models[0].supportsThinking)
+        XCTAssertTrue(oPage.models[0].isChatModel)
+        XCTAssertFalse(oPage.models[1].isChatModel)
+        XCTAssertFalse(oPage.models[2].isChatModel)
+
+        let topLevelArray = Data("""
+        [{"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "display_name": "Llama 3.3 70B Instruct Turbo"}]
+        """.utf8)
+        XCTAssertEqual(AIClient.parseOpenAIModelsPage(topLevelArray, includeNonChat: true).models.first?.displayName, "Llama 3.3 70B Instruct Turbo")
+
+        let nestedDataModels = Data("""
+        {"data": {"models": [{"model": "qwen3-235b-a22b", "title": "通义千问 Qwen3-235B"}]}}
+        """.utf8)
+        let nestedParsed = AIClient.parseOpenAIModelsPage(nestedDataModels, includeNonChat: true)
+        XCTAssertEqual(nestedParsed.models.first?.id, "qwen3-235b-a22b")
+        XCTAssertEqual(nestedParsed.models.first?.displayName, "通义千问 Qwen3-235B")
+
+        let stringArray = Data("""
+        ["gpt-4.1", "o4-mini"]
+        """.utf8)
+        XCTAssertEqual(AIClient.parseOpenAIModelsPage(stringArray, includeNonChat: true).models.count, 2)
+
+        // 3. 大规模 300 模型完整持久化无截断验证
+        let prevAI = AIConfig.load()
+        defer { _ = prevAI.save() }
+        var bulkCfg = AIConfig()
+        bulkCfg.fetchedModels = (1...300).map { i in
+            AIModelInfo(
+                id: "org-\(i)/very-long-model-name-preview-2026-0\(i % 9 + 1)-v\(i)",
+                displayName: "Model Full Display Name #\(i)",
+                supportsThinking: i % 3 == 0,
+                contextLength: 128_000,
+                provider: .openAICompatible,
+                isChatModel: i % 10 != 0,
+                ownedBy: "provider-\(i % 5)"
+            )
+        }
+        XCTAssertTrue(bulkCfg.save())
+        let reloadedBulk = AIConfig.load()
+        XCTAssertEqual(reloadedBulk.fetchedModels.count, 300)
+        XCTAssertEqual(reloadedBulk.fetchedModels.last?.id, "org-300/very-long-model-name-preview-2026-01-v300")
+        XCTAssertEqual(reloadedBulk.fetchedModels.last?.displayName, "Model Full Display Name #300")
+
+        // 4. 免费侧载无云登录状态下也可通过本机直传口令把 AI 密钥/模型同步给键盘 + 键盘权限心跳往返
+        let prevCloud = CloudBackendConfig.load()
+        defer {
+            prevCloud.save()
+            CloudCredentialStore.clearAll()
+        }
+        CloudCredentialStore.clearAll()
+        var loggedOut = CloudBackendConfig()
+        loggedOut.save()
+
+        var srcAI = AIConfig()
+        srcAI.provider = .openAICompatible
+        srcAI.openAIBaseURL = "https://openrouter.ai/api/v1"
+        srcAI.openAIAPIKey = "sk-or-v1-test-handoff-key-999"
+        srcAI.openAIModel = "anthropic/claude-sonnet-4"
+        _ = srcAI.save()
+
+        let localToken = try XCTUnwrap(SideloadConfigBridge.exportLocalConfigHandoffTokenFromMainApp())
+        XCTAssertTrue(ClipboardClassifier.isSensitiveContent(localToken))
+
+        // 清空本地 AI 配置，模拟键盘端导入
+        var emptyAI = AIConfig()
+        _ = emptyAI.save()
+        XCTAssertFalse(AIConfig.load().isConfigured)
+        XCTAssertTrue(SideloadConfigBridge.importPairingToken(localToken))
+        let importedAI = AIConfig.load()
+        XCTAssertTrue(importedAI.isConfigured)
+        XCTAssertEqual(importedAI.openAIAPIKey, "sk-or-v1-test-handoff-key-999")
+        XCTAssertEqual(importedAI.openAIModel, "anthropic/claude-sonnet-4")
+
+        XCTAssertTrue(KeyboardPermissionHeartbeat.record(hasFullAccess: true, aiConfigured: true))
+        let hb = try XCTUnwrap(KeyboardPermissionHeartbeat.load())
+        XCTAssertTrue(hb.hasFullAccess)
+        XCTAssertTrue(hb.aiConfigured)
+    }
 }

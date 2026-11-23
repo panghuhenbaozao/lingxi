@@ -14,6 +14,9 @@ final class AIAssistantPanelView: UIView {
     var onInsertText: ((String) -> Void)?
     var onReplaceBeforeCursor: ((Int, String) -> Void)?
     var onRequestPromptInput: (() -> Void)?
+    var onOpenFullAccessSettings: ((@escaping (Bool) -> Void) -> Void)?
+    var onOpenHostAppAI: ((@escaping (Bool) -> Void) -> Void)?
+    var onImportBridgeToken: (() -> Bool)?
     var onClose: (() -> Void)?
 
     private let client = AIClient()
@@ -67,6 +70,11 @@ final class AIAssistantPanelView: UIView {
     // 博弈军师三策略卡片区
     private let strategistScroll = LingxiScrollView()
     private let strategistStack = UIStackView()
+
+    // 权限 / 配置一键修复操作条（未开启完全访问或未同步 Key 时显式展示）
+    private let permissionBar = UIStackView()
+    private let permissionPrimaryButton = ActionClosureButton(type: .system)
+    private let permissionSecondaryButton = ActionClosureButton(type: .system)
 
     private let refineScroll = LingxiScrollView()
     private let refineStack = UIStackView()
@@ -218,6 +226,33 @@ final class AIAssistantPanelView: UIView {
         strategistStack.alignment = .fill
         strategistScroll.addSubview(strategistStack)
 
+        permissionBar.axis = .horizontal
+        permissionBar.spacing = 6
+        permissionBar.distribution = .fill
+        permissionBar.isHidden = true
+        addSubview(permissionBar)
+
+        permissionPrimaryButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .bold)
+        permissionPrimaryButton.layer.cornerRadius = 9
+        permissionPrimaryButton.layer.cornerCurve = .continuous
+        permissionPrimaryButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        permissionPrimaryButton.actionHandler = { [weak self] in
+            self?.handlePermissionPrimaryTap()
+        }
+        permissionBar.addArrangedSubview(permissionPrimaryButton)
+
+        permissionSecondaryButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        permissionSecondaryButton.layer.cornerRadius = 9
+        permissionSecondaryButton.layer.cornerCurve = .continuous
+        permissionSecondaryButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        permissionSecondaryButton.setContentHuggingPriority(.required, for: .horizontal)
+        permissionSecondaryButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        permissionSecondaryButton.isHidden = true
+        permissionSecondaryButton.actionHandler = { [weak self] in
+            self?.handlePermissionSecondaryTap()
+        }
+        permissionBar.addArrangedSubview(permissionSecondaryButton)
+
         refineScroll.showsHorizontalScrollIndicator = false
         refineScroll.isHidden = true
         addSubview(refineScroll)
@@ -307,16 +342,24 @@ final class AIAssistantPanelView: UIView {
         let bottomH: CGFloat = 34
         bottomBar.frame = CGRect(x: pad, y: bounds.height - bottomH - 6, width: bounds.width - pad * 2, height: bottomH)
 
+        var contentBottom = bottomBar.frame.minY
+
         let refineH: CGFloat = refineScroll.isHidden ? 0 : 28
         if !refineScroll.isHidden {
-            refineScroll.frame = CGRect(x: 0, y: bottomBar.frame.minY - refineH - 4, width: bounds.width, height: refineH)
+            refineScroll.frame = CGRect(x: 0, y: contentBottom - refineH - 4, width: bounds.width, height: refineH)
             let rw = ceil(refineStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
             refineStack.frame = CGRect(x: pad, y: 0, width: rw, height: refineH)
             refineScroll.contentSize = CGSize(width: max(bounds.width, rw + pad * 2), height: refineH)
+            contentBottom = refineScroll.frame.minY
+        }
+
+        if !permissionBar.isHidden {
+            let permH: CGFloat = 34
+            permissionBar.frame = CGRect(x: pad, y: contentBottom - permH - 5, width: bounds.width - pad * 2, height: permH)
+            contentBottom = permissionBar.frame.minY
         }
 
         var contentY = actionsScroll.frame.maxY + 5
-        let contentBottom = refineScroll.isHidden ? bottomBar.frame.minY : refineScroll.frame.minY
 
         if !thoughtToggleButton.isHidden {
             thoughtToggleButton.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: 22)
@@ -521,6 +564,11 @@ final class AIAssistantPanelView: UIView {
 
         insertButton.backgroundColor = theme.accentFill
         insertButton.setTitleColor(theme.accentText, for: .normal)
+
+        permissionPrimaryButton.backgroundColor = theme.accentFill
+        permissionPrimaryButton.setTitleColor(theme.accentText, for: .normal)
+        permissionSecondaryButton.backgroundColor = theme.specialKeyFill
+        permissionSecondaryButton.setTitleColor(theme.keyText, for: .normal)
     }
 
     private func rebuildActionButtons(theme: ResolvedTheme) {
@@ -631,6 +679,73 @@ final class AIAssistantPanelView: UIView {
         setNeedsLayout()
     }
 
+    /// 外部配置更新（Darwin 通知或刚从剪贴板导入口令）时立即刷新权限按钮与提示状态。
+    func refreshAfterConfigChange(hasFullAccess: Bool) {
+        self.hasFullAccess = hasFullAccess
+        refreshTopQuickPills()
+        reloadPromptsAndRecommendation()
+        if let theme {
+            applyTheme(theme)
+            rebuildActionButtons(theme: theme)
+        }
+        if generatedText.isEmpty && strategistResult == nil {
+            showIdleGuidance()
+        } else {
+            refreshPermissionBarVisibility()
+        }
+    }
+
+    private func refreshPermissionBarVisibility() {
+        let config = AIConfig.load()
+        if !hasFullAccess {
+            permissionBar.isHidden = false
+            permissionPrimaryButton.setTitle("🔓 一键前往开启完全访问权限", for: .normal)
+            permissionSecondaryButton.isHidden = true
+        } else if !config.isConfigured {
+            permissionBar.isHidden = false
+            permissionPrimaryButton.setTitle("⚡ 前往灵犀 App 配置 AI", for: .normal)
+            permissionSecondaryButton.isHidden = AppGroup.isAvailable
+            if !AppGroup.isAvailable {
+                permissionSecondaryButton.setTitle("📋 导入同步口令", for: .normal)
+            }
+        } else {
+            permissionBar.isHidden = true
+            permissionSecondaryButton.isHidden = true
+        }
+        setNeedsLayout()
+    }
+
+    private func handlePermissionPrimaryTap() {
+        if !hasFullAccess {
+            onOpenFullAccessSettings? { [weak self] opened in
+                guard let self else { return }
+                if !opened {
+                    self.outputTextView.text = "📱 iOS 限制无完全访问时自动跳转。\n请切到桌面打开「设置」→ 底部「App」→「灵犀输入法」→「键盘」→ 打开「允许完全访问」，开启后切回输入框即可正常使用全部 AI 能力！"
+                }
+            }
+        } else {
+            onOpenHostAppAI? { [weak self] opened in
+                guard let self else { return }
+                if !opened {
+                    self.outputTextView.text = "✨ 请切到主屏幕打开「灵犀输入法 App → AI 智脑」填写 API Key；若是免费侧载安装，填好后点「同步给键盘」再切回本键盘即自动生效。"
+                }
+            }
+        }
+    }
+
+    private func handlePermissionSecondaryTap() {
+        let ok = onImportBridgeToken?() ?? false
+        if ok {
+            let cfg = AIConfig.load()
+            refreshAfterConfigChange(hasFullAccess: hasFullAccess)
+            outputTextView.text = cfg.isConfigured
+                ? "✓ 已导入 AI 配置（模型：\(cfg.activeModelName)）！点上方任意技能即可正常使用。"
+                : "✓ 已导入主 App 配置，请确认已在「灵犀 App → AI 智脑」中填写 API Key 后再次同步。"
+        } else {
+            outputTextView.text = "⚠️ 剪贴板中未检测到灵犀同步口令。\n请先在「灵犀输入法 App → AI 智脑」点「同步给键盘」，然后切回输入框点此按钮或直接打开 AI 面板即可自动导入。"
+        }
+    }
+
     private func showIdleGuidance() {
         let config = AIConfig.load()
         strategistScroll.isHidden = true
@@ -638,12 +753,15 @@ final class AIAssistantPanelView: UIView {
         thoughtToggleButton.isHidden = true
         thoughtTextView.isHidden = true
         if !hasFullAccess {
-            outputTextView.text = "⚠️ 请在系统设置开启「允许完全访问」以联网使用 AI。"
+            outputTextView.text = "⚠️ 键盘尚未开启「允许完全访问」权限\niOS 要求开启完全访问后才允许键盘联网调用 AI。\n点下方按钮直达设置，进入「键盘 → 打开允许完全访问」即可正常使用。"
         } else if !config.isConfigured {
-            outputTextView.text = "✨ 请先在「灵犀 App → AI 智脑」填写 API Key。"
+            outputTextView.text = AppGroup.isAvailable
+                ? "✨ 尚未配置 AI 密钥。点下方按钮直达「灵犀 App → AI 智脑」填写 API Key 即可使用。"
+                : "✨ 免费侧载模式下，请点下方打开「灵犀 App → AI 智脑」点击「同步给键盘」，切回即可自动同步 AI 密钥与模型。"
         } else {
-            outputTextView.text = "点上方技能开始生成，或在输入框打「@ai 你的指令」一键直达。"
+            outputTextView.text = "✓ 已连接 \(config.activeModelName)\n点上方技能开始生成，或在输入框打「@ai 你的指令」一键直达。"
         }
+        refreshPermissionBarVisibility()
         updateActionButtonsEnabled()
     }
 
@@ -733,14 +851,15 @@ final class AIAssistantPanelView: UIView {
     private func runThreeVariantsMode(source: String, title: String, instruction: String, preferDeep: Bool) {
         streamTask?.cancel()
         guard hasFullAccess else {
-            outputTextView.text = "⚠️ 需要开启「允许完全访问」才可调用 AI。"
+            showIdleGuidance()
             return
         }
         let config = AIConfig.load()
         guard config.isConfigured else {
-            outputTextView.text = "⚠️ 请先在主 App「AI 智脑」配置模型与 API Key。"
+            showIdleGuidance()
             return
         }
+        permissionBar.isHidden = true
         showingRecentHistory = false
         strategistResult = nil
         strategistScroll.isHidden = true
@@ -846,14 +965,15 @@ final class AIAssistantPanelView: UIView {
     private func runStrategistMode(message: String) {
         streamTask?.cancel()
         guard hasFullAccess else {
-            outputTextView.text = "⚠️ 需要开启「允许完全访问」才可调用博弈军师。"
+            showIdleGuidance()
             return
         }
         let config = AIConfig.load()
         guard config.isConfigured else {
-            outputTextView.text = "⚠️ 请先在主 App「AI 智脑」配置模型与 API Key。"
+            showIdleGuidance()
             return
         }
+        permissionBar.isHidden = true
 
         strategistResult = nil
         strategistScroll.isHidden = true
@@ -949,15 +1069,16 @@ final class AIAssistantPanelView: UIView {
         streamTask?.cancel()
 
         guard hasFullAccess else {
-            outputTextView.text = "⚠️ 需要开启「允许完全访问」才可联网调用 AI。"
+            showIdleGuidance()
             return
         }
 
         let config = AIConfig.load()
         guard config.isConfigured else {
-            outputTextView.text = "⚠️ 请先在「灵犀输入法 App -> AI 智脑」配置 API Key。"
+            showIdleGuidance()
             return
         }
+        permissionBar.isHidden = true
 
         showingRecentHistory = false
         strategistResult = nil

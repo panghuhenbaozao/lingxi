@@ -129,7 +129,16 @@ struct HomeTestView: View {
             if !appState.isKeyboardEnabled {
                 HStack(spacing: 10) {
                     actionPill("开启教程", icon: "book", filled: false) { showGuide = true }
-                    actionPill("打开系统设置", icon: "gear", filled: true) {
+                    actionPill("一键开启权限", icon: "lock.open.fill", filled: true) {
+                        appState.showPermissionsCenter = true
+                    }
+                }
+            } else if !appState.isKeyboardFullAccessConfirmed {
+                HStack(spacing: 10) {
+                    actionPill("权限检查", icon: "checkmark.shield", filled: false) {
+                        appState.showPermissionsCenter = true
+                    }
+                    actionPill("一键开启 AI 完全访问", icon: "lock.open.fill", filled: true) {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
                         }
@@ -137,7 +146,7 @@ struct HomeTestView: View {
                 }
             }
 
-            // 仅当检测到免费侧载被系统剥离 App Group 时展示一键云桥接同步入口
+            // 仅当检测到免费侧载被系统剥离 App Group 时展示一键同步（含 AI 密钥、外观、设置与字数）
             if !AppGroup.isAvailable {
                 Button {
                     Task {
@@ -155,12 +164,10 @@ struct HomeTestView: View {
                                 .font(.caption.bold())
                                 .foregroundStyle(.orange)
                         }
-                        Text(appState.isCloudAuthenticated
-                             ? "免费侧载沙盒隔离 · 点此一键同步外观与字数给键盘"
-                             : "免费侧载沙盒隔离 · 登录云端后可自动同步外观给键盘")
+                        Text("免费侧载沙盒隔离 · 点此一键同步 AI 密钥、外观与设置给键盘")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(Color(Design.Palette.ink))
-                            .lineLimit(1)
+                            .lineLimit(2)
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.caption2.bold())

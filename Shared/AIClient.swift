@@ -13,7 +13,18 @@ enum AIClientError: LocalizedError {
         case .invalidEndpoint:
             return "AI 接口地址格式无效"
         case .httpError(let code, let message):
-            return "请求失败 (\(code)): \(message)"
+            switch code {
+            case 401:
+                return "接口鉴权失败 (401)：API Key 无效或未授权，请检查是否粘贴完整。\(message.isEmpty ? "" : " (\(message))")"
+            case 403:
+                return "接口拒绝访问 (403)：当前 Key 无该模型权限、渠道余额不足或地区受限。\(message.isEmpty ? "" : " (\(message))")"
+            case 404:
+                return "接口或模型不存在 (404)：请检查接口地址是否含 /v1 或重新拉取模型。\(message.isEmpty ? "" : " (\(message))")"
+            case 429:
+                return "请求过于频繁或额度已耗尽 (429)：\(message)"
+            default:
+                return "请求失败 (\(code)): \(message)"
+            }
         case .emptyResponse:
             return "模型未返回有效正文内容"
         }
@@ -97,7 +108,15 @@ final class AIClient {
         self.session = URLSession(configuration: config)
     }
 
-    // MARK: - 动态拉取可用模型列表（支持 Gemini /v1beta/models、OpenAI /models 与 Ollama /api/tags）
+    // MARK: - 动态拉取可用模型列表（全分页 + 全协议格式 + 100% 保留完整模型 ID 与显示名）
+
+    struct ModelPageResult: Equatable {
+        let models: [AIModelInfo]
+        let nextPageToken: String?
+        let hasMore: Bool
+        let lastID: String?
+        let nextURL: String?
+    }
 
     func fetchModels(config: AIConfig = AIConfig.load()) async throws -> [AIModelInfo] {
         guard config.isConfigured else {
@@ -115,27 +134,102 @@ final class AIClient {
         var base = config.geminiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if base.isEmpty { base = AIConfig.defaultGeminiBaseURL }
         while base.hasSuffix("/") { base.removeLast() }
-        let endpoint = base.hasSuffix("/v1beta") ? "\(base)/models?pageSize=100" : "\(base)/v1beta/models?pageSize=100"
-        guard let url = URL(string: endpoint) else {
-            throw AIClientError.invalidEndpoint
+        let baseEndpoint: String
+        if base.hasSuffix("/models") {
+            baseEndpoint = base
+        } else if base.hasSuffix("/v1beta") || base.hasSuffix("/v1") {
+            baseEndpoint = "\(base)/models"
+        } else {
+            baseEndpoint = "\(base)/v1beta/models"
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue(config.activeAPIKey, forHTTPHeaderField: "x-goog-api-key")
-        for (k, v) in config.customHeaders where !k.isEmpty {
-            request.setValue(v, forHTTPHeaderField: k)
+        var useQueryKeyAuth = false
+        var pageToken: String? = nil
+        var seenTokens = Set<String>()
+        var seenIDs = Set<String>()
+        var collected: [AIModelInfo] = []
+
+        for pageIndex in 0..<15 {
+            guard var comps = URLComponents(string: baseEndpoint) else {
+                throw AIClientError.invalidEndpoint
+            }
+            var items = comps.queryItems ?? []
+            items.removeAll { $0.name == "pageSize" || $0.name == "pageToken" || $0.name == "key" }
+            items.append(URLQueryItem(name: "pageSize", value: "1000"))
+            if let token = pageToken, !token.isEmpty {
+                items.append(URLQueryItem(name: "pageToken", value: token))
+            }
+            if useQueryKeyAuth && !config.activeAPIKey.isEmpty {
+                items.append(URLQueryItem(name: "key", value: config.activeAPIKey))
+            }
+            comps.queryItems = items
+            guard let url = comps.url else { throw AIClientError.invalidEndpoint }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.assumesHTTP3Capable = false
+            request.setValue(config.activeAPIKey, forHTTPHeaderField: "x-goog-api-key")
+            if useQueryKeyAuth && !config.activeAPIKey.isEmpty {
+                request.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
+            }
+            for (k, v) in config.customHeaders where !k.isEmpty {
+                request.setValue(v, forHTTPHeaderField: k)
+            }
+
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AIClientError.invalidEndpoint
+            }
+            if !(200..<300).contains(http.statusCode) {
+                // 部分第三方 Gemini 中转站仅接受 ?key= 或 Authorization: Bearer 鉴权，首页 401/403 自动降级重试一次
+                if pageIndex == 0 && !useQueryKeyAuth && (http.statusCode == 401 || http.statusCode == 403) {
+                    useQueryKeyAuth = true
+                    var retryComps = comps
+                    var retryItems = retryComps.queryItems ?? []
+                    retryItems.append(URLQueryItem(name: "key", value: config.activeAPIKey))
+                    retryComps.queryItems = retryItems
+                    if let retryURL = retryComps.url {
+                        var retryReq = URLRequest(url: retryURL)
+                        retryReq.httpMethod = "GET"
+                        retryReq.assumesHTTP3Capable = false
+                        retryReq.setValue(config.activeAPIKey, forHTTPHeaderField: "x-goog-api-key")
+                        retryReq.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
+                        for (k, v) in config.customHeaders where !k.isEmpty {
+                            retryReq.setValue(v, forHTTPHeaderField: k)
+                        }
+                        let (retryData, retryResp) = try await session.data(for: retryReq)
+                        if let retryHTTP = retryResp as? HTTPURLResponse, (200..<300).contains(retryHTTP.statusCode) {
+                            let page = Self.parseGeminiModelsPage(retryData, includeNonChat: true)
+                            for m in page.models where seenIDs.insert(m.id).inserted {
+                                collected.append(m)
+                            }
+                            if let next = page.nextPageToken, !next.isEmpty, seenTokens.insert(next).inserted {
+                                pageToken = next
+                                continue
+                            }
+                            break
+                        }
+                    }
+                }
+                if collected.isEmpty {
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    throw AIClientError.httpError(http.statusCode, Self.extractErrorMessage(body))
+                }
+                break
+            }
+
+            let page = Self.parseGeminiModelsPage(data, includeNonChat: true)
+            for m in page.models where seenIDs.insert(m.id).inserted {
+                collected.append(m)
+            }
+            if let next = page.nextPageToken, !next.isEmpty, seenTokens.insert(next).inserted {
+                pageToken = next
+            } else {
+                break
+            }
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw AIClientError.invalidEndpoint
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw AIClientError.httpError(http.statusCode, Self.extractErrorMessage(body))
-        }
-        return Self.parseGeminiModelsPayload(data)
+        return Self.sortFetchedModels(collected, preferDescendingID: true)
     }
 
     private func fetchOpenAICompatibleModels(config: AIConfig) async throws -> [AIModelInfo] {
@@ -144,34 +238,100 @@ final class AIClient {
         if base.hasSuffix("/chat/completions") {
             base = String(base.dropLast("/chat/completions".count))
         }
-        let endpoint = base.hasSuffix("/models") ? base : "\(base)/models"
-        guard let url = URL(string: endpoint) else {
-            throw AIClientError.invalidEndpoint
+        let primaryEndpoint = base.hasSuffix("/models") ? base : "\(base)/models"
+        var candidateEndpoints = [primaryEndpoint]
+        let lowerBase = base.lowercased()
+        let hasVersionSegment = lowerBase.contains("/v1") || lowerBase.contains("/v2") || lowerBase.contains("/v3") || lowerBase.contains("/v4") || lowerBase.hasSuffix("/models")
+        if !hasVersionSegment {
+            candidateEndpoints.append("\(base)/v1/models")
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        if !config.activeAPIKey.isEmpty {
-            request.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
-        }
-        for (k, v) in config.customHeaders where !k.isEmpty {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
+        var lastHTTPCode = 0
+        var lastErrorBody = ""
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw AIClientError.invalidEndpoint
-        }
-        if (200..<300).contains(http.statusCode) {
-            let parsed = Self.parseOpenAIModelsPayload(data)
-            if !parsed.isEmpty { return parsed }
+        for endpoint in candidateEndpoints {
+            var seenIDs = Set<String>()
+            var seenCursors = Set<String>()
+            var collected: [AIModelInfo] = []
+            var nextRequestURL = URL(string: endpoint)
+            var endpointSucceeded = false
+
+            for _ in 0..<15 {
+                guard let url = nextRequestURL else { break }
+                var request = URLRequest(url: url)
+                request.httpMethod = "GET"
+                request.assumesHTTP3Capable = false
+                if !config.activeAPIKey.isEmpty {
+                    request.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
+                }
+                for (k, v) in config.customHeaders where !k.isEmpty {
+                    request.setValue(v, forHTTPHeaderField: k)
+                }
+
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw AIClientError.invalidEndpoint
+                }
+                lastHTTPCode = http.statusCode
+                guard (200..<300).contains(http.statusCode) else {
+                    lastErrorBody = String(data: data, encoding: .utf8) ?? ""
+                    break
+                }
+
+                let page = Self.parseOpenAIModelsPage(data, includeNonChat: true)
+                endpointSucceeded = true
+                var addedOnThisPage = 0
+                for m in page.models where seenIDs.insert(m.id).inserted {
+                    collected.append(m)
+                    addedOnThisPage += 1
+                }
+
+                // 自动翻页（兼容 next_page_token / nextPageToken / next_cursor / has_more+last_id / next URL）
+                if let explicitNext = page.nextURL, !explicitNext.isEmpty, seenCursors.insert(explicitNext).inserted {
+                    if let resolved = URL(string: explicitNext, relativeTo: url)?.absoluteURL {
+                        nextRequestURL = resolved
+                        continue
+                    }
+                }
+                if let token = page.nextPageToken, !token.isEmpty, seenCursors.insert("tok:\(token)").inserted {
+                    if var comps = URLComponents(string: endpoint) {
+                        var q = comps.queryItems ?? []
+                        q.removeAll { $0.name == "page_token" || $0.name == "pageToken" || $0.name == "cursor" }
+                        q.append(URLQueryItem(name: "page_token", value: token))
+                        comps.queryItems = q
+                        nextRequestURL = comps.url
+                        continue
+                    }
+                }
+                if page.hasMore, addedOnThisPage > 0, let afterID = page.lastID ?? page.models.last?.id, !afterID.isEmpty,
+                   seenCursors.insert("after:\(afterID)").inserted {
+                    if var comps = URLComponents(string: endpoint) {
+                        var q = comps.queryItems ?? []
+                        q.removeAll { $0.name == "after" }
+                        q.append(URLQueryItem(name: "after", value: afterID))
+                        comps.queryItems = q
+                        nextRequestURL = comps.url
+                        continue
+                    }
+                }
+                break
+            }
+
+            if !collected.isEmpty {
+                return Self.sortFetchedModels(collected, preferDescendingID: false)
+            }
+            if endpointSucceeded && candidateEndpoints.count == 1 {
+                break
+            }
         }
 
         // Ollama 兼容兜底：尝试 /api/tags
         if base.contains("11434") || config.isLocalNoKeyEndpoint {
             let root = base.replacingOccurrences(of: "/v1", with: "")
             if let tagsURL = URL(string: "\(root)/api/tags") {
-                let (tagData, tagResp) = try await session.data(from: tagsURL)
+                var tagReq = URLRequest(url: tagsURL)
+                tagReq.assumesHTTP3Capable = false
+                let (tagData, tagResp) = try await session.data(for: tagReq)
                 if let th = tagResp as? HTTPURLResponse, (200..<300).contains(th.statusCode) {
                     let parsed = Self.parseOllamaTagsPayload(tagData)
                     if !parsed.isEmpty { return parsed }
@@ -179,68 +339,234 @@ final class AIClient {
             }
         }
 
-        let body = String(data: data, encoding: .utf8) ?? ""
-        throw AIClientError.httpError(http.statusCode, Self.extractErrorMessage(body))
+        if lastHTTPCode == 0 {
+            throw AIClientError.invalidEndpoint
+        }
+        throw AIClientError.httpError(lastHTTPCode, Self.extractErrorMessage(lastErrorBody))
     }
 
-    static func parseGeminiModelsPayload(_ data: Data) -> [AIModelInfo] {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = obj["models"] as? [[String: Any]] else {
-            return []
+    static func sortFetchedModels(_ models: [AIModelInfo], preferDescendingID: Bool) -> [AIModelInfo] {
+        models.sorted { a, b in
+            if a.isChatModel != b.isChatModel { return a.isChatModel }
+            if a.supportsThinking != b.supportsThinking { return a.supportsThinking }
+            return preferDescendingID
+                ? a.id.localizedStandardCompare(b.id) == .orderedDescending
+                : a.id.localizedStandardCompare(b.id) == .orderedAscending
         }
+    }
+
+    static func isLikelyNonChatModel(_ modelID: String) -> Bool {
+        let lower = modelID.lowercased()
+        let nonChatMarkers = [
+            "embedding", "embed-", "-embed", "bge-", "gte-", "e5-", "rerank",
+            "whisper", "transcribe", "dall-e", "flux", "stable-diffusion", "sdxl", "kolors",
+            "moderation", "aqa", "imagen", "veo", "sora", "midjourney",
+            "tts-", "-tts", "cosyvoice", "fish-speech", "sensevoice", "funasr"
+        ]
+        if lower == "tts-1" || lower == "tts-1-hd" { return true }
+        return nonChatMarkers.contains { lower.contains($0) }
+    }
+
+    static func parseGeminiModelsPage(_ data: Data, includeNonChat: Bool = true) -> ModelPageResult {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else {
+            return ModelPageResult(models: [], nextPageToken: nil, hasMore: false, lastID: nil, nextURL: nil)
+        }
+        guard let obj = root as? [String: Any] else {
+            // 某些代理直接返回顶层数组
+            return parseOpenAIModelsPage(data, includeNonChat: includeNonChat)
+        }
+        guard let list = obj["models"] as? [[String: Any]] else {
+            // 兼容部分 Gemini 中转站返回 OpenAI 风格的 {"data": [...]} 结构
+            if obj["data"] != nil {
+                let openAIPage = parseOpenAIModelsPage(data, includeNonChat: includeNonChat)
+                let remapped = openAIPage.models.map { m in
+                    AIModelInfo(
+                        id: m.id,
+                        displayName: m.displayName,
+                        supportsThinking: m.supportsThinking,
+                        contextLength: m.contextLength,
+                        provider: .gemini,
+                        isChatModel: m.isChatModel,
+                        ownedBy: m.ownedBy
+                    )
+                }
+                return ModelPageResult(
+                    models: remapped,
+                    nextPageToken: openAIPage.nextPageToken,
+                    hasMore: openAIPage.hasMore,
+                    lastID: openAIPage.lastID,
+                    nextURL: openAIPage.nextURL
+                )
+            }
+            return ModelPageResult(models: [], nextPageToken: nil, hasMore: false, lastID: nil, nextURL: nil)
+        }
+
+        var seen = Set<String>()
         var results: [AIModelInfo] = []
         for item in list {
-            guard let rawName = item["name"] as? String else { continue }
-            let cleanID = rawName.hasPrefix("models/") ? String(rawName.dropFirst("models/".count)) : rawName
-            let lower = cleanID.lowercased()
-            // 过滤纯 embedding / aqa / imagen 不可用于对话的模型
-            if lower.contains("embedding") || lower.contains("aqa") || lower.contains("imagen") || lower.contains("veo") {
-                continue
+            let rawName = (item["name"] as? String) ?? (item["id"] as? String) ?? ""
+            let trimmedRaw = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedRaw.isEmpty else { continue }
+            let cleanID = trimmedRaw.hasPrefix("models/") ? String(trimmedRaw.dropFirst("models/".count)) : trimmedRaw
+            guard !cleanID.isEmpty, seen.insert(cleanID).inserted else { continue }
+
+            var isChat = !Self.isLikelyNonChatModel(cleanID)
+            if let methods = item["supportedGenerationMethods"] as? [String], !methods.isEmpty {
+                let supportsGen = methods.contains("generateContent") || methods.contains("bidiGenerateContent")
+                if !supportsGen { isChat = false }
             }
-            if let methods = item["supportedGenerationMethods"] as? [String],
-               !methods.contains("generateContent") && !methods.contains("bidiGenerateContent") {
-                continue
-            }
+            if !includeNonChat && !isChat { continue }
+
             let display = (item["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let inputLimit = item["inputTokenLimit"] as? Int
+            let inputLimit = (item["inputTokenLimit"] as? Int) ?? (item["context_length"] as? Int)
             let supportsThinking = Self.modelLikelySupportsThinking(cleanID) || (item["thinking"] as? Bool == true)
             results.append(AIModelInfo(
                 id: cleanID,
                 displayName: (display?.isEmpty == false) ? display! : cleanID,
                 supportsThinking: supportsThinking,
                 contextLength: inputLimit,
-                provider: .gemini
+                provider: .gemini,
+                isChatModel: isChat,
+                ownedBy: "Google"
             ))
         }
-        return results.sorted { a, b in
-            if a.supportsThinking != b.supportsThinking { return a.supportsThinking }
-            return a.id > b.id
-        }
+
+        let nextToken = (obj["nextPageToken"] as? String) ?? (obj["next_page_token"] as? String)
+        return ModelPageResult(
+            models: results,
+            nextPageToken: (nextToken?.isEmpty == false) ? nextToken : nil,
+            hasMore: (nextToken?.isEmpty == false),
+            lastID: results.last?.id,
+            nextURL: nil
+        )
     }
 
-    static func parseOpenAIModelsPayload(_ data: Data) -> [AIModelInfo] {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = obj["data"] as? [[String: Any]] else {
-            return []
+    static func parseGeminiModelsPayload(_ data: Data, includeNonChat: Bool = false) -> [AIModelInfo] {
+        let page = parseGeminiModelsPage(data, includeNonChat: includeNonChat)
+        return sortFetchedModels(page.models, preferDescendingID: true)
+    }
+
+    static func parseOpenAIModelsPage(_ data: Data, includeNonChat: Bool = true) -> ModelPageResult {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else {
+            return ModelPageResult(models: [], nextPageToken: nil, hasMore: false, lastID: nil, nextURL: nil)
         }
+
+        var rawItems: [Any] = []
+        var obj: [String: Any] = [:]
+
+        if let dict = root as? [String: Any] {
+            obj = dict
+            if let arr = dict["data"] as? [Any] {
+                rawItems = arr
+            } else if let nested = dict["data"] as? [String: Any] {
+                rawItems = (nested["models"] as? [Any])
+                    ?? (nested["list"] as? [Any])
+                    ?? (nested["items"] as? [Any])
+                    ?? (nested["data"] as? [Any])
+                    ?? []
+            } else if let arr = dict["models"] as? [Any] {
+                rawItems = arr
+            } else if let arr = dict["items"] as? [Any] {
+                rawItems = arr
+            } else if let arr = dict["list"] as? [Any] {
+                rawItems = arr
+            } else if let arr = dict["result"] as? [Any] {
+                rawItems = arr
+            } else if let arr = dict["results"] as? [Any] {
+                rawItems = arr
+            }
+        } else if let arr = root as? [Any] {
+            rawItems = arr
+        }
+
         var seen = Set<String>()
         var results: [AIModelInfo] = []
-        for item in list {
-            guard let id = item["id"] as? String, !id.isEmpty, seen.insert(id).inserted else { continue }
-            let lower = id.lowercased()
-            if lower.contains("embedding") || lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") || lower.contains("moderation") {
+        for entry in rawItems {
+            if let strID = entry as? String {
+                let id = strID.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !id.isEmpty, seen.insert(id).inserted else { continue }
+                let isChat = !Self.isLikelyNonChatModel(id)
+                if !includeNonChat && !isChat { continue }
+                results.append(AIModelInfo(
+                    id: id,
+                    displayName: id,
+                    supportsThinking: Self.modelLikelySupportsThinking(id),
+                    contextLength: nil,
+                    provider: .openAICompatible,
+                    isChatModel: isChat,
+                    ownedBy: nil
+                ))
                 continue
             }
-            let ctx = (item["context_length"] as? Int) ?? (item["max_model_len"] as? Int)
+
+            guard let item = entry as? [String: Any] else { continue }
+            let rawID = (item["id"] as? String)
+                ?? (item["model"] as? String)
+                ?? (item["name"] as? String)
+                ?? ""
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, seen.insert(id).inserted else { continue }
+
+            let isChat = !Self.isLikelyNonChatModel(id)
+            if !includeNonChat && !isChat { continue }
+
+            let rawDisplay = (item["name"] as? String)
+                ?? (item["display_name"] as? String)
+                ?? (item["displayName"] as? String)
+                ?? (item["title"] as? String)
+            let display = (rawDisplay?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? rawDisplay!.trimmingCharacters(in: .whitespacesAndNewlines)
+                : id
+
+            let ownedBy = (item["owned_by"] as? String)
+                ?? (item["provider"] as? String)
+                ?? (item["organization"] as? String)
+
+            let topProvider = item["top_provider"] as? [String: Any]
+            let ctx = (item["context_length"] as? Int)
+                ?? (item["max_model_len"] as? Int)
+                ?? (item["context_window"] as? Int)
+                ?? (item["max_context_length"] as? Int)
+                ?? (item["input_token_limit"] as? Int)
+                ?? (topProvider?["context_length"] as? Int)
+
+            let supportedParams = (item["supported_parameters"] as? [String]) ?? []
+            let paramThinking = supportedParams.contains("reasoning") || supportedParams.contains("include_reasoning")
+            let supportsThinking = Self.modelLikelySupportsThinking(id)
+                || Self.modelLikelySupportsThinking(display)
+                || (item["reasoning"] as? Bool == true)
+                || paramThinking
+
             results.append(AIModelInfo(
                 id: id,
-                displayName: id,
-                supportsThinking: Self.modelLikelySupportsThinking(id),
+                displayName: display,
+                supportsThinking: supportsThinking,
                 contextLength: ctx,
-                provider: .openAICompatible
+                provider: .openAICompatible,
+                isChatModel: isChat,
+                ownedBy: ownedBy
             ))
         }
-        return results.sorted { $0.id < $1.id }
+
+        let nextToken = (obj["next_page_token"] as? String)
+            ?? (obj["nextPageToken"] as? String)
+            ?? (obj["next_cursor"] as? String)
+            ?? (obj["nextCursor"] as? String)
+        let hasMore = (obj["has_more"] as? Bool) ?? (obj["hasMore"] as? Bool) ?? false
+        let lastID = (obj["last_id"] as? String) ?? (obj["lastId"] as? String) ?? results.last?.id
+        let nextURL = obj["next"] as? String
+        return ModelPageResult(
+            models: results,
+            nextPageToken: (nextToken?.isEmpty == false) ? nextToken : nil,
+            hasMore: hasMore,
+            lastID: lastID,
+            nextURL: (nextURL?.isEmpty == false) ? nextURL : nil
+        )
+    }
+
+    static func parseOpenAIModelsPayload(_ data: Data, includeNonChat: Bool = false) -> [AIModelInfo] {
+        let page = parseOpenAIModelsPage(data, includeNonChat: includeNonChat)
+        return page.models.sorted { $0.id < $1.id }
     }
 
     static func parseOllamaTagsPayload(_ data: Data) -> [AIModelInfo] {
@@ -249,20 +575,24 @@ final class AIClient {
             return []
         }
         return list.compactMap { item in
-            guard let name = item["name"] as? String, !name.isEmpty else { return nil }
+            let name = ((item["name"] as? String) ?? (item["model"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return nil }
+            let isChat = !Self.isLikelyNonChatModel(name)
             return AIModelInfo(
                 id: name,
                 displayName: name,
                 supportsThinking: Self.modelLikelySupportsThinking(name),
                 contextLength: nil,
-                provider: .openAICompatible
+                provider: .openAICompatible,
+                isChatModel: isChat,
+                ownedBy: "Ollama"
             )
         }
     }
 
     static func modelLikelySupportsThinking(_ modelID: String) -> Bool {
         let lower = modelID.lowercased()
-        let hints = ["reasoner", "-r1", "qwq", "thinking", "qwen3", "gemini-2.5", "gemini-3", "gemini-4", "o1", "o3", "o4", "gpt-5", "claude-3-7", "claude-sonnet-4", "claude-opus-4"]
+        let hints = ["reasoner", "-r1", "qwq", "thinking", "qwen3", "gemini-2.5", "gemini-3", "gemini-4", "o1", "o3", "o4", "gpt-5", "claude-3-7", "claude-sonnet-4", "claude-opus-4", "claude-4", "glm-z1", "hunyuan-t1", "kimi-k2-thinking", "doubao-seed-1-6-thinking"]
         return hints.contains { lower.contains($0) }
     }
 
@@ -519,7 +849,7 @@ final class AIClient {
         return [:]
     }
 
-    // MARK: - Google Gemini（优先 Interactions API，中转站不支持时无缝降级至 streamGenerateContent）
+    // MARK: - Google Gemini（优先通用 streamGenerateContent SSE + 自动兼容中转站 ?key= 与降级重试）
 
     private func streamGeminiWithFallback(
         prompt: String,
@@ -533,32 +863,59 @@ final class AIClient {
         if base.isEmpty { base = AIConfig.defaultGeminiBaseURL }
         while base.hasSuffix("/") { base.removeLast() }
 
-        let isOfficial = base.contains("generativelanguage.googleapis.com")
-        if isOfficial {
-            do {
-                try await streamGeminiInteractions(
-                    base: base,
-                    prompt: prompt,
-                    systemInstruction: systemInstruction,
-                    model: model,
-                    thinkingMode: thinkingMode,
-                    config: config,
-                    yield: yield
-                )
-                return
-            } catch AIClientError.httpError(let code, _) where code == 400 || code == 404 || code == 405 {
-                // 部分旧版 2.5 模型或区域端点走标准 generateContent SSE
-            }
+        do {
+            try await streamGeminiGenerateContentSSE(
+                base: base,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: thinkingMode,
+                includeThinkingConfig: thinkingMode != .auto,
+                useQueryKeyAuth: false,
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where code == 400 && thinkingMode != .auto {
+            // 部分非思考模型或中转站不识别 thinkingConfig，自动剥离重试一次
+            try await streamGeminiGenerateContentSSE(
+                base: base,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: .off,
+                includeThinkingConfig: false,
+                useQueryKeyAuth: false,
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where code == 401 || code == 403 {
+            // 部分第三方 Gemini 中转站仅接受 ?key= 查询参数鉴权，自动降级重试一次
+            try await streamGeminiGenerateContentSSE(
+                base: base,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: thinkingMode,
+                includeThinkingConfig: thinkingMode != .auto,
+                useQueryKeyAuth: true,
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where (code == 404 || code == 405) && base.contains("generativelanguage.googleapis.com") {
+            // 仅当官方端点明确返回 404/405 时兜底尝试 Interactions API
+            try await streamGeminiInteractions(
+                base: base,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: thinkingMode,
+                config: config,
+                yield: yield
+            )
         }
-        try await streamGeminiGenerateContentSSE(
-            base: base,
-            prompt: prompt,
-            systemInstruction: systemInstruction,
-            model: model,
-            thinkingMode: thinkingMode,
-            config: config,
-            yield: yield
-        )
     }
 
     private func streamGeminiInteractions(
@@ -570,10 +927,11 @@ final class AIClient {
         config: AIConfig,
         yield: @escaping (AIStreamChunk) -> Void
     ) async throws {
-        let endpoint = base.hasSuffix("/v1beta") ? "\(base)/interactions" : "\(base)/v1beta/interactions"
+        let endpoint = (base.hasSuffix("/v1beta") || base.hasSuffix("/v1")) ? "\(base)/interactions" : "\(base)/v1beta/interactions"
         guard let url = URL(string: endpoint) else { throw AIClientError.invalidEndpoint }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.assumesHTTP3Capable = false
         request.setValue(config.activeAPIKey, forHTTPHeaderField: "x-goog-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (k, v) in config.customHeaders where !k.isEmpty {
@@ -647,17 +1005,32 @@ final class AIClient {
         systemInstruction: String,
         model: String,
         thinkingMode: AIThinkingMode,
+        includeThinkingConfig: Bool,
+        useQueryKeyAuth: Bool,
         config: AIConfig,
         yield: @escaping (AIStreamChunk) -> Void
     ) async throws {
-        let prefix = base.hasSuffix("/v1beta") ? base : "\(base)/v1beta"
-        let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model
-        guard let url = URL(string: "\(prefix)/models/\(encodedModel):streamGenerateContent?alt=sse") else {
+        let prefix = (base.hasSuffix("/v1beta") || base.hasSuffix("/v1")) ? base : "\(base)/v1beta"
+        let cleanModel = model.hasPrefix("models/") ? String(model.dropFirst("models/".count)) : model
+        let encodedModel = cleanModel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cleanModel
+        guard var comps = URLComponents(string: "\(prefix)/models/\(encodedModel):streamGenerateContent") else {
+            throw AIClientError.invalidEndpoint
+        }
+        var qItems = [URLQueryItem(name: "alt", value: "sse")]
+        if useQueryKeyAuth && !config.activeAPIKey.isEmpty {
+            qItems.append(URLQueryItem(name: "key", value: config.activeAPIKey))
+        }
+        comps.queryItems = qItems
+        guard let url = comps.url else {
             throw AIClientError.invalidEndpoint
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.assumesHTTP3Capable = false
         request.setValue(config.activeAPIKey, forHTTPHeaderField: "x-goog-api-key")
+        if useQueryKeyAuth && !config.activeAPIKey.isEmpty {
+            request.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (k, v) in config.customHeaders where !k.isEmpty {
             request.setValue(v, forHTTPHeaderField: k)
@@ -668,9 +1041,9 @@ final class AIClient {
             "topP": config.topP,
             "maxOutputTokens": config.maxOutputTokens,
         ]
-        if thinkingMode != .auto {
+        if includeThinkingConfig && thinkingMode != .auto {
             var tc: [String: Any] = ["includeThoughts": config.showThinkingProcess]
-            let mapped = Self.geminiThinkingPayload(model: model, mode: thinkingMode, budget: config.thinkingBudget)
+            let mapped = Self.geminiThinkingPayload(model: cleanModel, mode: thinkingMode, budget: config.thinkingBudget)
             if let lvl = mapped["thinking_level"] { tc["thinkingLevel"] = lvl }
             if let bdg = mapped["thinking_budget"] { tc["thinkingBudget"] = bdg }
             genConfig["thinkingConfig"] = tc
@@ -691,18 +1064,14 @@ final class AIClient {
         }
 
         var yieldedAnswer = false
+        var sawSSELine = false
+        var rawNonSSE = ""
         var splitter = ThinkTagStreamSplitter()
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data:") else { continue }
-            let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-            guard !jsonStr.isEmpty, jsonStr != "[DONE]",
-                  let data = jsonStr.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let cands = obj["candidates"] as? [[String: Any]],
-                  let content = cands.first?["content"] as? [String: Any],
-                  let parts = content["parts"] as? [[String: Any]] else { continue }
 
+        func consumeGeminiCandidateObject(_ obj: [String: Any]) {
+            guard let cands = obj["candidates"] as? [[String: Any]],
+                  let content = cands.first?["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]] else { return }
             for part in parts {
                 guard let txt = part["text"] as? String, !txt.isEmpty else { continue }
                 if part["thought"] as? Bool == true {
@@ -715,6 +1084,31 @@ final class AIClient {
                 }
             }
         }
+
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            if line.hasPrefix("data:") {
+                sawSSELine = true
+                let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                guard !jsonStr.isEmpty, jsonStr != "[DONE]",
+                      let data = jsonStr.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                consumeGeminiCandidateObject(obj)
+            } else if !sawSSELine && rawNonSSE.count < 65536 {
+                rawNonSSE += line
+            }
+        }
+
+        // 兜底：部分中转站忽略 alt=sse 直接返回普通 JSON 数组或单对象
+        if !sawSSELine && !rawNonSSE.isEmpty, let rawData = rawNonSSE.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: rawData) {
+            if let obj = parsed as? [String: Any] {
+                consumeGeminiCandidateObject(obj)
+            } else if let arr = parsed as? [[String: Any]] {
+                for obj in arr { consumeGeminiCandidateObject(obj) }
+            }
+        }
+
         for item in splitter.finish() {
             if case .answer = item { yieldedAnswer = true }
             yield(item)
@@ -722,7 +1116,7 @@ final class AIClient {
         if !yieldedAnswer { throw AIClientError.emptyResponse }
     }
 
-    // MARK: - OpenAI Compatible Chat Completions (DeepSeek / Qwen / OpenAI / SiliconFlow / Ollama)
+    // MARK: - OpenAI Compatible Chat Completions (DeepSeek / Qwen / OpenAI / SiliconFlow / OpenRouter / Ollama)
 
     private func streamOpenAICompatible(
         prompt: String,
@@ -734,11 +1128,62 @@ final class AIClient {
     ) async throws {
         var base = config.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
-        let endpoint = base.hasSuffix("/chat/completions") ? base : "\(base)/chat/completions"
+        let primaryEndpoint = base.hasSuffix("/chat/completions") ? base : "\(base)/chat/completions"
+        let extraThinking = Self.openAIThinkingExtraBody(model: model, baseURL: base, mode: thinkingMode, budget: config.thinkingBudget)
+
+        do {
+            try await performOpenAIChatStream(
+                endpoint: primaryEndpoint,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                extraBody: extraThinking,
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where (code == 400 || code == 422) && !extraThinking.isEmpty {
+            // 部分模型或中转站不支持 enable_thinking / reasoning_effort 参数，自动剥离重试
+            try await performOpenAIChatStream(
+                endpoint: primaryEndpoint,
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                extraBody: [:],
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where code == 404 {
+            let lowerBase = base.lowercased()
+            let hasVersion = lowerBase.contains("/v1") || lowerBase.contains("/v2") || lowerBase.contains("/v3") || lowerBase.contains("/v4") || lowerBase.hasSuffix("/chat/completions")
+            guard !hasVersion else { throw AIClientError.httpError(code, "接口路径或模型不存在") }
+            try await performOpenAIChatStream(
+                endpoint: "\(base)/v1/chat/completions",
+                prompt: prompt,
+                systemInstruction: systemInstruction,
+                model: model,
+                extraBody: extraThinking,
+                config: config,
+                yield: yield
+            )
+        }
+    }
+
+    private func performOpenAIChatStream(
+        endpoint: String,
+        prompt: String,
+        systemInstruction: String,
+        model: String,
+        extraBody: [String: Any],
+        config: AIConfig,
+        yield: @escaping (AIStreamChunk) -> Void
+    ) async throws {
         guard let url = URL(string: endpoint) else { throw AIClientError.invalidEndpoint }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.assumesHTTP3Capable = false
         if !config.activeAPIKey.isEmpty {
             request.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
         }
@@ -758,7 +1203,7 @@ final class AIClient {
             "max_tokens": config.maxOutputTokens,
             "stream": true,
         ]
-        for (k, v) in Self.openAIThinkingExtraBody(model: model, baseURL: base, mode: thinkingMode, budget: config.thinkingBudget) {
+        for (k, v) in extraBody {
             payload[k] = v
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -771,29 +1216,50 @@ final class AIClient {
         }
 
         var yieldedAnswer = false
+        var sawSSELine = false
+        var rawNonSSE = ""
         var splitter = ThinkTagStreamSplitter()
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data:") else { continue }
-            let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-            if jsonStr == "[DONE]" { break }
-            guard let data = jsonStr.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = obj["choices"] as? [[String: Any]],
-                  let delta = choices.first?["delta"] as? [String: Any] else { continue }
 
-            // 1. DeepSeek R1 / SiliconFlow / OpenRouter 独立思考字段 reasoning_content / reasoning
-            if let reason = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !reason.isEmpty {
+        func emitOpenAIMessage(_ dict: [String: Any]) {
+            if let reason = (dict["reasoning_content"] as? String) ?? (dict["reasoning"] as? String), !reason.isEmpty {
                 yield(.thought(reason))
             }
-            // 2. 常规正文字段（同时过滤流式内联 <think>...</think> 标签）
-            if let text = delta["content"] as? String, !text.isEmpty {
+            if let text = dict["content"] as? String, !text.isEmpty {
                 for item in splitter.push(text) {
                     if case .answer = item { yieldedAnswer = true }
                     yield(item)
                 }
             }
         }
+
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            if line.hasPrefix("data:") {
+                sawSSELine = true
+                let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                if jsonStr == "[DONE]" { break }
+                guard let data = jsonStr.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let choices = obj["choices"] as? [[String: Any]] else { continue }
+                if let delta = choices.first?["delta"] as? [String: Any] {
+                    emitOpenAIMessage(delta)
+                } else if let msg = choices.first?["message"] as? [String: Any] {
+                    emitOpenAIMessage(msg)
+                }
+            } else if !sawSSELine && rawNonSSE.count < 65536 {
+                rawNonSSE += line
+            }
+        }
+
+        // 兜底：部分中转站忽略 stream:true 直接返回非流式 JSON
+        if !sawSSELine && !rawNonSSE.isEmpty,
+           let data = rawNonSSE.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let choices = obj["choices"] as? [[String: Any]],
+           let msg = choices.first?["message"] as? [String: Any] {
+            emitOpenAIMessage(msg)
+        }
+
         for item in splitter.finish() {
             if case .answer = item { yieldedAnswer = true }
             yield(item)

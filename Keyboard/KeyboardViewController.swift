@@ -31,6 +31,7 @@ final class KeyboardViewController: UIInputViewController {
     private var lastResolvedDarkAppearance: Bool?
     private var themeDarwinObserver: AppGroupNotifications.Observer?
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
+    private var aiConfigDarwinObserver: AppGroupNotifications.Observer?
     private var heightConstraint: NSLayoutConstraint?
     /// 顶部工具栏（候选栏）高度约束：设置页调整候选栏高度后需同步更新，否则键盘总高变了但候选栏区域不变
     private var toolbarHeightConstraint: NSLayoutConstraint?
@@ -157,6 +158,13 @@ final class KeyboardViewController: UIInputViewController {
         settingsDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.settingsChanged) { [weak self] in
             self?.reloadConfigurationIfNeeded()
         }
+        aiConfigDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.aiConfigChanged) { [weak self] in
+            guard let self else { return }
+            KeyboardPermissionHeartbeat.record(hasFullAccess: self.hasFullAccess, aiConfigured: AIConfig.load().isConfigured)
+            if self.activePanel == .ai {
+                self.aiPanel.refreshAfterConfigChange(hasFullAccess: self.hasFullAccess)
+            }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -164,12 +172,16 @@ final class KeyboardViewController: UIInputViewController {
         if !AppGroup.isAvailable && hasFullAccess {
             tryImportBridgeTokenFromPasteboardIfPresent()
         }
+        KeyboardPermissionHeartbeat.record(hasFullAccess: hasFullAccess, aiConfigured: AIConfig.load().isConfigured)
         reloadConfigurationIfNeeded()
         adaptToHostTraits()
         feedback.prepare()
         refreshClipboardState()
         updateReturnKeyAppearance()
         autoCapitalizeIfNeeded()
+        if activePanel == .ai {
+            aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
+        }
         if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
             triggerSideloadBridgeSync(force: false)
         }
@@ -186,7 +198,8 @@ final class KeyboardViewController: UIInputViewController {
 
     @discardableResult
     private func tryImportBridgeTokenFromPasteboardIfPresent() -> Bool {
-        guard UIPasteboard.general.hasStrings,
+        guard hasFullAccess,
+              UIPasteboard.general.hasStrings,
               let text = UIPasteboard.general.string,
               text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(SideloadConfigBridge.tokenPrefix) else {
             return false
@@ -194,9 +207,57 @@ final class KeyboardViewController: UIInputViewController {
         let ok = SideloadConfigBridge.importPairingToken(text)
         if ok {
             ClipboardStore.markChangeCountHandled(UIPasteboard.general.changeCount)
-            triggerSideloadBridgeSync(force: true)
+            // 导入完成后立即清空剪贴板中的一次性密钥口令，防止敏感 Key 滞留系统剪贴板
+            UIPasteboard.general.string = ""
+            ClipboardStore.markChangeCountHandled(UIPasteboard.general.changeCount)
+            reloadConfigurationIfNeeded()
+            if activePanel == .ai {
+                aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
+            }
+            if SideloadConfigBridge.isPairedInThisProcess {
+                triggerSideloadBridgeSync(force: true)
+            }
         }
         return ok
+    }
+
+    /// 兼容 iOS 16–18 与 APPLICATION_EXTENSION_API_ONLY=YES 的安全 URL 跳转（优先官方 NSExtensionContext，兜底现代 responder-chain openURL:options:completionHandler:）。
+    private func openURLFromExtension(_ url: URL, completion: @escaping (Bool) -> Void) {
+        if let ctx = extensionContext {
+            ctx.open(url) { [weak self] opened in
+                if opened {
+                    DispatchQueue.main.async { completion(true) }
+                } else {
+                    DispatchQueue.main.async {
+                        guard let self else {
+                            completion(false)
+                            return
+                        }
+                        self.openURLViaModernResponderChain(url, completion: completion)
+                    }
+                }
+            }
+        } else {
+            openURLViaModernResponderChain(url, completion: completion)
+        }
+    }
+
+    private func openURLViaModernResponderChain(_ url: URL, completion: @escaping (Bool) -> Void) {
+        let modernSelector = NSSelectorFromString("openURL:options:completionHandler:")
+        var responder: UIResponder? = self.next
+        while let current = responder {
+            if current.responds(to: modernSelector), let imp = current.method(for: modernSelector) {
+                typealias OpenURLIMP = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, (@convention(block) (Bool) -> Void)?) -> Void
+                let fn = unsafeBitCast(imp, to: OpenURLIMP.self)
+                let callback: @convention(block) (Bool) -> Void = { success in
+                    DispatchQueue.main.async { completion(success) }
+                }
+                fn(current, modernSelector, url as NSURL, [:] as NSDictionary, callback)
+                return
+            }
+            responder = current.next
+        }
+        completion(false)
     }
 
     private func triggerSideloadBridgeSync(force: Bool) {
@@ -574,6 +635,32 @@ final class KeyboardViewController: UIInputViewController {
             self.clearAllComposing()
             self.aiPromptDraft = ""
             self.switchToPanel(.letters)
+        }
+        aiPanel.onOpenFullAccessSettings = { [weak self] done in
+            guard let self else { done(false); return }
+            if let settingsURL = URL(string: "app-settings:") {
+                self.openURLFromExtension(settingsURL) { [weak self] opened in
+                    if opened {
+                        done(true)
+                    } else if let self, let appPermURL = URL(string: "lingxi://permissions") {
+                        self.openURLFromExtension(appPermURL, completion: done)
+                    } else {
+                        done(false)
+                    }
+                }
+            } else {
+                done(false)
+            }
+        }
+        aiPanel.onOpenHostAppAI = { [weak self] done in
+            guard let self, let url = URL(string: "lingxi://ai-settings") else {
+                done(false)
+                return
+            }
+            self.openURLFromExtension(url, completion: done)
+        }
+        aiPanel.onImportBridgeToken = { [weak self] in
+            self?.tryImportBridgeTokenFromPasteboardIfPresent() ?? false
         }
         aiPanel.onClose = { [weak self] in
             self?.aiPromptDraft = nil
@@ -2400,6 +2487,9 @@ final class KeyboardViewController: UIInputViewController {
 
     private func openAIPanel(preferredAction: AIPresetAction?, explicitClipboard: String?) {
         commitRawIfNeeded()
+        if !AppGroup.isAvailable && hasFullAccess {
+            _ = tryImportBridgeTokenFromPasteboardIfPresent()
+        }
         switchToPanel(.ai)
         let hostBefore = textDocumentProxy.documentContextBeforeInput ?? ""
         let before = (hostBefore.isEmpty && isTranslateMode && !translateSourceBuffer.isEmpty) ? translateSourceBuffer : hostBefore
