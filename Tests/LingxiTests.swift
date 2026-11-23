@@ -1985,7 +1985,7 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(bulkCfg.save())
         let reloadedBulk = AIConfig.load()
         XCTAssertEqual(reloadedBulk.fetchedModels.count, 300)
-        XCTAssertEqual(reloadedBulk.fetchedModels.last?.id, "org-300/very-long-model-name-preview-2026-01-v300")
+        XCTAssertEqual(reloadedBulk.fetchedModels.last?.id, "org-300/very-long-model-name-preview-2026-04-v300")
         XCTAssertEqual(reloadedBulk.fetchedModels.last?.displayName, "Model Full Display Name #300")
 
         // 4. 免费侧载无云登录状态下也可通过本机直传口令把 AI 密钥/模型同步给键盘 + 键盘权限心跳往返
