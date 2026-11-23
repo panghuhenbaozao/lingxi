@@ -1,14 +1,16 @@
 import UIKit
 
-/// 极简高效键盘内嵌 AI 工作台（v5.3 精简重构）：
-/// - 顶部独立「可打字 + 可粘贴」输入框：点框即切回键盘打字（上方常驻输入框永不被候选词挡住），点「粘贴」直接导入剪贴板，点「发送」直接问答；
-/// - 砍掉所有低频花哨按钮，仅保留 6 项天天用得上的核心快捷能力（润色 / 回复 / 译英 / 译中 / 纠错 / 精简）及用户手动置顶的自定义指令；
-/// - 底部清爽 3 键：重试/停止 · 替换 · 插入，外加一键权限/同步修复入口。
-final class AIAssistantPanelView: UIView {
+/// 极简高效键盘内嵌 AI 工作台（v5.4 升级）：
+/// - 顶部「可打字 + 可粘贴」输入框 + 6 项核心高频技能 + 🕒 历史记录 + ⤢ 阅读拉高；
+/// - 翻看长回答或打开历史记录时自动拉高键盘高度，正文支持长按自由选中任意片段，也支持一键复制全文与历史条目；
+/// - 底部清爽 4 键：重试/停止 · 复制 · 替换 · 插入。
+final class AIAssistantPanelView: UIView, UITextViewDelegate {
     var onInsertText: ((String) -> Void)?
     var onReplaceBeforeCursor: ((Int, String) -> Void)?
     /// 点击输入框开始在键盘中打字（携带当前输入框草稿，键盘上方常驻 AI 输入条随时可见）
     var onBeginTypingPrompt: ((String) -> Void)?
+    /// 翻看回答 / 打开历史记录 / 点击拉高按钮时通知宿主控制器平滑拉高或还原键盘高度
+    var onReadingHeightChanged: ((Bool) -> Void)?
     var onOpenFullAccessSettings: ((@escaping (Bool) -> Void) -> Void)?
     var onOpenHostAppAI: ((@escaping (Bool) -> Void) -> Void)?
     var onImportBridgeToken: (() -> Bool)?
@@ -34,6 +36,8 @@ final class AIAssistantPanelView: UIView {
     private var generatedText = ""
     private var thinkingText = ""
     private var isThinkingExpanded = false
+    private var showingHistory = false
+    private(set) var isExpandedReadingHeight = false
 
     // Row 1: 顶部可打字 / 可粘贴输入框
     private let inputBoxButton = ActionClosureButton(type: .custom)
@@ -43,25 +47,32 @@ final class AIAssistantPanelView: UIView {
     private let sendButton = ActionClosureButton(type: .system)
     private let closeButton = ActionClosureButton(type: .system)
 
-    // Row 2: 6 大核心精简能力条
+    // Row 2: 6 大核心精简能力条 + 右侧固定 [🕒历史] [⤢拉高]
     private let actionsScroll = LingxiScrollView()
     private let actionsStack = UIStackView()
+    private let historyToggleButton = ActionClosureButton(type: .system)
+    private let heightToggleButton = ActionClosureButton(type: .system)
 
     // 思考过程独立折叠区（仅模型真实输出思考链时出现）
     private let thoughtToggleButton = ActionClosureButton(type: .system)
     private let thoughtTextView = UITextView()
 
-    // 流式正文输出区
+    // 流式正文输出区（支持自由长按选中复制 + 上下滑动翻看自动拉高键盘）
     private let outputTextView = UITextView()
+
+    // 内置 AI 历史记录抽屉列表
+    private let historyScroll = LingxiScrollView()
+    private let historyStack = UIStackView()
 
     // 权限 / 配置一键修复条（未开完全访问或未同步 Key 时显式展示）
     private let permissionBar = UIStackView()
     private let permissionPrimaryButton = ActionClosureButton(type: .system)
     private let permissionSecondaryButton = ActionClosureButton(type: .system)
 
-    // 底部清爽 3 按钮：重试/停止 · 替换 · 插入
+    // 底部清爽 4 键：重试/停止 · 复制 · 替换 · 插入
     private let bottomBar = UIStackView()
     private let stopOrRetryButton = ActionClosureButton(type: .system)
+    private let copyButton = ActionClosureButton(type: .system)
     private let replaceButton = ActionClosureButton(type: .system)
     private let insertButton = ActionClosureButton(type: .system)
 
@@ -127,17 +138,39 @@ final class AIAssistantPanelView: UIView {
         closeButton.layer.cornerCurve = .continuous
         closeButton.actionHandler = { [weak self] in
             self?.streamTask?.cancel()
+            self?.setExpandedReadingHeight(false)
             self?.onClose?()
         }
         addSubview(closeButton)
 
-        // 2. 6 大核心精简能力条
+        // 2. 6 大核心精简能力条 + 右侧固定 [历史] [拉高]
         actionsScroll.showsHorizontalScrollIndicator = false
         addSubview(actionsScroll)
         actionsStack.axis = .horizontal
         actionsStack.spacing = 6
         actionsStack.alignment = .center
         actionsScroll.addSubview(actionsStack)
+
+        historyToggleButton.setTitle("历史", for: .normal)
+        let histImg = UIImage(systemName: "clock.arrow.circlepath", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        historyToggleButton.setImage(histImg, for: .normal)
+        historyToggleButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        historyToggleButton.layer.cornerRadius = 14
+        historyToggleButton.layer.cornerCurve = .continuous
+        historyToggleButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        historyToggleButton.actionHandler = { [weak self] in self?.toggleHistoryDrawer() }
+        addSubview(historyToggleButton)
+
+        let expandImg = UIImage(systemName: "arrow.up.left.and.arrow.down.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        heightToggleButton.setImage(expandImg, for: .normal)
+        heightToggleButton.accessibilityLabel = "拉高阅读高度"
+        heightToggleButton.layer.cornerRadius = 14
+        heightToggleButton.layer.cornerCurve = .continuous
+        heightToggleButton.actionHandler = { [weak self] in
+            guard let self else { return }
+            self.setExpandedReadingHeight(!self.isExpandedReadingHeight)
+        }
+        addSubview(heightToggleButton)
 
         // 3. 可折叠思考过程
         thoughtToggleButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
@@ -155,6 +188,7 @@ final class AIAssistantPanelView: UIView {
         addSubview(thoughtToggleButton)
 
         thoughtTextView.isEditable = false
+        thoughtTextView.isSelectable = true
         thoughtTextView.font = .systemFont(ofSize: 11.5, weight: .regular)
         thoughtTextView.layer.cornerRadius = 8
         thoughtTextView.layer.cornerCurve = .continuous
@@ -162,15 +196,26 @@ final class AIAssistantPanelView: UIView {
         thoughtTextView.isHidden = true
         addSubview(thoughtTextView)
 
-        // 4. 正文输出区
+        // 4. 正文输出区（显式开启自由选中复制 + 翻看滑动自动拉高键盘）
         outputTextView.isEditable = false
-        outputTextView.font = .systemFont(ofSize: 14, weight: .regular)
+        outputTextView.isSelectable = true
+        outputTextView.delegate = self
+        outputTextView.font = .systemFont(ofSize: 14.5, weight: .regular)
         outputTextView.layer.cornerRadius = 11
         outputTextView.layer.cornerCurve = .continuous
-        outputTextView.textContainerInset = UIEdgeInsets(top: 9, left: 10, bottom: 9, right: 10)
+        outputTextView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         addSubview(outputTextView)
 
-        // 5. 一键权限 / 配置修复条
+        // 5. 历史记录抽屉
+        historyScroll.showsVerticalScrollIndicator = true
+        historyScroll.isHidden = true
+        addSubview(historyScroll)
+        historyStack.axis = .vertical
+        historyStack.spacing = 8
+        historyStack.alignment = .fill
+        historyScroll.addSubview(historyStack)
+
+        // 6. 一键权限 / 配置修复条
         permissionBar.axis = .horizontal
         permissionBar.spacing = 6
         permissionBar.distribution = .fill
@@ -198,14 +243,17 @@ final class AIAssistantPanelView: UIView {
         }
         permissionBar.addArrangedSubview(permissionSecondaryButton)
 
-        // 6. 底部 3 键
+        // 7. 底部 4 键：重试 · 复制 · 替换 · 插入
         bottomBar.axis = .horizontal
         bottomBar.distribution = .fillEqually
-        bottomBar.spacing = 8
+        bottomBar.spacing = 6
         addSubview(bottomBar)
 
         stopOrRetryButton.setTitle("重试", for: .normal)
         stopOrRetryButton.actionHandler = { [weak self] in self?.handleStopOrRetry() }
+
+        copyButton.setTitle("复制", for: .normal)
+        copyButton.actionHandler = { [weak self] in self?.handleCopyGeneratedText() }
 
         replaceButton.setTitle("替换", for: .normal)
         replaceButton.actionHandler = { [weak self] in self?.handleReplace() }
@@ -213,11 +261,41 @@ final class AIAssistantPanelView: UIView {
         insertButton.setTitle("插入", for: .normal)
         insertButton.actionHandler = { [weak self] in self?.handleInsert() }
 
-        for btn in [stopOrRetryButton, replaceButton, insertButton] {
+        for btn in [stopOrRetryButton, copyButton, replaceButton, insertButton] {
             btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
             btn.layer.cornerRadius = 9
             btn.layer.cornerCurve = .continuous
             bottomBar.addArrangedSubview(btn)
+        }
+    }
+
+    // 翻看长回答时自动拉高键盘高度，阅读更顺手
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard scrollView === outputTextView,
+              !isExpandedReadingHeight,
+              scrollView.contentSize.height > scrollView.bounds.height + 10 else {
+            return
+        }
+        setExpandedReadingHeight(true)
+    }
+
+    private func setExpandedReadingHeight(_ expanded: Bool) {
+        guard isExpandedReadingHeight != expanded else { return }
+        isExpandedReadingHeight = expanded
+        updateHeightToggleIcon()
+        onReadingHeightChanged?(expanded)
+    }
+
+    private func updateHeightToggleIcon() {
+        let symbol = isExpandedReadingHeight
+            ? "arrow.down.right.and.arrow.up.left"
+            : "arrow.up.left.and.arrow.down.right"
+        let img = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        heightToggleButton.setImage(img, for: .normal)
+        heightToggleButton.accessibilityLabel = isExpandedReadingHeight ? "还原键盘高度" : "拉高阅读高度"
+        if let theme {
+            heightToggleButton.backgroundColor = isExpandedReadingHeight ? theme.accentFill.withAlphaComponent(0.20) : theme.specialKeyFill
+            heightToggleButton.tintColor = isExpandedReadingHeight ? theme.candidateHighlight : theme.keyText
         }
     }
 
@@ -245,13 +323,19 @@ final class AIAssistantPanelView: UIView {
         }
         inputTextLabel.frame = CGRect(x: 10, y: 0, width: max(30, boxW - 16 - clearW), height: topH)
 
-        // Row 2: 精简 6 项核心快捷动作
+        // Row 2: 精简 6 项核心快捷动作 + 右侧固定 [历史] [拉高]
         let actY = inputBoxButton.frame.maxY + 6
         let actH: CGFloat = 30
-        actionsScroll.frame = CGRect(x: 0, y: actY, width: bounds.width, height: actH)
+        let heightBtnW: CGFloat = 30
+        let histBtnW: CGFloat = 56
+        heightToggleButton.frame = CGRect(x: bounds.width - pad - heightBtnW, y: actY, width: heightBtnW, height: actH)
+        historyToggleButton.frame = CGRect(x: heightToggleButton.frame.minX - 5 - histBtnW, y: actY, width: histBtnW, height: actH)
+
+        let actionsW = max(80, historyToggleButton.frame.minX - 6)
+        actionsScroll.frame = CGRect(x: 0, y: actY, width: actionsW, height: actH)
         let actionsNaturalW = ceil(actionsStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
         actionsStack.frame = CGRect(x: pad, y: 0, width: actionsNaturalW, height: actH)
-        actionsScroll.contentSize = CGSize(width: max(bounds.width, actionsNaturalW + pad * 2), height: actH)
+        actionsScroll.contentSize = CGSize(width: max(actionsW, actionsNaturalW + pad * 2), height: actH)
 
         // Bottom bar
         let bottomH: CGFloat = 36
@@ -265,12 +349,12 @@ final class AIAssistantPanelView: UIView {
         }
 
         var contentY = actionsScroll.frame.maxY + 6
-        if !thoughtToggleButton.isHidden {
+        if !showingHistory && !thoughtToggleButton.isHidden {
             thoughtToggleButton.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: 22)
             contentY = thoughtToggleButton.frame.maxY + 3
             if isThinkingExpanded {
                 thoughtTextView.isHidden = false
-                let thH = min(56, max(32, (contentBottom - contentY) * 0.36))
+                let thH = min(64, max(36, (contentBottom - contentY) * 0.32))
                 thoughtTextView.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: thH)
                 contentY = thoughtTextView.frame.maxY + 4
             } else {
@@ -280,12 +364,25 @@ final class AIAssistantPanelView: UIView {
             thoughtTextView.isHidden = true
         }
 
-        outputTextView.frame = CGRect(
+        let contentRect = CGRect(
             x: pad,
             y: contentY,
             width: bounds.width - pad * 2,
-            height: max(40, contentBottom - contentY - 6)
+            height: max(48, contentBottom - contentY - 6)
         )
+        outputTextView.frame = contentRect
+
+        if !historyScroll.isHidden {
+            historyScroll.frame = contentRect
+            let hw = max(80, contentRect.width)
+            let fit = historyStack.systemLayoutSizeFitting(
+                CGSize(width: hw, height: UIView.layoutFittingCompressedSize.height),
+                withHorizontalFittingPriority: .required,
+                verticalFittingPriority: .fittingSizeLevel
+            )
+            historyStack.frame = CGRect(x: 0, y: 0, width: hw, height: fit.height)
+            historyScroll.contentSize = CGSize(width: hw, height: fit.height + 10)
+        }
     }
 
     // MARK: - 外部入口
@@ -300,6 +397,9 @@ final class AIAssistantPanelView: UIView {
     ) {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
+        self.showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
 
         let cleanBefore = beforeCursor.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanClip = (clipboardText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -339,6 +439,10 @@ final class AIAssistantPanelView: UIView {
     ) {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
+        self.showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+
         let cleanQ = question.trimmingCharacters(in: .whitespacesAndNewlines)
         self.inputDraftText = cleanQ
         let cleanBefore = beforeCursor.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -356,7 +460,7 @@ final class AIAssistantPanelView: UIView {
         lastAction = nil
         lastCustomTemplateID = nil
         lastRunPair = (fullPrompt, sysPrompt, "自由提问", false, false)
-        streamPrompt(prompt: fullPrompt, systemInstruction: sysPrompt, featureTag: "ai_ask")
+        streamPrompt(prompt: fullPrompt, systemInstruction: sysPrompt, featureTag: "ai_ask", displayPrompt: cleanQ)
     }
 
     func runDirectInstruction(
@@ -369,6 +473,9 @@ final class AIAssistantPanelView: UIView {
     ) {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
+        self.showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
         self.inputDraftText = sourceText
         self.hostReplaceCount = replaceCount
 
@@ -380,7 +487,7 @@ final class AIAssistantPanelView: UIView {
         lastAction = nil
         lastCustomTemplateID = nil
         lastRunPair = (sourceText, instruction, title, true, false)
-        streamPrompt(prompt: sourceText, systemInstruction: instruction, featureTag: "ai_direct", preferFast: true)
+        streamPrompt(prompt: sourceText, systemInstruction: instruction, featureTag: "ai_direct", displayPrompt: sourceText, preferFast: true)
     }
 
     func refreshAfterConfigChange(hasFullAccess: Bool) {
@@ -390,7 +497,7 @@ final class AIAssistantPanelView: UIView {
             applyTheme(theme)
             rebuildActionButtons(theme: theme)
         }
-        if generatedText.isEmpty {
+        if generatedText.isEmpty && !showingHistory {
             showIdleGuidance()
         } else {
             refreshPermissionBarVisibility()
@@ -414,6 +521,12 @@ final class AIAssistantPanelView: UIView {
         closeButton.backgroundColor = theme.specialKeyFill
         closeButton.setTitleColor(theme.keyText, for: .normal)
 
+        historyToggleButton.backgroundColor = showingHistory ? theme.accentFill : theme.specialKeyFill
+        historyToggleButton.setTitleColor(showingHistory ? theme.accentText : theme.keyText, for: .normal)
+        historyToggleButton.tintColor = showingHistory ? theme.accentText : theme.keyText
+
+        updateHeightToggleIcon()
+
         thoughtToggleButton.backgroundColor = theme.specialKeyFill.withAlphaComponent(0.85)
         thoughtToggleButton.setTitleColor(theme.keyHintText, for: .normal)
         thoughtTextView.backgroundColor = theme.specialKeyFill.withAlphaComponent(0.55)
@@ -421,6 +534,7 @@ final class AIAssistantPanelView: UIView {
 
         outputTextView.backgroundColor = theme.keyFill.withAlphaComponent(0.96)
         outputTextView.textColor = theme.keyText
+        outputTextView.tintColor = theme.accentFill
 
         permissionPrimaryButton.backgroundColor = theme.accentFill
         permissionPrimaryButton.setTitleColor(theme.accentText, for: .normal)
@@ -430,11 +544,169 @@ final class AIAssistantPanelView: UIView {
         stopOrRetryButton.backgroundColor = theme.specialKeyFill
         stopOrRetryButton.setTitleColor(theme.keyText, for: .normal)
 
+        copyButton.backgroundColor = theme.specialKeyFill
+        copyButton.setTitleColor(theme.keyText, for: .normal)
+
         replaceButton.backgroundColor = theme.specialKeyFill
         replaceButton.setTitleColor(theme.keyText, for: .normal)
 
         insertButton.backgroundColor = theme.accentFill
         insertButton.setTitleColor(theme.accentText, for: .normal)
+    }
+
+    // MARK: - 历史记录抽屉
+
+    private func toggleHistoryDrawer() {
+        showingHistory.toggle()
+        if showingHistory {
+            setExpandedReadingHeight(true)
+            rebuildHistoryList()
+            outputTextView.isHidden = true
+            thoughtToggleButton.isHidden = true
+            thoughtTextView.isHidden = true
+            historyScroll.isHidden = false
+        } else {
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
+            thoughtToggleButton.isHidden = thinkingText.isEmpty
+        }
+        if let theme { applyTheme(theme) }
+        setNeedsLayout()
+    }
+
+    private func rebuildHistoryList() {
+        historyStack.arrangedSubviews.forEach {
+            historyStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        guard let theme else { return }
+        let items = AIRecentHistoryStore.load()
+
+        let header = UIStackView()
+        header.axis = .horizontal
+        header.alignment = .center
+
+        let titleLbl = UILabel()
+        titleLbl.text = items.isEmpty ? "🕒 暂无 AI 回答历史" : "🕒 最近 AI 回答（共 \(items.count) 条 · 点卡片看全文）"
+        titleLbl.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLbl.textColor = theme.keyHintText
+        header.addArrangedSubview(titleLbl)
+
+        if !items.isEmpty {
+            let clearBtn = ActionClosureButton(type: .system)
+            clearBtn.setTitle("清空", for: .normal)
+            clearBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+            clearBtn.setTitleColor(.systemRed, for: .normal)
+            clearBtn.actionHandler = { [weak self] in
+                AIRecentHistoryStore.clear()
+                self?.rebuildHistoryList()
+            }
+            header.addArrangedSubview(clearBtn)
+        }
+        historyStack.addArrangedSubview(header)
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+
+        for item in items {
+            let card = UIView()
+            card.backgroundColor = theme.keyFill.withAlphaComponent(0.96)
+            card.layer.cornerRadius = 11
+            card.layer.cornerCurve = .continuous
+            card.layer.borderWidth = 0.6
+            card.layer.borderColor = theme.keyBorder.cgColor
+
+            let inner = UIStackView()
+            inner.axis = .vertical
+            inner.spacing = 6
+            inner.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(inner)
+            NSLayoutConstraint.activate([
+                inner.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+                inner.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
+                inner.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
+                inner.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
+            ])
+
+            let topMeta = UIStackView()
+            topMeta.axis = .horizontal
+            topMeta.alignment = .center
+            topMeta.spacing = 6
+
+            let tagLbl = UILabel()
+            tagLbl.text = "\(item.title) · \(fmt.string(from: item.createdAt))"
+            tagLbl.font = .systemFont(ofSize: 11, weight: .bold)
+            tagLbl.textColor = theme.candidateHighlight
+            tagLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            topMeta.addArrangedSubview(tagLbl)
+
+            let copyCardBtn = ActionClosureButton(type: .system)
+            copyCardBtn.setTitle("复制", for: .normal)
+            copyCardBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+            copyCardBtn.backgroundColor = theme.specialKeyFill
+            copyCardBtn.setTitleColor(theme.keyText, for: .normal)
+            copyCardBtn.layer.cornerRadius = 7
+            copyCardBtn.contentEdgeInsets = UIEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+            copyCardBtn.actionHandler = { [weak copyCardBtn] in
+                UIPasteboard.general.string = item.output
+                _ = ClipboardStore.record(item.output)
+                copyCardBtn?.setTitle("✓已复制", for: .normal)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    copyCardBtn?.setTitle("复制", for: .normal)
+                }
+            }
+            topMeta.addArrangedSubview(copyCardBtn)
+
+            let insertCardBtn = ActionClosureButton(type: .system)
+            insertCardBtn.setTitle("插入", for: .normal)
+            insertCardBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .bold)
+            insertCardBtn.backgroundColor = theme.accentFill
+            insertCardBtn.setTitleColor(theme.accentText, for: .normal)
+            insertCardBtn.layer.cornerRadius = 7
+            insertCardBtn.contentEdgeInsets = UIEdgeInsets(top: 3, left: 9, bottom: 3, right: 9)
+            insertCardBtn.actionHandler = { [weak self] in
+                self?.onInsertText?(item.output)
+            }
+            topMeta.addArrangedSubview(insertCardBtn)
+            inner.addArrangedSubview(topMeta)
+
+            let previewBtn = ActionClosureButton(type: .custom)
+            previewBtn.contentHorizontalAlignment = .leading
+            previewBtn.titleLabel?.numberOfLines = 4
+            previewBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+            let attr = NSMutableAttributedString()
+            if !item.prompt.isEmpty {
+                attr.append(NSAttributedString(
+                    string: "问：\(item.prompt.prefix(36))\n",
+                    attributes: [.font: UIFont.systemFont(ofSize: 11.5, weight: .medium), .foregroundColor: theme.keyHintText]
+                ))
+            }
+            attr.append(NSAttributedString(
+                string: item.output,
+                attributes: [.font: UIFont.systemFont(ofSize: 13.5, weight: .regular), .foregroundColor: theme.keyText]
+            ))
+            previewBtn.setAttributedTitle(attr, for: .normal)
+            previewBtn.actionHandler = { [weak self] in
+                guard let self else { return }
+                self.showingHistory = false
+                self.historyScroll.isHidden = true
+                self.outputTextView.isHidden = false
+                if !item.prompt.isEmpty {
+                    self.inputDraftText = item.prompt
+                    self.refreshInputBoxDisplay()
+                }
+                self.generatedText = item.output
+                self.outputTextView.text = item.output
+                self.outputTextView.contentOffset = .zero
+                self.setExpandedReadingHeight(true)
+                if let t = self.theme { self.applyTheme(t) }
+                self.updateActionButtonsEnabled()
+            }
+            inner.addArrangedSubview(previewBtn)
+
+            historyStack.addArrangedSubview(card)
+        }
+        setNeedsLayout()
     }
 
     // MARK: - 内部 UI 刷新与输入交互
@@ -471,6 +743,9 @@ final class AIAssistantPanelView: UIView {
         }()
 
         guard let pasted = clipText, !pasted.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
             outputTextView.text = hasFullAccess
                 ? "📋 剪贴板为空：先复制一段聊天消息或文章，再点「粘贴」即可直接让 AI 处理。"
                 : "⚠️ 开启「允许完全访问」后即可一键读取系统剪贴板；也可以直接点上方输入框打字。"
@@ -478,6 +753,9 @@ final class AIAssistantPanelView: UIView {
             return
         }
 
+        showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
         inputDraftText = pasted
         hostReplaceCount = 0
         refreshInputBoxDisplay()
@@ -491,6 +769,9 @@ final class AIAssistantPanelView: UIView {
         thinkingText = ""
         thoughtToggleButton.isHidden = true
         thoughtTextView.isHidden = true
+        showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
         refreshInputBoxDisplay()
         showIdleGuidance()
     }
@@ -498,7 +779,6 @@ final class AIAssistantPanelView: UIView {
     private func handleSendFreeQuestion() {
         let q = inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else {
-            // 输入框为空时，点发送直接进入打字模式！
             onBeginTypingPrompt?("")
             return
         }
@@ -507,7 +787,7 @@ final class AIAssistantPanelView: UIView {
         lastCustomTemplateID = nil
         lastRunPair = (q, sys, "自由提问", false, false)
         if let theme { rebuildActionButtons(theme: theme) }
-        streamPrompt(prompt: q, systemInstruction: sys, featureTag: "ai_ask")
+        streamPrompt(prompt: q, systemInstruction: sys, featureTag: "ai_ask", displayPrompt: q)
     }
 
     private func rebuildActionButtons(theme: ResolvedTheme) {
@@ -526,7 +806,7 @@ final class AIAssistantPanelView: UIView {
             btn.layer.cornerCurve = .continuous
             btn.layer.borderWidth = selected ? 0 : 0.5
             btn.layer.borderColor = theme.keyBorder.cgColor
-            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 11, bottom: 5, right: 11)
+            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
             btn.actionHandler = handler
             actionsStack.addArrangedSubview(btn)
         }
@@ -536,8 +816,8 @@ final class AIAssistantPanelView: UIView {
             switch action {
             case .polish: shortTitle = "✨ 润色"
             case .eqReply: shortTitle = "💬 回复"
-            case .translateEn: shortTitle = "🌐 译英文"
-            case .translateZh: shortTitle = "🇨🇳 译中文"
+            case .translateEn: shortTitle = "🌐 译英"
+            case .translateZh: shortTitle = "🇨🇳 译中"
             case .proofread: shortTitle = "✓ 纠错"
             case .summarize: shortTitle = "✂️ 精简"
             default: shortTitle = action.title
@@ -582,6 +862,9 @@ final class AIAssistantPanelView: UIView {
         if let theme { rebuildActionButtons(theme: theme) }
         let source = resolveWorkingTextOrFallback()
         guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
             outputTextView.text = "请先点上方输入框打字，或点「粘贴」放入内容，再点「\(action.title)」。"
             refreshPermissionBarVisibility()
             return
@@ -591,6 +874,7 @@ final class AIAssistantPanelView: UIView {
             prompt: source,
             systemInstruction: action.systemPrompt,
             featureTag: action.rawValue,
+            displayPrompt: source,
             preferFast: !action.prefersDeepModel,
             preferDeep: action.prefersDeepModel
         )
@@ -602,13 +886,16 @@ final class AIAssistantPanelView: UIView {
         if let theme { rebuildActionButtons(theme: theme) }
         let source = resolveWorkingTextOrFallback()
         guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
             outputTextView.text = "请先点上方输入框打字，或点「粘贴」放入内容，再点「\(template.title)」。"
             refreshPermissionBarVisibility()
             return
         }
         let sys = template.effectiveSystemPrompt
         lastRunPair = (source, sys, template.title, false, template.useDeepModel)
-        streamPrompt(prompt: source, systemInstruction: sys, featureTag: "custom_prompt", preferDeep: template.useDeepModel)
+        streamPrompt(prompt: source, systemInstruction: sys, featureTag: "custom_prompt", displayPrompt: source, preferDeep: template.useDeepModel)
     }
 
     // MARK: - 权限与引导
@@ -675,9 +962,9 @@ final class AIAssistantPanelView: UIView {
                 ? "✨ 尚未填写 AI API Key。点下方按钮直达「灵犀 App → AI 智脑」填好即可使用。"
                 : "✨ 免费侧载沙盒隔离：点下方打开「灵犀 App → AI 智脑」点击「同步给键盘」再切回即可。"
         } else if !inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n点「发送」直接问 AI，或点上方「润色 / 回复 / 译英文 / 译中文」一键生成。"
+            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n点「发送」直接问 AI，或点上方「润色 / 回复 / 译英 / 译中」一键生成。"
         } else {
-            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n• 点上方输入框可直接打字问 AI\n• 点「粘贴」可将剪贴板内容放入输入框\n• 生成后点下方「插入」或「替换」立即上屏"
+            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n• 点上方输入框可直接打字问 AI，或点「粘贴」放入内容\n• 回答正文支持长按自由选词复制，也支持一键「复制 / 插入」\n• 点右侧「历史」可随时翻阅历史回答并自动拉高阅读空间"
         }
         refreshPermissionBarVisibility()
         updateActionButtonsEnabled()
@@ -694,6 +981,7 @@ final class AIAssistantPanelView: UIView {
         prompt: String,
         systemInstruction: String,
         featureTag: String,
+        displayPrompt: String = "",
         preferFast: Bool = false,
         preferDeep: Bool = false
     ) {
@@ -708,6 +996,11 @@ final class AIAssistantPanelView: UIView {
             showIdleGuidance()
             return
         }
+
+        showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        if let theme { applyTheme(theme) }
 
         permissionBar.isHidden = true
         generatedText = ""
@@ -764,7 +1057,11 @@ final class AIAssistantPanelView: UIView {
                     if finalClean.isEmpty {
                         self.outputTextView.text = "⚠️ 模型未返回正文，请检查模型配置或点击重试。"
                     } else {
-                        AIRecentHistoryStore.record(title: self.lastRunPair?.title ?? "AI 助手", output: finalClean)
+                        AIRecentHistoryStore.record(
+                            title: self.lastRunPair?.title ?? "AI 助手",
+                            output: finalClean,
+                            prompt: displayPrompt.isEmpty ? self.inputDraftText : displayPrompt
+                        )
                     }
                     self.stopOrRetryButton.setTitle("重试", for: .normal)
                     self.updateActionButtonsEnabled()
@@ -782,11 +1079,24 @@ final class AIAssistantPanelView: UIView {
     private func updateActionButtonsEnabled() {
         let ready = !generatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         setNeedsLayout()
+        copyButton.isEnabled = ready
+        copyButton.alpha = ready ? 1.0 : 0.45
         insertButton.isEnabled = ready
         insertButton.alpha = ready ? 1.0 : 0.45
         let canReplace = ready && hostReplaceCount > 0
         replaceButton.isEnabled = canReplace
         replaceButton.alpha = canReplace ? 1.0 : 0.42
+    }
+
+    private func handleCopyGeneratedText() {
+        let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        UIPasteboard.general.string = trimmed
+        _ = ClipboardStore.record(trimmed)
+        copyButton.setTitle("✓已复制", for: .normal)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
+            self?.copyButton.setTitle("复制", for: .normal)
+        }
     }
 
     private func handleStopOrRetry() {
@@ -798,6 +1108,7 @@ final class AIAssistantPanelView: UIView {
                 prompt: pair.prompt,
                 systemInstruction: pair.sys,
                 featureTag: "ai_retry",
+                displayPrompt: inputDraftText,
                 preferFast: pair.preferFast,
                 preferDeep: pair.preferDeep
             )
@@ -809,12 +1120,14 @@ final class AIAssistantPanelView: UIView {
     private func handleReplace() {
         let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, hostReplaceCount > 0 else { return }
+        setExpandedReadingHeight(false)
         onReplaceBeforeCursor?(hostReplaceCount, trimmed)
     }
 
     private func handleInsert() {
         let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        setExpandedReadingHeight(false)
         onInsertText?(trimmed)
     }
 }

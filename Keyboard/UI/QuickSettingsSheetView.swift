@@ -294,16 +294,16 @@ final class QuickSettingsSheetView: UIView {
         row2.distribution = .fillEqually
         row2.spacing = 6
 
-        row2.addArrangedSubview(makeToggleChip("标点:\(settings.punctuationStyle.shortBadge)", on: settings.punctuationStyle == .fullwidth, theme: theme) { [weak self] in
+        row2.addArrangedSubview(makeToggleChip("智能联想", on: settings.bigramPredictionEnabled, theme: theme) { [weak self] in
             guard let self else { return }
-            self.settings.punctuationStyle = (self.settings.punctuationStyle == .fullwidth) ? .halfwidth : .fullwidth
+            self.settings.bigramPredictionEnabled.toggle()
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        row2.addArrangedSubview(makeToggleChip("滑行输入", on: settings.glideTypingEnabled, theme: theme) { [weak self] in
+        row2.addArrangedSubview(makeToggleChip("标点:\(settings.punctuationStyle.shortBadge)", on: settings.punctuationStyle == .fullwidth, theme: theme) { [weak self] in
             guard let self else { return }
-            self.settings.glideTypingEnabled.toggle()
+            self.settings.punctuationStyle = (self.settings.punctuationStyle == .fullwidth) ? .halfwidth : .fullwidth
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
@@ -322,17 +322,11 @@ final class QuickSettingsSheetView: UIView {
         row3.distribution = .fillEqually
         row3.spacing = 6
 
-        let aiCfg = AIConfig.load()
-        row3.addArrangedSubview(makeToggleChip("🧠思考:\(aiCfg.thinkingMode.shortBadge)", on: aiCfg.thinkingMode.isEnabled, theme: theme) { [weak self] in
+        row3.addArrangedSubview(makeToggleChip("滑行输入", on: settings.glideTypingEnabled, theme: theme) { [weak self] in
             guard let self else { return }
-            var cfg = AIConfig.load()
-            let modes: [AIThinkingMode] = [.off, .auto, .low, .medium, .high]
-            if let idx = modes.firstIndex(of: cfg.thinkingMode) {
-                cfg.thinkingMode = modes[(idx + 1) % modes.count]
-            } else {
-                cfg.thinkingMode = .medium
-            }
-            cfg.save()
+            self.settings.glideTypingEnabled.toggle()
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
         row3.addArrangedSubview(makeToggleChip("译:\(settings.translateTargetLang)", on: true, theme: theme) { [weak self] in

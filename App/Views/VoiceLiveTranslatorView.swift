@@ -272,6 +272,10 @@ final class VoiceLiveTranslatorController: ObservableObject {
                     let item = VoiceTranslationHistoryItem(mode: modeSnap, source: clean, target: finalOut)
                     self.history.insert(item, at: 0)
                     if self.history.count > 15 { self.history = Array(self.history.prefix(15)) }
+                    // 录音结束完成精准校译后自动写入剪贴板与历史，切回微信/聊天软件顶栏立刻弹出一键粘贴胶囊
+                    UIPasteboard.general.string = finalOut
+                    _ = ClipboardStore.record(finalOut)
+                    self.statusText = "✓ 已自动复制译文！切回原 App 点键盘顶栏即可直接上屏"
                 }
             } catch is CancellationError {
                 // 新的语音片段到来，自然取消旧任务
@@ -335,6 +339,14 @@ struct VoiceLiveTranslatorView: View {
                             controller.clearAll()
                         }
                         .font(.subheadline)
+                    }
+                }
+            }
+            .onAppear {
+                if appState.voiceTranslatorAutoStart {
+                    appState.voiceTranslatorAutoStart = false
+                    if !controller.isRecording {
+                        Task { await controller.start(aiConfig: appState.aiConfig) }
                     }
                 }
             }

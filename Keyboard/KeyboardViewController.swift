@@ -224,32 +224,16 @@ final class KeyboardViewController: UIInputViewController {
         return ok
     }
 
-    /// 兼容 iOS 16–18 与 APPLICATION_EXTENSION_API_ONLY=YES 的安全 URL 跳转（优先官方 NSExtensionContext，兜底现代 responder-chain openURL:options:completionHandler:）。
+    /// 兼容 iOS 16–18 与 APPLICATION_EXTENSION_API_ONLY=YES 的同步安全 URL 跳转：
+    /// 必须在用户点击事件的同步调用栈内直接查找 UIApplication 并调用非弃用 openURL:options:completionHandler:，
+    /// 避免异步切线程后丢失用户点击手势上下文导致 iOS 静默拒绝跳转（解决点击语音无法拉起主 App 的问题）。
     private func openURLFromExtension(_ url: URL, completion: @escaping (Bool) -> Void) {
-        if let ctx = extensionContext {
-            ctx.open(url) { [weak self] opened in
-                if opened {
-                    DispatchQueue.main.async { completion(true) }
-                } else {
-                    DispatchQueue.main.async {
-                        guard let self else {
-                            completion(false)
-                            return
-                        }
-                        self.openURLViaModernResponderChain(url, completion: completion)
-                    }
-                }
-            }
-        } else {
-            openURLViaModernResponderChain(url, completion: completion)
-        }
-    }
-
-    private func openURLViaModernResponderChain(_ url: URL, completion: @escaping (Bool) -> Void) {
         let modernSelector = NSSelectorFromString("openURL:options:completionHandler:")
-        var responder: UIResponder? = self.next
+        var responder: UIResponder? = self
         while let current = responder {
-            if current.responds(to: modernSelector), let imp = current.method(for: modernSelector) {
+            if current is UIApplication,
+               current.responds(to: modernSelector),
+               let imp = current.method(for: modernSelector) {
                 typealias OpenURLIMP = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, (@convention(block) (Bool) -> Void)?) -> Void
                 let fn = unsafeBitCast(imp, to: OpenURLIMP.self)
                 let callback: @convention(block) (Bool) -> Void = { success in
@@ -260,7 +244,13 @@ final class KeyboardViewController: UIInputViewController {
             }
             responder = current.next
         }
-        completion(false)
+        if let ctx = extensionContext {
+            ctx.open(url) { opened in
+                DispatchQueue.main.async { completion(opened) }
+            }
+        } else {
+            completion(false)
+        }
     }
 
     private func triggerSideloadBridgeSync(force: Bool) {
@@ -537,8 +527,14 @@ final class KeyboardViewController: UIInputViewController {
             baseH += 26
         }
         let bodyH: CGFloat
-        if activePanel == .ai || activePanel == .clipboard {
-            bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 258)
+        if activePanel == .ai {
+            if aiPanel.isExpandedReadingHeight {
+                bodyH = isCompactLandscape ? max(baseH, 218) : max(baseH, 380)
+            } else {
+                bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 312)
+            }
+        } else if activePanel == .clipboard {
+            bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 268)
         } else {
             bodyH = baseH
         }
@@ -583,12 +579,16 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func openHostVoiceTranslator() {
-        guard let url = URL(string: "lingxi://voice-translate") else { return }
+        guard let url = URL(string: "lingxi://voice-translate?autostart=1") else { return }
         openURLFromExtension(url) { [weak self] opened in
             guard let self, !opened else { return }
             if self.isTranslateMode {
-                self.translateErrorText = "请打开「灵犀输入法 App → 语音互译」使用实时双语语音转换"
+                self.translateErrorText = self.hasFullAccess
+                    ? "请切到桌面打开「灵犀输入法 App → 语音互译」使用实时双语语音转换"
+                    : "需开启「允许完全访问」后点顶栏「🎙️语音」（右下角灰色麦是苹果自带切换键）"
                 self.refreshToolbar()
+            } else {
+                self.openAIPanel(preferredAction: nil, explicitClipboard: nil)
             }
         }
     }
@@ -771,6 +771,13 @@ final class KeyboardViewController: UIInputViewController {
             self.aiPromptDraft = existingDraft
             self.switchToPanel(.letters)
         }
+        aiPanel.onReadingHeightChanged = { [weak self] _ in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.updatePreferredHeight()
+                self.view.layoutIfNeeded()
+            }
+        }
         aiPanel.onOpenFullAccessSettings = { [weak self] done in
             guard let self else { done(false); return }
             if let settingsURL = URL(string: "app-settings:") {
@@ -813,6 +820,9 @@ final class KeyboardViewController: UIInputViewController {
             self.updatePreferredHeight()
             if !self.rawComposing.isEmpty {
                 self.recomputeCandidates()
+            } else if !updated.bigramPredictionEnabled {
+                self.currentCandidates = []
+                self.lastCommittedWord = nil
             }
             if translateLangChanged && self.isTranslateMode && !self.translateSourceBuffer.isEmpty {
                 self.triggerTranslation(immediately: true)
@@ -1339,6 +1349,13 @@ final class KeyboardViewController: UIInputViewController {
             aiPromptDraft = nil
             clearAllComposing()
             switchToPanel(.ai)
+        case .dismissSuggestions:
+            isCandidatesExpanded = false
+            currentCandidates = []
+            lastCommittedWord = nil
+            refreshUI()
+        case .dismissKeyboard:
+            dismissKeyboard()
         }
     }
 
@@ -2732,6 +2749,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func applyThemeAndSettings() {
+        // 强制锁死自身 tintColor 与背景底色，彻底防止抖音/B站/其他宿主 App 的紫色系统主题色渗入键盘按钮
+        view.tintColor = resolvedTheme.accentFill
+        rootContainer.tintColor = resolvedTheme.accentFill
+        rootContainer.backgroundColor = resolvedTheme.canvasTop
         backdropView.apply(theme: resolvedTheme)
         liveDockView.apply(theme: resolvedTheme)
         toolbarView.apply(theme: resolvedTheme)
@@ -2823,6 +2844,7 @@ final class KeyboardViewController: UIInputViewController {
         liveDockView.update(mode: currentLiveDockMode())
         updatePreferredHeight()
 
+        let isIdlePredictionMode = !isActivelyComposing && !effectiveCandidates.isEmpty
         toolbarView.update(
             composingDisplay: composingDisplay,
             composingSyllables: composingSyllables,
@@ -2839,7 +2861,8 @@ final class KeyboardViewController: UIInputViewController {
             inlineAICommand: inlineAICmd,
             hasFullAccess: hasFullAccess,
             toolbarLayout: settings.toolbarLayout,
-            showComposingStrip: settings.showComposingStrip
+            showComposingStrip: settings.showComposingStrip,
+            isIdlePredictionMode: isIdlePredictionMode
         )
     }
 

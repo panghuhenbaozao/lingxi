@@ -48,6 +48,8 @@ final class TopToolbarView: UIView {
         case pickLastChar(String)
         case sendAIPrompt
         case cancelAIPrompt
+        case dismissSuggestions
+        case dismissKeyboard
     }
 
     var onAction: ((Action) -> Void)?
@@ -77,6 +79,7 @@ final class TopToolbarView: UIView {
     private let editPadButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
     private let undoButton = UIButton(type: .system)
+    private let dismissKeyboardButton = UIButton(type: .system)
 
     // 框选即改（Selection In-Place Magic）：检测到宿主输入框选中文字时自动替换顶栏
     private let selectionMagicScroll = ToolbarHorizontalScrollView()
@@ -171,7 +174,18 @@ final class TopToolbarView: UIView {
         candidateBar.onToggleExpand = { [weak self] in
             self?.onToggleExpandCandidates?()
         }
+        candidateBar.onDismissSuggestions = { [weak self] in
+            self?.onAction?(.dismissSuggestions)
+        }
+        candidateBar.onDismissKeyboard = { [weak self] in
+            self?.onAction?(.dismissKeyboard)
+        }
         addSubview(candidateBar)
+
+        // 顶栏下滑手势：随时一滑顺手收起键盘（微信输入法/搜狗同款肌肉记忆）
+        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(didSwipeDownToDismiss))
+        swipeDown.direction = .down
+        addGestureRecognizer(swipeDown)
 
         addSubview(idleContainer)
 
@@ -240,6 +254,13 @@ final class TopToolbarView: UIView {
             accessibilityLabel: "键盘快捷设置",
             action: #selector(didTapSettings)
         )
+        configureUtilityButton(
+            dismissKeyboardButton,
+            title: nil,
+            symbol: "keyboard.chevron.compact.down",
+            accessibilityLabel: "收起键盘",
+            action: #selector(didTapDismissKeyboard)
+        )
 
         undoButton.setTitle(" 撤销", for: .normal)
         let undoImg = UIImage(
@@ -258,7 +279,7 @@ final class TopToolbarView: UIView {
         leftClusterStack.addArrangedSubview(aiButton)
         leftClusterStack.addArrangedSubview(translateButton)
         leftClusterStack.addArrangedSubview(voiceButton)
-        [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton].forEach {
+        [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton, dismissKeyboardButton].forEach {
             rightClusterStack.addArrangedSubview($0)
         }
 
@@ -469,6 +490,8 @@ final class TopToolbarView: UIView {
                 btn.isHidden = !item.isVisible
             }
         }
+        // 收起键盘键永远固定在右侧簇最末端，任何配置下都一键可达
+        rightClusterStack.addArrangedSubview(dismissKeyboardButton)
         setNeedsLayout()
     }
 
@@ -585,7 +608,7 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        for btn in [voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton] {
+        for btn in [voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
@@ -678,7 +701,8 @@ final class TopToolbarView: UIView {
         inlineAICommand: InlineAICommandMatch? = nil,
         hasFullAccess: Bool,
         toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
-        showComposingStrip: Bool = true
+        showComposingStrip: Bool = true,
+        isIdlePredictionMode: Bool = false
     ) {
         self.toolbarLayout = toolbarLayout
         self.showComposingStrip = showComposingStrip
@@ -722,7 +746,7 @@ final class TopToolbarView: UIView {
         }
 
         if hasCandidates {
-            candidateBar.updateCandidates(candidates, expanded: expanded)
+            candidateBar.updateCandidates(candidates, expanded: expanded, isIdlePredictionMode: isIdlePredictionMode)
         }
         rebuildBanner()
         updateIdleOverlayVisibility()
@@ -1087,6 +1111,8 @@ final class TopToolbarView: UIView {
     @objc private func didTapEditPad() { onAction?(.toggleEditPad) }
     @objc private func didTapSettings() { onAction?(.toggleQuickSettings) }
     @objc private func didTapUndo() { onAction?(.undoDelete) }
+    @objc private func didTapDismissKeyboard() { onAction?(.dismissKeyboard) }
+    @objc private func didSwipeDownToDismiss() { onAction?(.dismissKeyboard) }
 }
 
 final class ActionClosureButton: UIButton {

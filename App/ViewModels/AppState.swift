@@ -52,6 +52,7 @@ final class AppState: ObservableObject {
     @Published var requestedTab: Int? = nil
     @Published var showPermissionsCenter: Bool = false
     @Published var showVoiceTranslator: Bool = false
+    @Published var voiceTranslatorAutoStart: Bool = false
     @Published var typingStatsSummary: TypingStatsStore.Summary = TypingStatsStore.shared.summary()
     @Published var customBgPreview: UIImage?
     @Published var userAvatarImage: UIImage?

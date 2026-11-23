@@ -2052,4 +2052,45 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(ToolbarButtonID.voice.isPrimaryLeftAction)
         XCTAssertTrue(defaultToolbarLayout.contains(where: { $0.buttonID == .voice && $0.isVisible }))
     }
+
+    func testV540FollowSystemNoPurpleThemeBleedAndAIHistoryPromptPersistence() throws {
+        // 1. 曾经预览过赛博极光（紫）后切回纯白并选「跟随系统」：夜间搭档必须自动重置为苹果原生暗（绝不在抖音/暗色 App 里突然变紫）
+        var theme = ThemeCustomization()
+        theme.applyPresetSelection(KeyboardThemePreset.find(id: "cyber_neon"), isSystemDark: false)
+        XCTAssertEqual(theme.darkThemeID, "cyber_neon")
+
+        theme.applyPresetSelection(KeyboardThemePreset.find(id: "lingxi_pure"), isSystemDark: false)
+        XCTAssertEqual(theme.lightThemeID, "lingxi_pure")
+        XCTAssertEqual(theme.darkThemeID, "midnight_geek", "切回纯白浅色主题后应自动清除遗留赛博紫搭档")
+
+        // 即使旧存档里残留 darkThemeID = cyber_neon，点击「跟随系统」也必须净化回苹果原生暗
+        var legacyStale = ThemeCustomization()
+        legacyStale.selectedThemeID = "lingxi_pure"
+        legacyStale.lightThemeID = "lingxi_pure"
+        legacyStale.darkThemeID = "cyber_neon"
+        legacyStale.applyAppearanceMode(.followSystem)
+        XCTAssertEqual(legacyStale.activePreset(isSystemDark: false).id, "lingxi_pure")
+        XCTAssertEqual(legacyStale.activePreset(isSystemDark: true).id, "midnight_geek")
+
+        // 2. AI 历史记录支持保存提问原文与回答正文，支持最多 30 条与单条删除
+        let prevHistory = AIRecentHistoryStore.load()
+        defer {
+            AIRecentHistoryStore.clear()
+            for item in prevHistory.reversed() {
+                AIRecentHistoryStore.record(title: item.title, output: item.output, prompt: item.prompt)
+            }
+        }
+        AIRecentHistoryStore.clear()
+        AIRecentHistoryStore.record(title: "润色", output: "今晚七点老地方见，不见不散！", prompt: "晚上7点老地方见")
+        let loaded = AIRecentHistoryStore.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded.first?.prompt, "晚上7点老地方见")
+        XCTAssertEqual(loaded.first?.output, "今晚七点老地方见，不见不散！")
+
+        // 旧版 JSON（无 prompt 字段）应向后兼容解码
+        let legacyItemJSON = Data("{\"id\":\"old-1\",\"title\":\"译英\",\"output\":\"Hello world\",\"createdAt\":0}".utf8)
+        let decodedLegacy = try JSONDecoder().decode(AIRecentResultItem.self, from: legacyItemJSON)
+        XCTAssertEqual(decodedLegacy.prompt, "")
+        XCTAssertEqual(decodedLegacy.output, "Hello world")
+    }
 }

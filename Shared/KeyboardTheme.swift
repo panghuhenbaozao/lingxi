@@ -495,7 +495,16 @@ struct ThemeCustomization: Codable, Equatable {
         }
     }
 
-    /// 统一的外观模式切换逻辑：切回跟随系统或切换深/浅模式时，自动清理冲突的自定义色覆盖，确保切换 100% 立即生效。
+    /// 为浅色皮肤匹配协调的中性深色搭档（默认苹果原生暗灰，绝不遗留紫色赛博皮肤导致跟随系统在别的软件突然变紫）。
+    static func matchingDarkCounterpart(forLightID id: String) -> String {
+        switch id {
+        case "sky_mist": return "deep_ocean"
+        case "mint_breeze": return "forest_night"
+        default: return "midnight_geek"
+        }
+    }
+
+    /// 统一的外观模式切换逻辑：切回跟随系统或切换深/浅模式时，自动清理冲突的自定义色与遗留彩色深色主题，杜绝在其他 App 突然变紫。
     mutating func applyAppearanceMode(_ mode: KeyboardAppearanceMode) {
         appearanceMode = mode
         adaptiveDarkMode = (mode == .followSystem)
@@ -503,6 +512,19 @@ struct ThemeCustomization: Codable, Equatable {
         case .followSystem:
             if hasLightCustomOverrides, let c = customCanvasHex, HexColor(c).isDarkColor {
                 clearCustomColors(forDark: false)
+            }
+            if hasDarkCustomOverrides, let c = customDarkCanvasHex, !HexColor(c).isDarkColor {
+                clearCustomColors(forDark: true)
+            }
+            // 若当前选中浅色皮肤且夜间搭档遗留为霓虹紫等高饱和主题，自动回归协调的中性深色搭档（苹果原生暗）
+            let sel = KeyboardThemePreset.find(id: selectedThemeID)
+            if !sel.isDark {
+                lightThemeID = sel.id
+                if darkThemeID == "cyber_neon" || darkThemeID == "obsidian_gold" || !KeyboardThemePreset.find(id: darkThemeID).isDark {
+                    darkThemeID = Self.matchingDarkCounterpart(forLightID: sel.id)
+                }
+            } else if darkThemeID == "cyber_neon" {
+                darkThemeID = "midnight_geek"
             }
         case .alwaysLight:
             if let canvasHex = customCanvasHex, HexColor(canvasHex).isDarkColor {
@@ -533,6 +555,10 @@ struct ThemeCustomization: Codable, Equatable {
             }
         } else {
             lightThemeID = preset.id
+            // 选定浅色主题时，如果后台夜间搭档仍是高饱和赛博紫，同步重置为协调的苹果原生暗，后续切回「跟随系统」绝不突然变紫
+            if darkThemeID == "cyber_neon" {
+                darkThemeID = Self.matchingDarkCounterpart(forLightID: preset.id)
+            }
             if appearanceMode == .alwaysDark || (appearanceMode == .followSystem && isSystemDark) {
                 appearanceMode = .alwaysLight
                 adaptiveDarkMode = false

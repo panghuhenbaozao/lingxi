@@ -22,6 +22,9 @@ struct LingxiApp: App {
                     case "permissions":
                         appState.showPermissionsCenter = true
                     case "voice-translate":
+                        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                        let autoStart = comps?.queryItems?.contains(where: { $0.name == "autostart" && $0.value == "1" }) == true
+                        appState.voiceTranslatorAutoStart = autoStart
                         appState.showVoiceTranslator = true
                     default:
                         break

@@ -22,14 +22,21 @@ final class CandidateBarView: UIView {
     var onSelectCandidate: ((Int) -> Void)?
     var onLongPressCandidate: ((Int, UIView) -> Void)?
     var onToggleExpand: (() -> Void)?
+    var onDismissSuggestions: (() -> Void)?
+    var onDismissKeyboard: (() -> Void)?
 
     private let scrollView = LingxiScrollView()
     private let stackView = UIStackView()
     // 防闪烁：使用 .custom 而非 .system——system 按钮在重复 setImage/setTitle 时会做系统淡入淡出动画
     private let expandButton = UIButton(type: .custom)
+    /// 仅在空闲「联想预测」状态显示：点一下立刻关掉联想条，恢复顶部 AI / 译 / 语音 / 设置栏
+    private let dismissSuggestionsButton = UIButton(type: .custom)
+    /// 一键收起键盘按钮（在联想态或候选较少时常驻最右侧）
+    private let dismissKeyboardButton = UIButton(type: .custom)
     private var buttonPool: [UIButton] = []
     private var longPressPool: [UILongPressGestureRecognizer] = []
     private var candidates: [PinyinCandidate] = []
+    private var isIdlePredictionMode = false
     private var theme: ResolvedTheme?
     /// 候选词主字号（可由设置页调节，默认 16.5）
     private var candidateFontSize: CGFloat = 16.5
@@ -63,6 +70,20 @@ final class CandidateBarView: UIView {
         expandButton.accessibilityLabel = "展开候选栏"
         expandButton.addTarget(self, action: #selector(handleExpandTap), for: .touchUpInside)
         addSubview(expandButton)
+
+        let closeCfg = UIImage.SymbolConfiguration(pointSize: 13.5, weight: .semibold)
+        dismissSuggestionsButton.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: closeCfg), for: .normal)
+        dismissSuggestionsButton.accessibilityLabel = "关闭联想"
+        dismissSuggestionsButton.isHidden = true
+        dismissSuggestionsButton.addTarget(self, action: #selector(handleDismissSuggestionsTap), for: .touchUpInside)
+        addSubview(dismissSuggestionsButton)
+
+        let kbCfg = UIImage.SymbolConfiguration(pointSize: 13.5, weight: .medium)
+        dismissKeyboardButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: kbCfg), for: .normal)
+        dismissKeyboardButton.accessibilityLabel = "收起键盘"
+        dismissKeyboardButton.isHidden = true
+        dismissKeyboardButton.addTarget(self, action: #selector(handleDismissKeyboardTap), for: .touchUpInside)
+        addSubview(dismissKeyboardButton)
     }
 
     required init?(coder: NSCoder) {
@@ -81,9 +102,21 @@ final class CandidateBarView: UIView {
                 reloadButtons()
             }
         }
-        let expandWidth: CGFloat = 34
-        expandButton.frame = CGRect(x: bounds.width - expandWidth - 2, y: 0, width: expandWidth, height: bounds.height)
-        scrollView.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - expandWidth - 4), height: bounds.height)
+        var rightEdge = bounds.width - 2
+        let btnW: CGFloat = 34
+        if !dismissKeyboardButton.isHidden {
+            dismissKeyboardButton.frame = CGRect(x: rightEdge - btnW, y: 0, width: btnW, height: bounds.height)
+            rightEdge = dismissKeyboardButton.frame.minX
+        }
+        if !dismissSuggestionsButton.isHidden {
+            dismissSuggestionsButton.frame = CGRect(x: rightEdge - btnW, y: 0, width: btnW, height: bounds.height)
+            rightEdge = dismissSuggestionsButton.frame.minX
+        }
+        if !expandButton.isHidden {
+            expandButton.frame = CGRect(x: rightEdge - btnW, y: 0, width: btnW, height: bounds.height)
+            rightEdge = expandButton.frame.minX
+        }
+        scrollView.frame = CGRect(x: 0, y: 0, width: max(0, rightEdge - 2), height: bounds.height)
         let visibleButtons = stackView.arrangedSubviews.filter { !$0.isHidden }
         let measuredWidth = visibleButtons.reduce(CGFloat(0)) { acc, v in
             let w = v.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: scrollView.bounds.height)).width
@@ -99,6 +132,8 @@ final class CandidateBarView: UIView {
     func apply(theme: ResolvedTheme) {
         self.theme = theme
         expandButton.tintColor = theme.keyHintText
+        dismissSuggestionsButton.tintColor = theme.keyHintText
+        dismissKeyboardButton.tintColor = theme.keyHintText
         // 主题变化后强制所有按钮重新应用配色
         for i in buttonAppliedKeys.indices { buttonAppliedKeys[i] = "" }
         reloadButtons()
@@ -122,18 +157,29 @@ final class CandidateBarView: UIView {
         setNeedsLayout()
     }
 
-    func updateCandidates(_ newList: [PinyinCandidate], expanded: Bool) {
-        // 防闪烁：refreshUI 在打字链路中高频触发，候选与展开状态均未变化时整体跳过
-        let signature = newList.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
+    func updateCandidates(_ newList: [PinyinCandidate], expanded: Bool, isIdlePredictionMode: Bool = false) {
+        // 防闪烁：refreshUI 在打字链路中高频触发，候选与状态均未变化时整体跳过
+        let signature = "\(isIdlePredictionMode)|" + newList.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
         if signature == lastSignature && expanded == lastExpanded { return }
         lastSignature = signature
         lastExpanded = expanded
         self.candidates = newList
+        self.isIdlePredictionMode = isIdlePredictionMode
         let iconName = expanded ? "chevron.up" : "chevron.down"
         let config = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         expandButton.setImage(UIImage(systemName: iconName, withConfiguration: config), for: .normal)
         expandButton.accessibilityLabel = expanded ? "收起候选栏" : "展开候选栏"
-        expandButton.isHidden = newList.count <= 4
+        if isIdlePredictionMode {
+            // 联想预测状态：显示「× 关闭联想」+「⌨️⌄ 收起键盘」，随时恢复顶部 AI/译/语音栏或一键收键盘
+            expandButton.isHidden = true
+            dismissSuggestionsButton.isHidden = false
+            dismissKeyboardButton.isHidden = false
+        } else {
+            dismissSuggestionsButton.isHidden = true
+            let showExpand = newList.count > 4
+            expandButton.isHidden = !showExpand
+            dismissKeyboardButton.isHidden = showExpand
+        }
         scrollView.setContentOffset(.zero, animated: false)
         reloadButtons()
         setNeedsLayout()
@@ -248,6 +294,14 @@ final class CandidateBarView: UIView {
 
     @objc private func handleExpandTap() {
         onToggleExpand?()
+    }
+
+    @objc private func handleDismissSuggestionsTap() {
+        onDismissSuggestions?()
+    }
+
+    @objc private func handleDismissKeyboardTap() {
+        onDismissKeyboard?()
     }
 }
 

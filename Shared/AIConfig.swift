@@ -320,12 +320,30 @@ enum AIUsageLedgerStore {
     }
 }
 
-/// 最近在键盘内由 AI 生成的精彩文案缓存（仅存本机，支持误关面板一键找回与收藏）。
+/// 最近在键盘内由 AI 生成的回答历史记录（仅存本机，支持键盘内随时翻阅、一键复制与重新插入）。
 struct AIRecentResultItem: Codable, Identifiable, Equatable {
     var id: String = UUID().uuidString
     var title: String
+    var prompt: String = ""
     var output: String
     var createdAt: Date = Date()
+
+    init(id: String = UUID().uuidString, title: String, prompt: String = "", output: String, createdAt: Date = Date()) {
+        self.id = id
+        self.title = title
+        self.prompt = prompt
+        self.output = output
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "AI 回答"
+        prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+        output = try c.decodeIfPresent(String.self, forKey: .output) ?? ""
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
 }
 
 enum AIRecentHistoryStore {
@@ -335,13 +353,20 @@ enum AIRecentHistoryStore {
         AppGroup.readJSON([AIRecentResultItem].self, from: fileName) ?? []
     }
 
-    static func record(title: String, output: String) {
+    static func record(title: String, output: String, prompt: String = "") {
         let clean = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.count >= 2 else { return }
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         var list = load()
         list.removeAll { $0.output == clean }
-        list.insert(AIRecentResultItem(title: title, output: clean), at: 0)
-        if list.count > 12 { list = Array(list.prefix(12)) }
+        list.insert(AIRecentResultItem(title: title, prompt: cleanPrompt, output: clean), at: 0)
+        if list.count > 30 { list = Array(list.prefix(30)) }
+        _ = AppGroup.writeJSON(list, to: fileName, protected: true)
+    }
+
+    static func delete(id: String) {
+        var list = load()
+        list.removeAll { $0.id == id }
         _ = AppGroup.writeJSON(list, to: fileName, protected: true)
     }
 
