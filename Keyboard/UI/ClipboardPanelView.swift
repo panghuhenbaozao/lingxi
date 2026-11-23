@@ -193,6 +193,7 @@ final class ClipboardPanelView: UIView {
             }
 
         case .phrases:
+            listStack.addArrangedSubview(makeQuickStampRow(theme: theme))
             let phrases = QuickPhraseStore.load()
             for phrase in phrases {
                 listStack.addArrangedSubview(makePhraseRow(phrase: phrase, theme: theme))
@@ -289,6 +290,40 @@ final class ClipboardPanelView: UIView {
             self?.onInsertText?(chosen)
         }
         return container
+    }
+
+    /// 高频实用一键印章：当前日期 / 当前时间 / 当前所在城市位置，免背快捷码一键直插
+    private func makeQuickStampRow(theme: ResolvedTheme) -> UIView {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.distribution = .fillEqually
+        row.spacing = 6
+
+        let dateBtn = makeMiniPill("📅 今天日期", bg: theme.accentFill.withAlphaComponent(0.14), fg: theme.candidateHighlight) { [weak self] in
+            let fmt = DateFormatter()
+            fmt.locale = Locale(identifier: "zh_CN")
+            fmt.dateFormat = "yyyy年M月d日 EEEE"
+            self?.onInsertText?(fmt.string(from: Date()))
+        }
+        dateBtn.heightAnchor.constraint(equalToConstant: 32).isActive = true
+
+        let timeBtn = makeMiniPill("⏰ 当前时间", bg: theme.accentFill.withAlphaComponent(0.14), fg: theme.candidateHighlight) { [weak self] in
+            let fmt = DateFormatter()
+            fmt.dateFormat = "HH:mm"
+            self?.onInsertText?(fmt.string(from: Date()))
+        }
+        timeBtn.heightAnchor.constraint(equalToConstant: 32).isActive = true
+
+        let geo = GeoLocationContext.load()
+        let locText = geo.isPopulated ? geo.compactLocationLabel : "我的位置"
+        let locTitle = geo.isPopulated ? "📍 \(geo.shortCityName)" : "📍 位置"
+        let locBtn = makeMiniPill(locTitle, bg: theme.accentFill.withAlphaComponent(0.14), fg: theme.candidateHighlight) { [weak self] in
+            self?.onInsertText?(locText)
+        }
+        locBtn.heightAnchor.constraint(equalToConstant: 32).isActive = true
+
+        [dateBtn, timeBtn, locBtn].forEach { row.addArrangedSubview($0) }
+        return row
     }
 
     private func makePhraseRow(phrase: QuickPhrase, theme: ResolvedTheme) -> UIView {

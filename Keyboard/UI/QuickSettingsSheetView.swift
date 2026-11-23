@@ -79,8 +79,9 @@ final class QuickSettingsSheetView: UIView {
         header.axis = .horizontal
         header.alignment = .center
         let title = UILabel()
-        title.text = "⚙️ 灵犀快捷设置"
-        title.font = .systemFont(ofSize: 15, weight: .bold)
+        let todayChars = TypingStatsStore.shared.summary().todayChars
+        title.text = todayChars > 0 ? "⚙️ 灵犀快捷设置 · 今日 \(todayChars) 字" : "⚙️ 灵犀快捷设置"
+        title.font = .systemFont(ofSize: 14.5, weight: .bold)
         title.textColor = theme.keyText
         let closeBtn = ActionClosureButton(type: .system)
         closeBtn.setTitle("完成", for: .normal)

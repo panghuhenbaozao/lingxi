@@ -663,7 +663,7 @@ final class KeyboardViewController: UIInputViewController {
         aiPanel.onInsertText = { [weak self] text in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.aiPromptDraft = nil
+            self.exitTransientAIAndTranslateModes()
             self.lastAIInsertedText = text
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
@@ -671,13 +671,16 @@ final class KeyboardViewController: UIInputViewController {
         aiPanel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.aiPromptDraft = nil
+            self.exitTransientAIAndTranslateModes()
             self.lastAIInsertedText = replacement
             self.performEdit {
                 for _ in 0..<deleteCount {
                     self.textDocumentProxy.deleteBackward()
                 }
                 self.textDocumentProxy.insertText(replacement)
+            }
+            if self.shouldAllowPanguSpace, self.settings.typingStatsEnabled, !replacement.isEmpty {
+                TypingStatsStore.shared.recordCommit(text: replacement)
             }
             self.switchToPanel(.letters)
         }
@@ -1574,8 +1577,12 @@ final class KeyboardViewController: UIInputViewController {
         }
         lastAIInsertedText = nil
         englishComposing = ""
-        insertFinalText("\n", checkPairing: false)
         lastCommittedWord = nil
+        // 回车 / 发送键永远直接投递给宿主输入框（微信发送、Safari 搜索、备忘录换行），绝不允许被翻译框或草稿拦截吞掉！
+        performEdit {
+            self.textDocumentProxy.insertText("\n")
+        }
+        refreshUI()
     }
 
     private func performBackspace(isRepeat: Bool = false) {
@@ -2247,15 +2254,17 @@ final class KeyboardViewController: UIInputViewController {
 
     @discardableResult
     private func insertFinalText(_ text: String, checkPairing: Bool) -> String {
-        if let draft = aiPromptDraft {
-            aiPromptDraft = draft + text
-            refreshToolbar()
-            return text
-        }
+        if text != "\n" {
+            if let draft = aiPromptDraft {
+                aiPromptDraft = draft + text
+                refreshToolbar()
+                return text
+            }
 
-        if isTranslateMode {
-            appendToTranslateSource(text)
-            return text
+            if isTranslateMode {
+                appendToTranslateSource(text)
+                return text
+            }
         }
 
         var inserted = text
@@ -2344,6 +2353,7 @@ final class KeyboardViewController: UIInputViewController {
     private func insertDirectlyIntoHost(_ text: String) {
         performEdit {
             if self.shouldAllowPanguSpace,
+               text != "\n",
                (self.settings.panguSpaceLetters || self.settings.panguSpaceDigits),
                PanguSpacer.needsLeadingSpace(
                    beforeCursor: self.textDocumentProxy.documentContextBeforeInput,
@@ -2356,6 +2366,20 @@ final class KeyboardViewController: UIInputViewController {
                 self.textDocumentProxy.insertText(text)
             }
         }
+        if shouldAllowPanguSpace, settings.typingStatsEnabled, text != "\n", !text.isEmpty {
+            TypingStatsStore.shared.recordCommit(text: text)
+        }
+    }
+
+    /// 上屏 AI 回答或翻译结果后彻底收起翻译框与 AI 草稿态，立刻恢复正常键盘与宿主「发送」键。
+    private func exitTransientAIAndTranslateModes() {
+        cancelLiveTranslation()
+        aiPromptDraft = nil
+        isTranslateMode = false
+        translateSourceBuffer = ""
+        translatePreviewText = ""
+        translateIsStreaming = false
+        translateErrorText = nil
     }
 
     private func commitPickedSingleCharacter(_ ch: String) {
@@ -2584,28 +2608,23 @@ final class KeyboardViewController: UIInputViewController {
 
     private func commitTranslatedOutput() {
         let out = translatePreviewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let src = translateSourceBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !out.isEmpty else { return }
-        cancelLiveTranslation()
         lastSelectionUndo = nil
         insertDirectlyIntoHost(out)
-        translateSourceBuffer = ""
-        translatePreviewText = ""
-        translateIsStreaming = false
-        translateErrorText = nil
-        refreshToolbar()
+        AIRecentHistoryStore.record(title: "实时翻译", output: out, prompt: src)
+        // 上屏后自动关闭翻译框架并恢复普通键盘，确保紧接着点「发送」键能直接发出去！
+        exitTransientAIAndTranslateModes()
+        refreshUI()
     }
 
     private func commitTranslateSourceOutput() {
         let out = translateSourceBuffer
         guard !out.isEmpty else { return }
-        cancelLiveTranslation()
         lastSelectionUndo = nil
         insertDirectlyIntoHost(out)
-        translateSourceBuffer = ""
-        translatePreviewText = ""
-        translateIsStreaming = false
-        translateErrorText = nil
-        refreshToolbar()
+        exitTransientAIAndTranslateModes()
+        refreshUI()
     }
 
     private func applyActiveStylishFont(_ text: String) -> String {
