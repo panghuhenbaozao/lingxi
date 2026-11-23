@@ -125,17 +125,28 @@ struct HomeTestView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: appState.isCloudAuthenticated && !appState.cloudConfig.isLocalOnlyAccount ? "icloud.fill" : "apple.logo")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(Design.Palette.accent))
                     if appState.isCloudAuthenticated {
-                        let summary = appState.cloudConfig.lastSyncSummary.isEmpty ? "10 类核心数据端到端同步就绪" : appState.cloudConfig.lastSyncSummary
+                        Image(systemName: "icloud.fill")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color(Design.Palette.success))
+                        let summary = appState.cloudConfig.lastSyncSummary.isEmpty ? "国内直连云端在线 · 10 类数据就绪" : appState.cloudConfig.lastSyncSummary
                         Text("\(appState.cloudConfig.username.isEmpty ? "灵犀用户" : appState.cloudConfig.username) · \(summary)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                    } else if appState.isLocalOfflineAccount {
+                        Image(systemName: "exclamationmark.icloud.fill")
+                            .font(.caption.bold())
+                            .foregroundStyle(.orange)
+                        Text("当前为旧版离线档案 · 点此一键升级国内直连云端登录")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color(Design.Palette.accent))
+                            .lineLimit(1)
                     } else {
-                        Text("点此通过 Apple 通行密钥 / 面容 ID 登录 Cloudflare 全球云")
+                        Image(systemName: "apple.logo")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color(Design.Palette.accent))
+                        Text("点此通过面容 ID / 邮箱免代理登录国内云端")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(Color(Design.Palette.accent))
                             .lineLimit(1)
@@ -414,10 +425,20 @@ struct HomeTestView: View {
             NavigationLink {
                 SustainabilityHubView()
             } label: {
+                let transportLabel: String = {
+                    switch health.activeTransport {
+                    case .e2eeCloud:
+                        return appState.isCloudAuthenticated ? "云端在线" : "云端就绪"
+                    case .lan:
+                        return "局域网同步"
+                    case .localNoop:
+                        return "纯本地模式"
+                    }
+                }()
                 bentoTile(
                     icon: "leaf.arrow.triangle.circlepath",
                     title: "多模同步与自愈",
-                    subtitle: "\(health.activeTransport.title.components(separatedBy: " · ").first ?? "离线") · \(health.healthScore)分"
+                    subtitle: "\(transportLabel) · \(health.healthScore)分"
                 )
             }
             .buttonStyle(PressableStyle())

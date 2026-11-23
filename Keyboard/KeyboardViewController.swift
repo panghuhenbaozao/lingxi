@@ -25,9 +25,12 @@ final class KeyboardViewController: UIInputViewController {
     private let pasteMonitor = PasteboardMonitor()
 
     // 配置与外观
-    private var settings = LingxiSettings.load()
-    private var themeCustomization = ThemeCustomization.load()
+    private var settings = LingxiSettings.load(force: true)
+    private var themeCustomization = ThemeCustomization.load(force: true)
     private var resolvedTheme = ResolvedTheme.resolve(isDarkAppearance: false, targetSize: CGSize(width: 430, height: 280))
+    private var lastResolvedDarkAppearance: Bool?
+    private var themeDarwinObserver: AppGroupNotifications.Observer?
+    private var settingsDarwinObserver: AppGroupNotifications.Observer?
     private var heightConstraint: NSLayoutConstraint?
     /// 顶部工具栏（候选栏）高度约束：设置页调整候选栏高度后需同步更新，否则键盘总高变了但候选栏区域不变
     private var toolbarHeightConstraint: NSLayoutConstraint?
@@ -131,15 +134,29 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        settings = LingxiSettings.load(force: true)
+        themeCustomization = ThemeCustomization.load(force: true)
+        let darkNow = isDarkInterface
+        lastResolvedDarkAppearance = darkNow
         resolvedTheme = ResolvedTheme.resolve(
             customization: themeCustomization,
-            isDarkAppearance: isDarkInterface,
+            isDarkAppearance: darkNow,
             targetSize: CGSize(width: 430, height: 280)
         )
         setupHierarchy()
         wireCallbacks()
+        registerSharedContainerObservers()
         applyThemeAndSettings()
         preloadEngine()
+    }
+
+    private func registerSharedContainerObservers() {
+        themeDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.themeChanged) { [weak self] in
+            self?.reloadConfigurationIfNeeded()
+        }
+        settingsDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.settingsChanged) { [weak self] in
+            self?.reloadConfigurationIfNeeded()
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -171,13 +188,21 @@ final class KeyboardViewController: UIInputViewController {
         if sizeClassChanged {
             updatePreferredHeight()
         }
-        if styleChanged {
-            resolvedTheme = ResolvedTheme.resolve(
-                customization: themeCustomization,
-                isDarkAppearance: isDarkInterface,
-                targetSize: view.bounds.size.width > 10 ? view.bounds.size : CGSize(width: 430, height: 280)
-            )
-            applyThemeAndSettings()
+        // 仅在「跟随系统」模式下且系统给出了明确的明暗样式（忽略切换过渡时的 .unspecified 抖动）时才切换皮肤，
+        // 彻底杜绝锁定浅色/深色主题时在微信/抖音/搜索框之间乱切键盘颜色。
+        if styleChanged && traitCollection.userInterfaceStyle != .unspecified {
+            let darkNow = isDarkInterface
+            if themeCustomization.appearanceMode == .followSystem && darkNow != lastResolvedDarkAppearance {
+                lastResolvedDarkAppearance = darkNow
+                resolvedTheme = ResolvedTheme.resolve(
+                    customization: themeCustomization,
+                    isDarkAppearance: darkNow,
+                    targetSize: view.bounds.size.width > 10 ? view.bounds.size : CGSize(width: 430, height: 280)
+                )
+                applyThemeAndSettings()
+            } else if lastResolvedDarkAppearance == nil {
+                lastResolvedDarkAppearance = darkNow
+            }
         }
     }
 
@@ -301,13 +326,16 @@ final class KeyboardViewController: UIInputViewController {
     private func reloadConfigurationIfNeeded() {
         let newSettings = LingxiSettings.load(force: true)
         let newTheme = ThemeCustomization.load(force: true)
-        if newSettings != settings || newTheme != themeCustomization {
+        let darkNow = isDarkInterface
+        let darkMismatch = (newTheme.appearanceMode == .followSystem && darkNow != lastResolvedDarkAppearance)
+        if newSettings != settings || newTheme != themeCustomization || darkMismatch {
             let schemeOrLayoutChanged = newSettings.inputScheme != settings.inputScheme || newSettings.layoutMode != settings.layoutMode
             settings = newSettings
             themeCustomization = newTheme
+            lastResolvedDarkAppearance = darkNow
             resolvedTheme = ResolvedTheme.resolve(
                 customization: themeCustomization,
-                isDarkAppearance: isDarkInterface,
+                isDarkAppearance: darkNow,
                 targetSize: view.bounds.size.width > 10 ? view.bounds.size : CGSize(width: 430, height: 280)
             )
             if schemeOrLayoutChanged {
@@ -320,7 +348,20 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private var isDarkInterface: Bool {
-        traitCollection.userInterfaceStyle == .dark
+        switch traitCollection.userInterfaceStyle {
+        case .dark:
+            return true
+        case .light:
+            return false
+        case .unspecified:
+            if let appearance = textDocumentProxy.keyboardAppearance {
+                if appearance == .dark { return true }
+                if appearance == .light { return false }
+            }
+            return lastResolvedDarkAppearance ?? false
+        @unknown default:
+            return lastResolvedDarkAppearance ?? false
+        }
     }
 
     private var isUsingT9Layout: Bool {
@@ -523,10 +564,12 @@ final class KeyboardViewController: UIInputViewController {
         }
         quickSettingsPanel.onThemeChanged = { [weak self] updatedTheme in
             guard let self else { return }
+            let darkNow = self.isDarkInterface
             self.themeCustomization = updatedTheme
+            self.lastResolvedDarkAppearance = darkNow
             self.resolvedTheme = ResolvedTheme.resolve(
                 customization: updatedTheme,
-                isDarkAppearance: self.isDarkInterface,
+                isDarkAppearance: darkNow,
                 targetSize: self.view.bounds.size.width > 10 ? self.view.bounds.size : CGSize(width: 430, height: 280)
             )
             self.applyThemeAndSettings()
@@ -2372,7 +2415,13 @@ final class KeyboardViewController: UIInputViewController {
                 activeFontStyle: StylishFontStyle(rawValue: settings.stylishFontID) ?? .normal
             )
         case .quickSettings:
-            quickSettingsPanel.configure(theme: resolvedTheme, settings: settings, customization: themeCustomization)
+            reloadConfigurationIfNeeded()
+            quickSettingsPanel.configure(
+                theme: resolvedTheme,
+                settings: settings,
+                customization: themeCustomization,
+                isSystemDark: isDarkInterface
+            )
         case .numbers:
             let (retTitle, _) = returnKeyAppearance()
             numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
@@ -2407,7 +2456,19 @@ final class KeyboardViewController: UIInputViewController {
         let (retTitle, _) = returnKeyAppearance()
         numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
         if activePanel == .quickSettings {
-            quickSettingsPanel.updateTheme(resolvedTheme)
+            quickSettingsPanel.updateTheme(
+                resolvedTheme,
+                settings: settings,
+                customization: themeCustomization,
+                isSystemDark: isDarkInterface
+            )
+        } else if activePanel == .clipboard {
+            clipboardPanel.configure(
+                theme: resolvedTheme,
+                activeFontStyle: StylishFontStyle(rawValue: settings.stylishFontID) ?? .normal
+            )
+        } else if activePanel == .ai {
+            aiPanel.applyTheme(resolvedTheme)
         }
         refreshUI()
     }

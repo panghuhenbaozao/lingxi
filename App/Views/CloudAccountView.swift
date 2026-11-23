@@ -47,27 +47,20 @@ struct CloudAccountView: View {
                                 .foregroundStyle(.secondary)
 
                             HStack(spacing: 6) {
-                                Image(systemName: appState.cloudConfig.isLocalOnlyAccount ? "iphone" : "icloud.fill")
+                                Image(systemName: "icloud.fill")
                                     .font(.caption2)
-                                Text(appState.cloudConfig.isLocalOnlyAccount
-                                     ? "本机离线加密档案（可随时升级 Cloudflare 云同步）"
-                                     : "已连接 Cloudflare 全球云端 · E2EE 端到端加密")
+                                Text("国内直连云端在线 · E2EE 端到端加密")
                                     .font(.caption2.weight(.medium))
                             }
-                            .foregroundStyle(appState.cloudConfig.isLocalOnlyAccount ? Color.secondary : Color(Design.Palette.accent))
+                            .foregroundStyle(Color(Design.Palette.success))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
-                            .background(appState.cloudConfig.isLocalOnlyAccount ? Color(Design.Palette.surface) : Color(Design.Palette.accentSoft))
+                            .background(Color(Design.Palette.success).opacity(0.12))
                             .clipShape(Capsule())
 
-                            if appState.cloudConfig.isLocalOnlyAccount {
-                                Button("升级为 Apple 通行密钥 / 云端账号") {
-                                    showSignInSheet = true
-                                }
-                                .font(.caption.bold())
-                                .foregroundStyle(Color(Design.Palette.accent))
-                                .padding(.top, 2)
-                            }
+                            Text(CloudBackendClient.shared.lastActiveRouteDescription)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
 
                             if appState.userAvatarImage == nil {
                                 HStack(spacing: 10) {
@@ -90,12 +83,46 @@ struct CloudAccountView: View {
                                 .padding(.top, 4)
                             }
                         }
+                    } else if appState.isLocalOfflineAccount {
+                        VStack(spacing: 8) {
+                            Text(appState.cloudConfig.username.isEmpty ? "本机离线档案" : appState.cloudConfig.username)
+                                .font(.title3.bold())
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            HStack(spacing: 6) {
+                                Image(systemName: "iphone")
+                                    .font(.caption2)
+                                Text("当前为旧版/纯本机离线档案，尚未连接云端")
+                                    .font(.caption2.weight(.medium))
+                            }
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.12))
+                            .clipShape(Capsule())
+
+                            Button {
+                                showSignInSheet = true
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "icloud.and.arrow.up.fill")
+                                    Text("立即免代理登录国内云端")
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .background(Color(Design.Palette.accent))
+                                .foregroundStyle(Color.white)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.top, 4)
+                        }
                     } else {
                         VStack(spacing: 8) {
                             Text("未登录灵犀云端账号")
                                 .font(.title3.bold())
                                 .foregroundStyle(Color(Design.Palette.ink))
-                            Text("支持 Apple iCloud 通行密钥、面容 ID 免密与邮箱登录，端到端加密同步 10 类核心数据。")
+                            Text("国内免代理直连云端（支持面容 ID 免密、Apple 通行密钥与邮箱），端到端加密同步 10 类核心数据。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -104,7 +131,7 @@ struct CloudAccountView: View {
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "apple.logo")
-                                    Text("Apple 通行密钥 / 面容 ID 登录")
+                                    Text("免代理登录国内云端")
                                 }
                                 .font(.subheadline.weight(.semibold))
                                 .padding(.horizontal, 20)
@@ -171,15 +198,21 @@ struct CloudAccountView: View {
                 .padding(.vertical, 2)
 
                 Button {
-                    Task { await triggerSyncNow() }
+                    if appState.isCloudAuthenticated {
+                        Task { await triggerSyncNow() }
+                    } else {
+                        showSignInSheet = true
+                    }
                 } label: {
                     HStack {
                         if isWorking {
                             ProgressView().padding(.trailing, 4)
                         } else {
-                            Image(systemName: "icloud.and.arrow.up.fill")
+                            Image(systemName: appState.isCloudAuthenticated ? "icloud.and.arrow.up.fill" : "person.crop.circle.badge.plus")
                         }
-                        Text(isWorking ? "正在加密同步 10 类数据与习惯…" : "立即全量端到端同步")
+                        Text(isWorking
+                             ? "正在加密同步 10 类数据与习惯…"
+                             : (appState.isCloudAuthenticated ? "立即全量端到端同步" : "先登录国内云端后再同步"))
                             .font(.subheadline.weight(.semibold))
                         Spacer()
                     }
@@ -375,16 +408,18 @@ struct CloudAccountView: View {
             }
 
             // 6. 退出与注销
-            if appState.isCloudAuthenticated {
+            if appState.isCloudAuthenticated || appState.isLocalOfflineAccount {
                 Section {
-                    Button("退出登录", role: .destructive) {
+                    Button(appState.isLocalOfflineAccount ? "退出本机离线档案" : "退出登录", role: .destructive) {
                         Task {
                             await appState.signOutCloudAccount()
-                            statusBanner = "已退出云端账号，本机离线词库完好保留"
+                            statusBanner = "已退出账号，本机词库完好保留"
                         }
                     }
-                    Button("永久注销云端账号并删除所有数据", role: .destructive) {
-                        showDeleteAccountConfirm = true
+                    if appState.isCloudAuthenticated {
+                        Button("永久注销云端账号并删除所有数据", role: .destructive) {
+                            showDeleteAccountConfirm = true
+                        }
                     }
                 }
             }

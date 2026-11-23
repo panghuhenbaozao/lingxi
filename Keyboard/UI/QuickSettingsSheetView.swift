@@ -10,8 +10,9 @@ final class QuickSettingsSheetView: UIView {
     private let scrollView = LingxiScrollView()
     private let stackView = UIStackView()
     private var theme: ResolvedTheme?
-    private var settings = LingxiSettings.load()
-    private var customization = ThemeCustomization.load()
+    private var settings = LingxiSettings.load(force: true)
+    private var customization = ThemeCustomization.load(force: true)
+    private var isSystemDark: Bool = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -42,16 +43,25 @@ final class QuickSettingsSheetView: UIView {
         scrollView.contentSize = CGSize(width: bounds.width, height: fit.height + 16)
     }
 
-    func configure(theme: ResolvedTheme, settings: LingxiSettings, customization: ThemeCustomization) {
+    func configure(theme: ResolvedTheme, settings: LingxiSettings, customization: ThemeCustomization, isSystemDark: Bool = false) {
         self.theme = theme
         self.settings = settings
         self.customization = customization
+        self.isSystemDark = isSystemDark
         backgroundColor = theme.canvasTop.withAlphaComponent(0.97)
         rebuild()
     }
 
-    func updateTheme(_ theme: ResolvedTheme) {
+    func updateTheme(
+        _ theme: ResolvedTheme,
+        settings: LingxiSettings? = nil,
+        customization: ThemeCustomization? = nil,
+        isSystemDark: Bool? = nil
+    ) {
         self.theme = theme
+        if let settings { self.settings = settings }
+        if let customization { self.customization = customization }
+        if let isSystemDark { self.isSystemDark = isSystemDark }
         backgroundColor = theme.canvasTop.withAlphaComponent(0.97)
         rebuild()
     }
@@ -169,7 +179,7 @@ final class QuickSettingsSheetView: UIView {
             self.onSettingsChanged?(self.settings)
         })
 
-        // 4. 外观模式（跟随系统 / 浅色 / 深色）与快速皮肤切换
+        // 4. 外观模式（跟随系统 / 浅色 / 深色）与快速皮肤切换（与主 App「外观」页 100% 同源实时同步）
         stackView.addArrangedSubview(makeSegmentedRow(
             label: "外观模式",
             options: KeyboardAppearanceMode.allCases.map(\.displayName),
@@ -181,11 +191,10 @@ final class QuickSettingsSheetView: UIView {
             self.customization.applyAppearanceMode(mode)
             self.customization.save()
             self.onThemeChanged?(self.customization)
-            self.rebuild()
         })
 
         let skinLabel = UILabel()
-        skinLabel.text = "主题皮肤"
+        skinLabel.text = "主题皮肤 · \(theme.preset.name)（\(customization.appearanceMode.displayName)）"
         skinLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
         skinLabel.textColor = theme.keyHintText
         stackView.addArrangedSubview(skinLabel)
@@ -198,9 +207,12 @@ final class QuickSettingsSheetView: UIView {
         let skinRow = UIStackView()
         skinRow.axis = .horizontal
         skinRow.spacing = 6
-        let activePresetID = customization.activePreset(isSystemDark: traitCollection.userInterfaceStyle == .dark).id
+        let activePresetID = theme.preset.id
+        let hasActiveCustom = theme.preset.isDark
+            ? customization.hasDarkCustomOverrides
+            : customization.hasLightCustomOverrides
         for preset in KeyboardThemePreset.presets {
-            let active = (preset.id == activePresetID && !customization.hasCustomColorOverrides)
+            let active = (preset.id == activePresetID && !hasActiveCustom)
             let btn = ActionClosureButton(type: .system)
             btn.setTitle(preset.name, for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
@@ -210,11 +222,9 @@ final class QuickSettingsSheetView: UIView {
             btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
             btn.actionHandler = { [weak self] in
                 guard let self else { return }
-                let isSysDark = (self.traitCollection.userInterfaceStyle == .dark)
-                self.customization.applyPresetSelection(preset, isSystemDark: isSysDark)
+                self.customization.applyPresetSelection(preset, isSystemDark: self.isSystemDark)
                 self.customization.save()
                 self.onThemeChanged?(self.customization)
-                self.rebuild()
             }
             skinRow.addArrangedSubview(btn)
         }

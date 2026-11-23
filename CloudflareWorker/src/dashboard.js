@@ -246,7 +246,7 @@ pre.tsv{background:var(--card);border:1px solid var(--line);border-radius:8px;pa
 
       <div class="card">
         <div class="ch"><div class="ct">☁️ 我的个人 E2EE 同步记录与自学习词库状态</div><span class="pill">按命名空间统计</span></div>
-        <div class="cd">登录后这里展示你当前账号在 Cloudflare D1 中已同步的所有加密记录块（个人自学习词库 `lexicon`、设置 `settings`、主题 `theme`、常用短语等）。</div>
+        <div class="cd">登录后这里展示你当前账号在 Cloudflare D1 中已同步的所有加密记录块（个人自学习词库 <code>lexicon</code>、设置 <code>settings</code>、主题 <code>theme</code>、常用短语等）。</div>
         <div style="overflow-x:auto;max-height:280px">
           <table><thead><tr><th>命名空间</th><th>记录键 (key)</th><th>Lamport 版本</th><th>来源设备</th><th>密文大小</th><th>更新时间</th></tr></thead><tbody id="me-sync-tb"><tr><td colspan="6" style="color:var(--mut)">请先在左侧登录您的灵犀账号。</td></tr></tbody></table>
         </div>
@@ -258,7 +258,7 @@ pre.tsv{background:var(--card);border:1px solid var(--line);border-radius:8px;pa
   <section class="pane" id="pane-compliance">
     <div class="g2">
       <div class="card">
-        <div class="ch"><div class="ct">🏢 B 端企业 API 客户管理与计费 (`api_clients`)</div><span class="pill">独立 Service Key + Scope 白名单</span></div>
+        <div class="ch"><div class="ct">🏢 B 端企业 API 客户管理与计费 (<code>api_clients</code>)</div><span class="pill">独立 Service Key + Scope 白名单</span></div>
         <div class="row">
           <input id="b2b-org" class="in" placeholder="输入企业客户名称（如：灵犀企业版 SaaS）" />
           <button class="btn btn-p" onclick="createB2B()">+ 签发企业密钥</button>

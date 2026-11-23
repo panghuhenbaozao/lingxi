@@ -1187,32 +1187,41 @@ final class LingxiTests: XCTestCase {
         let uniqueEmail = "ios_\(UUID().uuidString.prefix(8).lowercased())@lingxi.test"
         let client = CloudBackendClient(timeout: 2)
 
-        // 1. 离线邮箱注册应自动落入本机加密账号库，不再因无服务器报错
-        let regSession = try await client.register(email: uniqueEmail, username: "真机测试号", password: "password123")
+        // 1. 显式允许离线回退时，离线邮箱注册落入本机加密账号库
+        let regSession = try await client.register(
+            email: uniqueEmail,
+            username: "真机测试号",
+            password: "password123",
+            allowOfflineFallback: true
+        )
         XCTAssertTrue(regSession.userID.hasPrefix("local-"))
         XCTAssertTrue(CloudBackendConfig.load().isLocalOnlyAccount)
+        XCTAssertFalse(client.isRealCloudAuthenticated, "离线档案不得伪装为真实云端已登录")
+        XCTAssertTrue(client.isLocalOfflineSession)
         XCTAssertEqual(CloudBackendConfig.load().username, "真机测试号")
 
-        // 2. 退出后，错误密码应被拒绝，正确密码应成功登录
+        // 2. 退出后，错误密码应被拒绝，正确密码在允许离线回退时应成功登录
         await client.signOut()
         XCTAssertFalse(client.isAuthenticatedOrHasAPIKey)
 
         do {
-            _ = try await client.login(account: uniqueEmail, password: "wrong_password")
+            _ = try await client.login(account: uniqueEmail, password: "wrong_password", allowOfflineFallback: true)
             XCTFail("错误密码不应允许登录")
         } catch {
             // 预期拦截
         }
 
-        let loginSession = try await client.login(account: uniqueEmail, password: "password123")
+        let loginSession = try await client.login(account: uniqueEmail, password: "password123", allowOfflineFallback: true)
         XCTAssertEqual(loginSession.userID, regSession.userID)
         XCTAssertTrue(client.isAuthenticatedOrHasAPIKey)
+        XCTAssertTrue(client.isLocalOfflineSession)
 
         // 3. 一键本机账号创建应立即可用
         await client.signOut()
         let quick = client.createQuickLocalAccount(username: "快速体验")
         XCTAssertTrue(quick.userID.hasPrefix("local-"))
-        XCTAssertTrue(client.isAuthenticatedOrHasAPIKey)
+        XCTAssertTrue(client.isLocalOfflineSession)
+        XCTAssertFalse(client.isRealCloudAuthenticated)
         await client.signOut()
     }
 
@@ -1698,5 +1707,123 @@ final class LingxiTests: XCTestCase {
         XCTAssertNotEqual(t9_742.candidates.first?.word, "山东", "T9 三位前缀 742 不得被 山东 劫持")
         let t9_linyi = engine.queryT9(digits: "54694", lockedSyllables: [], settings: settings)
         XCTAssertEqual(t9_linyi.candidates.first?.word, "临沂", "T9 完整编码 54694 应精准命中 临沂")
+    }
+
+    func testV514ThemeSyncIsolationAndChinaDirectTransport() async throws {
+        // 1. 日夜自定义调色严格隔离：浅色自定义底板切到深色主题后，绝不串色污染深色主题
+        var theme = ThemeCustomization()
+        theme.appearanceMode = .alwaysLight
+        theme.customCanvasHex = "#FFF8F0"
+        theme.customKeyFillHex = "#FFFFFF"
+        theme.appearanceMode = .alwaysDark
+        theme.selectedThemeID = "deep_ocean"
+        let darkPreset = theme.activePreset(isSystemDark: false)
+        XCTAssertTrue(darkPreset.isDark, "深色模式下浅色自定义调色绝不能污染成亮色")
+        XCTAssertEqual(darkPreset.canvasTop.hex.uppercased(), "#151C26")
+
+        // 2. App 与键盘统一预设锁定语义：日间选深色皮肤立刻锁定为 .alwaysDark，不论系统怎么切明暗都不乱切颜色
+        var synced = ThemeCustomization()
+        synced.appearanceMode = .followSystem
+        let ocean = KeyboardThemePreset.find(id: "deep_ocean")
+        synced.applyPresetSelection(ocean, isSystemDark: false)
+        XCTAssertEqual(synced.appearanceMode, .alwaysDark)
+        XCTAssertEqual(synced.activePreset(isSystemDark: false).id, "deep_ocean")
+        XCTAssertEqual(synced.activePreset(isSystemDark: true).id, "deep_ocean")
+
+        // 3. 同秒连续写盘不应命中陈旧缓存（fileStamp 校验）
+        let prevTheme = ThemeCustomization.load(force: true)
+        defer { _ = prevTheme.save(notify: false) }
+        var t1 = ThemeCustomization()
+        t1.applyPresetSelection(KeyboardThemePreset.find(id: "lingxi_light"), isSystemDark: false)
+        XCTAssertTrue(t1.save(notify: false))
+        var t2 = ThemeCustomization()
+        t2.applyPresetSelection(KeyboardThemePreset.find(id: "obsidian_gold"), isSystemDark: false)
+        XCTAssertTrue(t2.save(notify: false))
+        let reloaded = ThemeCustomization.load(force: false)
+        XCTAssertEqual(reloaded.selectedThemeID, "obsidian_gold")
+        XCTAssertEqual(reloaded.appearanceMode, .alwaysDark)
+
+        // 4. 中国大陆强制 IPv4 HTTP/1.1 解析器：同时支持 Content-Length 与 Transfer-Encoding: chunked
+        let plainRaw = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}".utf8)
+        let parsedPlain = try XCTUnwrap(ChinaDirectIPv4Transport.parseHTTPResponse(plainRaw))
+        XCTAssertEqual(parsedPlain.statusCode, 200)
+        XCTAssertEqual(String(data: parsedPlain.data, encoding: .utf8), "{\"status\":\"ok\"}")
+
+        let chunkedRaw = Data("HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"ok\":t\r\n5\r\nrue}\n\r\n0\r\n\r\n".utf8)
+        let parsedChunked = try XCTUnwrap(ChinaDirectIPv4Transport.parseHTTPResponse(chunkedRaw))
+        XCTAssertEqual(parsedChunked.statusCode, 201)
+        XCTAssertEqual(String(data: parsedChunked.data, encoding: .utf8), "{\"ok\":true}\n")
+
+        let builtReq = String(
+            data: ChinaDirectIPv4Transport.buildHTTP11Request(
+                host: "lingxi-ime.pages.dev",
+                method: "POST",
+                path: "/api/v1/auth/login",
+                headers: ["Content-Type": "application/json"],
+                body: Data("{\"a\":1}".utf8)
+            ),
+            encoding: .utf8
+        ) ?? ""
+        XCTAssertTrue(builtReq.contains("POST /api/v1/auth/login HTTP/1.1\r\n"))
+        XCTAssertTrue(builtReq.contains("Host: lingxi-ime.pages.dev\r\n"))
+        XCTAssertTrue(builtReq.contains("Connection: close\r\n"))
+        XCTAssertTrue(builtReq.contains("Accept-Encoding: identity\r\n"))
+        XCTAssertTrue(builtReq.contains("Content-Length: 7\r\n"))
+
+        // 5. 云端登录默认绝不静默降级成离线假账号；且真云端登录自动把旧版 localNoop 升级为 e2eeCloud
+        var cfg = CloudBackendConfig.load()
+        let prevURL = cfg.serverBaseURL
+        let prevRelay = ClipboardRelayConfig.load()
+        cfg.serverBaseURL = "http://127.0.0.1:1"
+        cfg.save()
+        defer {
+            var r = CloudBackendConfig.load()
+            r.serverBaseURL = prevURL
+            r.save()
+            _ = prevRelay.save()
+            CloudCredentialStore.clearAll()
+        }
+        let strictClient = CloudBackendClient(timeout: 2)
+        await strictClient.signOut()
+        do {
+            _ = try await strictClient.register(email: "strict@lingxi.test", username: "严检", password: "password123")
+            XCTFail("默认云端注册在网络不可达时应明确抛错，绝不得静默伪造离线账号")
+        } catch let err as CloudBackendError {
+            if case .networkFailure = err {
+                // 预期抛出 networkFailure
+            } else {
+                XCTFail("期望 networkFailure，实际收到：\(err)")
+            }
+        }
+        XCTAssertFalse(strictClient.isLocalOfflineSession)
+        XCTAssertFalse(strictClient.isRealCloudAuthenticated)
+
+        var localRelay = ClipboardRelayConfig()
+        localRelay.syncTransportMode = .localNoop
+        localRelay.save()
+        let mockAuthObj: [String: Any] = [
+            "userID": "cloud-u-514",
+            "email": "china@lingxi.ime",
+            "username": "国内直连用户",
+            "accessToken": "lxt.v514.token",
+            "refreshToken": "lxr_v514_refresh",
+            "accessExpiry": Int(Date().addingTimeInterval(3600).timeIntervalSince1970),
+            "e2eeSalt": "0123456789abcdef0123456789abcdef"
+        ]
+        let b64u = try JSONSerialization.data(withJSONObject: mockAuthObj)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let cbURL = try XCTUnwrap(URL(string: "lingxi://auth-callback?payload=\(b64u)"))
+        _ = try strictClient.completeApplePasskeyCallback(url: cbURL)
+        XCTAssertTrue(strictClient.isRealCloudAuthenticated)
+        XCTAssertFalse(strictClient.isLocalOfflineSession)
+        XCTAssertEqual(ClipboardRelayConfig.load().syncTransportMode, .e2eeCloud, "云端真登录后必须自动将旧版 localNoop 升级为 e2eeCloud")
+
+        // 6. workers.dev 带路径或末尾斜杠的旧配置也应自动迁移至 lingxi-ime.pages.dev
+        let workersWithPath = Data("{\"serverBaseURL\":\"https://lingxi-cloud.1455952.workers.dev/\"}".utf8)
+        let migrated = try JSONDecoder().decode(CloudBackendConfig.self, from: workersWithPath)
+        XCTAssertEqual(migrated.normalizedBaseURL, "https://lingxi-ime.pages.dev")
     }
 }

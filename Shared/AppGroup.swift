@@ -1,4 +1,54 @@
+import CoreFoundation
 import Foundation
+
+/// 跨进程 Darwin 通知（主 App 与键盘扩展毫秒级双向实时同步外观与设置，彻底消除不同步）。
+enum AppGroupNotifications {
+    static let themeChanged = "com.lingxi.ime.themeChanged"
+    static let settingsChanged = "com.lingxi.ime.settingsChanged"
+
+    static func post(_ name: String) {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(
+            center,
+            CFNotificationName(name as CFString),
+            nil,
+            nil,
+            true
+        )
+    }
+
+    final class Observer {
+        fileprivate let onNotify: () -> Void
+        private let name: String
+
+        init(name: String, onNotify: @escaping () -> Void) {
+            self.name = name
+            self.onNotify = onNotify
+            let center = CFNotificationCenterGetDarwinNotifyCenter()
+            let pointer = Unmanaged.passUnretained(self).toOpaque()
+            CFNotificationCenterAddObserver(
+                center,
+                pointer,
+                { _, observer, _, _, _ in
+                    guard let observer else { return }
+                    let box = Unmanaged<Observer>.fromOpaque(observer).takeUnretainedValue()
+                    DispatchQueue.main.async {
+                        box.onNotify()
+                    }
+                },
+                name as CFString,
+                nil,
+                .deliverImmediately
+            )
+        }
+
+        deinit {
+            let center = CFNotificationCenterGetDarwinNotifyCenter()
+            let pointer = Unmanaged.passUnretained(self).toOpaque()
+            CFNotificationCenterRemoveObserver(center, pointer, CFNotificationName(name as CFString), nil)
+        }
+    }
+}
 
 /// App Group 解析。
 ///
@@ -38,6 +88,17 @@ enum AppGroup {
         return attrs?[.modificationDate] as? Date
     }
 
+    /// 文件内容指纹（修改时间 + 字节大小 + inode），避免 1 秒内连续读写被旧缓存误判未变更。
+    static func fileStamp(of fileName: String) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL(fileName).path) else {
+            return nil
+        }
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        let inode = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        return "\(mtime)-\(size)-\(inode)"
+    }
+
     static func readJSON<T: Decodable>(_ type: T.Type, from fileName: String) -> T? {
         let url = fileURL(fileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -68,8 +129,10 @@ enum AppGroup {
     private static func resolveIdentifier() -> String {
         var candidates: [String] = []
         if let altGroups = Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] {
-            // 优先选择与本应用相关的分组
-            candidates += altGroups.sorted { lhs, _ in lhs.contains("lingxi") }
+            // 优先选择与本应用相关的分组（严格弱序比较器，避免 Swift sort 断言）
+            candidates += altGroups.sorted { lhs, rhs in
+                lhs.contains("lingxi") && !rhs.contains("lingxi")
+            }
         }
         if let configured = Bundle.main.object(forInfoDictionaryKey: "LingxiAppGroup") as? String, !configured.isEmpty {
             candidates.append(configured)

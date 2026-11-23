@@ -431,28 +431,31 @@ struct LingxiSettings: Codable, Equatable {
     private static let fileName = "lingxi_settings.json"
     static let customKeymapSyncFileName = "lingxi_custom_keymap.json"
     private static var cachedValue: LingxiSettings?
-    private static var cachedMTime: Date?
+    private static var cachedStamp: String?
 
-    /// 读取最新设置；利用文件修改时间避免频繁重复反序列化。
+    /// 读取最新设置；利用文件内容指纹（mtime+size+inode）避免同秒读写误用旧缓存。
     static func load(force: Bool = false) -> LingxiSettings {
-        let mtime = AppGroup.modificationDate(of: fileName)
-        if !force, let cached = cachedValue, cachedMTime == mtime {
+        let stamp = AppGroup.fileStamp(of: fileName)
+        if !force, let cached = cachedValue, let stamp, cachedStamp == stamp {
             return cached
         }
         let loaded = AppGroup.readJSON(LingxiSettings.self, from: fileName) ?? LingxiSettings()
         cachedValue = loaded
-        cachedMTime = mtime
+        cachedStamp = stamp
         return loaded
     }
 
     @discardableResult
-    func save() -> Bool {
+    func save(notify: Bool = true) -> Bool {
         if !customSwipeUpMap.isEmpty || !customSwipeDownMap.isEmpty {
             _ = AppGroup.writeJSON(CustomKeymapSyncPayload(up: customSwipeUpMap, down: customSwipeDownMap), to: Self.customKeymapSyncFileName)
         }
         let ok = AppGroup.writeJSON(self, to: Self.fileName)
         Self.cachedValue = self
-        Self.cachedMTime = AppGroup.modificationDate(of: Self.fileName)
+        Self.cachedStamp = AppGroup.fileStamp(of: Self.fileName)
+        if ok && notify {
+            AppGroupNotifications.post(AppGroupNotifications.settingsChanged)
+        }
         return ok
     }
 }

@@ -469,7 +469,7 @@ final class AIAssistantPanelView: UIView {
         }
     }
 
-    private func applyTheme(_ theme: ResolvedTheme) {
+    func applyTheme(_ theme: ResolvedTheme) {
         backgroundColor = theme.canvasTop.withAlphaComponent(0.98)
         contextSegmented.selectedSegmentTintColor = theme.accentFill
         contextSegmented.backgroundColor = theme.specialKeyFill

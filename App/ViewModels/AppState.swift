@@ -6,24 +6,30 @@ import UIKit
 final class AppState: ObservableObject {
     @Published var settings: LingxiSettings {
         didSet {
+            guard !isRefreshingState, settings != oldValue else { return }
             settings.save()
             scheduleAutoSyncIfNeeded()
         }
     }
     @Published var theme: ThemeCustomization {
         didSet {
+            guard !isRefreshingState, theme != oldValue else { return }
             theme.save()
             scheduleAutoSyncIfNeeded()
         }
     }
     @Published var aiConfig: AIConfig {
         didSet {
+            guard !isRefreshingState, aiConfig != oldValue else { return }
             aiConfig.save()
             scheduleAutoSyncIfNeeded()
         }
     }
     @Published var cloudConfig: CloudBackendConfig {
-        didSet { cloudConfig.save() }
+        didSet {
+            guard !isRefreshingState, cloudConfig != oldValue else { return }
+            cloudConfig.save()
+        }
     }
     @Published var habitProfile: UserTypingHabitProfile = TypingHabitTracker.shared.currentProfile()
     @Published var aiInsightReport: AIAutoInsightReport? = AIAutoInsightService.loadCachedReport()
@@ -32,7 +38,10 @@ final class AppState: ObservableObject {
     @Published var isCloningStyleDNA: Bool = false
     @Published var aiUsageLedger: [AIUsageLedgerEntry] = []
     @Published var secureVaultItems: [SecureVaultItem] = []
+    /// true 仅表示已真实连接云端账号（排除本机离线档案）
     @Published var isCloudAuthenticated: Bool = false
+    /// true 表示当前处于纯本机离线档案（旧版登录回退或用户显式选择离线模式）
+    @Published var isLocalOfflineAccount: Bool = false
     @Published var activeCustomerAPIKey: String = ""
     @Published var clipboardItems: [ClipboardItem] = []
     @Published var quickPhrases: [QuickPhrase] = []
@@ -47,6 +56,8 @@ final class AppState: ObservableObject {
     let lexicon = UserLexicon()
     private var autoSyncTask: Task<Void, Never>?
     private var isRefreshingState = false
+    private var themeDarwinObserver: AppGroupNotifications.Observer?
+    private var settingsDarwinObserver: AppGroupNotifications.Observer?
 
     init() {
         self.settings = LingxiSettings.load(force: true)
@@ -54,6 +65,36 @@ final class AppState: ObservableObject {
         self.aiConfig = AIConfig.load()
         self.cloudConfig = CloudBackendConfig.load()
         refreshAll()
+        registerSharedContainerObservers()
+    }
+
+    private func registerSharedContainerObservers() {
+        themeDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.themeChanged) { [weak self] in
+            Task { @MainActor in
+                self?.reloadSharedThemeAndSettingsIfNeeded()
+            }
+        }
+        settingsDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.settingsChanged) { [weak self] in
+            Task { @MainActor in
+                self?.reloadSharedThemeAndSettingsIfNeeded()
+            }
+        }
+    }
+
+    /// 响应键盘扩展发出的 Darwin 跨进程变更通知或切 Tab 时静默拉平 App 与键盘的外观/设置状态，绝不反向覆盖写盘。
+    func reloadSharedThemeAndSettingsIfNeeded() {
+        let diskSettings = LingxiSettings.load(force: true)
+        let diskTheme = ThemeCustomization.load(force: true)
+        guard diskSettings != settings || diskTheme != theme else { return }
+        isRefreshingState = true
+        defer { isRefreshingState = false }
+        if diskSettings != settings {
+            settings = diskSettings
+        }
+        if diskTheme != theme {
+            theme = diskTheme
+            loadCustomBackgroundPreview()
+        }
     }
 
     func refreshAll() {
@@ -62,10 +103,16 @@ final class AppState: ObservableObject {
         settings = LingxiSettings.load(force: true)
         theme = ThemeCustomization.load(force: true)
         aiConfig = AIConfig.load()
-        cloudConfig = CloudBackendConfig.load()
+        var loadedCloud = CloudBackendConfig.load()
+        if loadedCloud.serverBaseURL != loadedCloud.normalizedBaseURL {
+            loadedCloud.serverBaseURL = loadedCloud.normalizedBaseURL
+            loadedCloud.save()
+        }
+        cloudConfig = loadedCloud
         habitProfile = TypingHabitTracker.shared.currentProfile()
         aiInsightReport = AIAutoInsightService.loadCachedReport()
-        isCloudAuthenticated = CloudBackendClient.shared.isAuthenticatedOrHasAPIKey
+        isCloudAuthenticated = CloudBackendClient.shared.isRealCloudAuthenticated
+        isLocalOfflineAccount = CloudBackendClient.shared.isLocalOfflineSession
         activeCustomerAPIKey = CloudCredentialStore.loadAPIKey() ?? ""
         clipboardItems = ClipboardStore.items()
         quickPhrases = QuickPhraseStore.load()
@@ -78,7 +125,7 @@ final class AppState: ObservableObject {
         loadUserAvatar()
     }
 
-    /// 当已登录或已接入客户 API Key 且开启自动同步时，按当前激活的同步层实现（LocalNoop / LAN / E2EE Cloud）防抖触发后台无感同步
+    /// 当已真实登录云端且开启自动同步时，按当前激活的同步层实现（LocalNoop / LAN / E2EE Cloud）防抖触发后台无感同步
     func scheduleAutoSyncIfNeeded() {
         let relayCfg = ClipboardRelayConfig.load()
         guard !isRefreshingState,
@@ -86,7 +133,7 @@ final class AppState: ObservableObject {
               relayCfg.syncTransportMode != .localNoop else {
             return
         }
-        if relayCfg.syncTransportMode == .e2eeCloud && !CloudBackendClient.shared.isAuthenticatedOrHasAPIKey {
+        if relayCfg.syncTransportMode == .e2eeCloud && !CloudBackendClient.shared.isRealCloudAuthenticated {
             return
         }
         autoSyncTask?.cancel()
@@ -368,8 +415,15 @@ final class AppState: ObservableObject {
             throw CloudBackendError.badRequest("请输入有效的 API Key (如 lx_live_...)")
         }
         CloudCredentialStore.saveAPIKey(trimmed)
-        cloudConfig.apiKeyPrefix = String(trimmed.prefix(16)) + "..."
-        cloudConfig.save()
+        var cfg = CloudBackendConfig.load()
+        cfg.apiKeyPrefix = String(trimmed.prefix(16)) + "..."
+        cfg.isLocalOnlyAccount = false
+        cfg.save()
+        var relayCfg = ClipboardRelayConfig.load()
+        if relayCfg.syncTransportMode == .localNoop {
+            relayCfg.syncTransportMode = .e2eeCloud
+            relayCfg.save()
+        }
         let profile = try await CloudBackendClient.shared.syncTypingHabitsWithServer()
         habitProfile = profile
         refreshAll()
@@ -388,7 +442,12 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func syncCloudNow() async throws -> SyncRunReport {
-        let relayCfg = ClipboardRelayConfig.load()
+        var relayCfg = ClipboardRelayConfig.load()
+        // 若用户已真实登录云端但历史配置仍停留在 localNoop，自动升格为 e2eeCloud
+        if CloudBackendClient.shared.isRealCloudAuthenticated && relayCfg.syncTransportMode == .localNoop {
+            relayCfg.syncTransportMode = .e2eeCloud
+            relayCfg.save()
+        }
         let report: SyncRunReport
         switch relayCfg.syncTransportMode {
         case .localNoop:
@@ -401,19 +460,14 @@ final class AppState: ObservableObject {
                 pairCode: relayCfg.pairCode
             )
         case .e2eeCloud:
-            if cloudConfig.isLocalOnlyAccount && cloudConfig.normalizedBaseURL.contains("127.0.0.1") {
-                let engine = SyncEngine(sync: LocalNoopSyncService(), source: SyncEngine.makeFullSyncSource())
-                report = try await engine.syncNow()
-            } else {
-                report = try await CloudBackendClient.shared.syncAllImportantDataAndHabits()
-            }
+            report = try await CloudBackendClient.shared.syncAllImportantDataAndHabits()
         }
         refreshAll()
         return report
     }
 
     func refreshHabitProfile() async {
-        if CloudBackendClient.shared.isAuthenticatedOrHasAPIKey {
+        if CloudBackendClient.shared.isRealCloudAuthenticated {
             if let remote = try? await CloudBackendClient.shared.syncTypingHabitsWithServer() {
                 habitProfile = remote
                 return

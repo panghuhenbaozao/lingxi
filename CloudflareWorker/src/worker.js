@@ -1,6 +1,6 @@
 import { DASHBOARD_HTML } from "./dashboard.js";
 
-const VERSION = "5.1.2";
+const VERSION = "5.1.4";
 const ACCESS_TTL_SEC = 86400;
 const REFRESH_TTL_SEC = 86400 * 30;
 const PBKDF2_ITERATIONS = 100000;
@@ -481,7 +481,7 @@ export default {
       if (m === "GET" && (path === "/" || path === "/dashboard")) {
         return new Response(DASHBOARD_HTML, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
       }
-      if (m === "GET" && path === "/api/v1/health") return jres(await getStats(env));
+      if (m === "GET" && (path === "/api/v1/health" || path === "/v1/health")) return jres(await getStats(env));
 
       if (m === "GET" && path === "/api/v1/dashboard/overview") {
         const [stats, profRes, nsRes, devRes, b2bRes, conRes, audRes, packs] = await Promise.all([
@@ -688,7 +688,7 @@ export default {
         const pubB64 = String(b.publicKeyRawB64 || "").trim();
         const sigB64 = String(b.signatureB64 || "").trim();
         const ts = Number(b.timestamp || 0);
-        if (!hwId || !pubB64 || !sigB64 || Math.abs(nowSec() - ts) > 3600) {
+        if (!hwId || !pubB64 || !sigB64 || Math.abs(nowSec() - ts) > 86400) {
           return eres(400, "BAD_REQUEST", "Apple Face ID 硬件凭证无效或已过期");
         }
         const pubBytes = b64uDec(pubB64);

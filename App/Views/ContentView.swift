@@ -37,5 +37,8 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(Color(Design.Palette.accent))
+        .onChange(of: selectedTab) { _ in
+            appState.reloadSharedThemeAndSettingsIfNeeded()
+        }
     }
 }

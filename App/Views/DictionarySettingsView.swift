@@ -20,7 +20,7 @@ struct DictionarySettingsView: View {
                         } label: {
                             appleAccountHeaderRow(
                                 title: appState.cloudConfig.username.isEmpty ? "灵犀账号" : appState.cloudConfig.username,
-                                subtitle: appState.cloudConfig.email.isEmpty ? "E2EE 云同步 · 跨屏剪贴板 · 习惯画像" : appState.cloudConfig.email,
+                                subtitle: "国内云端在线 · " + (appState.cloudConfig.email.isEmpty ? "E2EE 同步就绪" : appState.cloudConfig.email),
                                 isSignedIn: true
                             )
                         }
@@ -30,8 +30,10 @@ struct DictionarySettingsView: View {
                         } label: {
                             HStack {
                                 appleAccountHeaderRow(
-                                    title: "登录灵犀账号",
-                                    subtitle: "设置端到端同步、跨屏剪贴板与习惯画像",
+                                    title: appState.isLocalOfflineAccount ? "升级为国内云端账号" : "登录灵犀云端账号",
+                                    subtitle: appState.isLocalOfflineAccount
+                                        ? "当前为本机离线档案 · 点此免代理直连国内云端"
+                                        : "国内免代理直连 · 面容 ID / 邮箱同步词库与外观",
                                     isSignedIn: false
                                 )
                                 Image(systemName: "chevron.right")

@@ -127,7 +127,7 @@ struct UserAvatarView: View {
                     .frame(width: size, height: size)
                     .clipShape(Circle())
                     .overlay(Circle().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
-            } else if appState.isCloudAuthenticated {
+            } else if appState.isCloudAuthenticated || appState.isLocalOfflineAccount {
                 ZStack {
                     Circle()
                         .fill(
@@ -191,7 +191,14 @@ struct AppleStyleSignInSheet: View {
     @State private var isWorking: Bool = false
     @State private var workingStatus: String = ""
     @State private var errorMessage: String?
+    @State private var cloudProbeState: CloudProbeState = .probing
     @State private var passkeyCoordinator = ApplePasskeyWebAuthCoordinator()
+
+    private enum CloudProbeState: Equatable {
+        case probing
+        case online(latencyMs: Int, route: String)
+        case unreachable(String)
+    }
 
     var body: some View {
         NavigationStack {
@@ -220,15 +227,17 @@ struct AppleStyleSignInSheet: View {
                             .font(.system(size: 26, weight: .bold))
                             .foregroundStyle(Color(Design.Palette.ink))
 
-                        Text("支持 Apple iCloud 通行密钥与原生\(BiometricAuthHelper.biometryDisplayName())直连 Cloudflare 全球云端，\n端到端零知识加密同步 10 类核心词库、文风 DNA 与打字习惯。")
+                        Text("国内免代理直连云端（TCP + 5 组 IPv4 优选自动竞速），\n端到端零知识加密同步词库、外观、文风 DNA 与打字习惯。")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineSpacing(3)
                             .padding(.horizontal, 6)
+
+                        cloudProbeBanner
                     }
 
-                    // 2. 两大原生 Apple 免密登录通道（直连中国可访问的 Cloudflare Pages + D1 节点，免代理零报错）
+                    // 2. 两大原生 Apple 免密登录通道（内置国内直连 + IPv4 优选多路竞速）
                     VStack(spacing: 10) {
                         Button {
                             Task { await signInWithFaceIDHardwareKey() }
@@ -264,7 +273,7 @@ struct AppleStyleSignInSheet: View {
                         .buttonStyle(.plain)
                         .disabled(isWorking)
 
-                        Text("直连中国大陆免代理优化云端（lingxi-ime.pages.dev），首次点上方黑色按钮刷一次\(BiometricAuthHelper.biometryDisplayName())即可秒建并登录真实 Cloudflare D1 云端账号。")
+                        Text("推荐点上方黑色按钮：自动走国内 IPv4 优选直连，刷一次\(BiometricAuthHelper.biometryDisplayName())即可秒建并登录真实云端账号，不会降级为离线。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -423,6 +432,58 @@ struct AppleStyleSignInSheet: View {
                         .foregroundStyle(Color(Design.Palette.accent))
                 }
             }
+            .task {
+                await probeCloudStatusSilently()
+            }
+        }
+    }
+
+    private var cloudProbeBanner: some View {
+        Button {
+            Task { await probeCloudStatusSilently() }
+        } label: {
+            HStack(spacing: 6) {
+                switch cloudProbeState {
+                case .probing:
+                    ProgressView().scaleEffect(0.75)
+                    Text("正在测速国内直连云端节点…")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                case .online(let ms, let route):
+                    Circle()
+                        .fill(Color(Design.Palette.success))
+                        .frame(width: 7, height: 7)
+                    Text("国内云端已连通 · \(ms)ms · \(route)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.success))
+                        .lineLimit(1)
+                case .unreachable(let detail):
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("暂未连通（点此重试）：\(detail)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func probeCloudStatusSilently() async {
+        cloudProbeState = .probing
+        let t0 = Date()
+        do {
+            _ = try await CloudBackendClient.shared.checkServerHealth()
+            let ms = max(1, Int(Date().timeIntervalSince(t0) * 1000))
+            cloudProbeState = .online(latencyMs: ms, route: CloudBackendClient.shared.lastActiveRouteDescription)
+        } catch {
+            cloudProbeState = .unreachable(error.localizedDescription)
         }
     }
 
@@ -494,13 +555,13 @@ struct AppleStyleSignInSheet: View {
         do {
             let res = try await CloudBackendClient.shared.checkServerHealth()
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            let ver = res["version"] as? String ?? "5.1"
+            let ver = res["version"] as? String ?? "5.1.4"
             workingStatus = ""
-            errorMessage = nil
-            // 临时用 workingStatus 反馈不可见，直接清晰提示于顶部状态
-            let base = CloudBackendConfig.load().normalizedBaseURL
-            errorMessage = "✓ 云端连通正常 (\(ms)ms) · \(base) · v\(ver)"
+            let route = CloudBackendClient.shared.lastActiveRouteDescription
+            cloudProbeState = .online(latencyMs: ms, route: route)
+            errorMessage = "✓ 云端连通正常 (\(ms)ms) · \(route) · v\(ver)"
         } catch {
+            cloudProbeState = .unreachable(error.localizedDescription)
             errorMessage = "连通失败：\(error.localizedDescription)"
         }
     }

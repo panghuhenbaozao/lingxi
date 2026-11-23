@@ -56,16 +56,31 @@ struct ThemeStudioView: View {
     @State private var themeShareStatus: String?
 
     private var previewIsDark: Bool {
-        if let forced = previewDarkOverride { return forced }
         switch appState.theme.appearanceMode {
-        case .alwaysLight: return false
-        case .alwaysDark: return true
-        case .followSystem: return colorScheme == .dark
+        case .alwaysLight:
+            return false
+        case .alwaysDark:
+            return true
+        case .followSystem:
+            return previewDarkOverride ?? (colorScheme == .dark)
         }
     }
 
     private var activePreset: KeyboardThemePreset {
         appState.theme.activePreset(isSystemDark: previewIsDark)
+    }
+
+    private var appearanceStatusSummary: String {
+        switch appState.theme.appearanceMode {
+        case .followSystem:
+            let dayName = KeyboardThemePreset.find(id: appState.theme.lightThemeID).name
+            let nightName = KeyboardThemePreset.find(id: appState.theme.darkThemeID).name
+            return "跟随系统：日间「\(dayName)」· 夜间「\(nightName)」。点下方任意相反明暗皮肤可立即锁定，不再自动变色。"
+        case .alwaysLight:
+            return "已锁定浅色「\(activePreset.name)」，切换微信/抖音/搜索框均保持固定配色，绝不乱切。"
+        case .alwaysDark:
+            return "已锁定深色「\(activePreset.name)」，切换微信/抖音/搜索框均保持固定配色，绝不乱切。"
+        }
     }
 
     var body: some View {
@@ -85,6 +100,17 @@ struct ThemeStudioView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("键盘外观")
+            .onAppear {
+                appState.reloadSharedThemeAndSettingsIfNeeded()
+                if appState.theme.appearanceMode != .followSystem {
+                    previewDarkOverride = nil
+                }
+            }
+            .onChange(of: appState.theme.appearanceMode) { newMode in
+                if newMode != .followSystem {
+                    previewDarkOverride = nil
+                }
+            }
             .onChange(of: selectedPhotoItem) { newItem in
                 guard let newItem else { return }
                 Task {
@@ -147,9 +173,14 @@ struct ThemeStudioView: View {
                 }
             }
             .pickerStyle(.segmented)
-            Text("「跟随系统」白天自动展示苹果原生白、夜间自动切为通透高对比石墨暗色，日/夜两套调色板完全独立，互不串色。")
+            Text(appearanceStatusSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if !AppGroup.isAvailable {
+                Label("未检测到共享容器权限，App 与键盘外观可能无法跨进程同步，请检查签名 App Group 配置。", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
         .padding(14)
         .background(Color(.secondarySystemGroupedBackground))
@@ -158,30 +189,32 @@ struct ThemeStudioView: View {
 
     private var previewControlsBar: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    previewDarkOverride = false
-                } label: {
-                    Label("☀️ 日间预览", systemImage: previewIsDark ? "sun.max" : "sun.max.fill")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity, minHeight: 32)
-                        .background(!previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
-                        .foregroundStyle(!previewIsDark ? Color.white : Color(Design.Palette.ink))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
+            if appState.theme.appearanceMode == .followSystem {
+                HStack(spacing: 8) {
+                    Button {
+                        previewDarkOverride = false
+                    } label: {
+                        Label("☀️ 日间预览", systemImage: previewIsDark ? "sun.max" : "sun.max.fill")
+                            .font(.caption.bold())
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                            .background(!previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
+                            .foregroundStyle(!previewIsDark ? Color.white : Color(Design.Palette.ink))
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    previewDarkOverride = true
-                } label: {
-                    Label("🌙 夜间预览", systemImage: previewIsDark ? "moon.fill" : "moon")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity, minHeight: 32)
-                        .background(previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
-                        .foregroundStyle(previewIsDark ? Color.white : Color(Design.Palette.ink))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    Button {
+                        previewDarkOverride = true
+                    } label: {
+                        Label("🌙 夜间预览", systemImage: previewIsDark ? "moon.fill" : "moon")
+                            .font(.caption.bold())
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                            .background(previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
+                            .foregroundStyle(previewIsDark ? Color.white : Color(Design.Palette.ink))
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             Picker("顶栏预览状态", selection: $previewBarState) {
@@ -367,29 +400,22 @@ struct ThemeStudioView: View {
                 .font(.headline)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 ForEach(presets) { preset in
-                    let isSelected: Bool = {
-                        if appState.theme.appearanceMode == .followSystem {
-                            return preset.isDark
-                                ? (appState.theme.darkThemeID == preset.id && !appState.theme.hasDarkCustomOverrides)
-                                : (appState.theme.lightThemeID == preset.id && !appState.theme.hasLightCustomOverrides)
+                    let hasCustomForPresetSide = preset.isDark
+                        ? appState.theme.hasDarkCustomOverrides
+                        : appState.theme.hasLightCustomOverrides
+                    let isCurrentlyActive = (activePreset.id == preset.id && !hasCustomForPresetSide)
+                    let isPairedStandby: Bool = {
+                        guard appState.theme.appearanceMode == .followSystem, !isCurrentlyActive, !hasCustomForPresetSide else {
+                            return false
                         }
-                        return activePreset.id == preset.id && !(preset.isDark ? appState.theme.hasDarkCustomOverrides : appState.theme.hasLightCustomOverrides)
+                        return preset.isDark
+                            ? (appState.theme.darkThemeID == preset.id)
+                            : (appState.theme.lightThemeID == preset.id)
                     }()
                     Button {
-                        if appState.theme.appearanceMode == .followSystem {
-                            if preset.isDark {
-                                appState.theme.darkThemeID = preset.id
-                                appState.theme.clearCustomColors(forDark: true)
-                                previewDarkOverride = true
-                            } else {
-                                appState.theme.lightThemeID = preset.id
-                                appState.theme.clearCustomColors(forDark: false)
-                                previewDarkOverride = false
-                            }
-                        } else {
-                            appState.theme.applyPresetSelection(preset, isSystemDark: colorScheme == .dark)
-                            previewDarkOverride = preset.isDark
-                        }
+                        // 与键盘内「快捷设置」完全一致的选择逻辑：点任意皮肤立即同步生效，不再出现预览与真实键盘不一致
+                        appState.theme.applyPresetSelection(preset, isSystemDark: colorScheme == .dark)
+                        previewDarkOverride = nil
                     } label: {
                         HStack(spacing: 10) {
                             ZStack {
@@ -424,9 +450,17 @@ struct ThemeStudioView: View {
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 0)
-                            if isSelected {
+                            if isCurrentlyActive {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(Color(Design.Palette.accent))
+                            } else if isPairedStandby {
+                                Text(preset.isDark ? "夜配" : "日配")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(Design.Palette.accentSoft))
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                                    .clipShape(Capsule())
                             }
                         }
                         .padding(10)
@@ -434,7 +468,7 @@ struct ThemeStudioView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(isSelected ? Color(Design.Palette.accent) : Color(Design.Palette.hairline).opacity(0.6), lineWidth: isSelected ? 2 : 0.5)
+                                .stroke(isCurrentlyActive ? Color(Design.Palette.accent) : Color(Design.Palette.hairline).opacity(0.6), lineWidth: isCurrentlyActive ? 2 : 0.5)
                         )
                     }
                     .buttonStyle(.plain)
@@ -580,12 +614,24 @@ struct ThemeStudioView: View {
             Toggle("键帽加粗字体", isOn: $appState.theme.boldKeyLabel)
 
             if appState.theme.appearanceMode == .followSystem {
-                Picker("日间浅色配对主题", selection: $appState.theme.lightThemeID) {
+                Picker("日间浅色配对主题", selection: Binding(
+                    get: { appState.theme.lightThemeID },
+                    set: { newID in
+                        appState.theme.lightThemeID = newID
+                        appState.theme.clearCustomColors(forDark: false)
+                    }
+                )) {
                     ForEach(KeyboardThemePreset.presets.filter { !$0.isDark }) { preset in
                         Text(preset.name).tag(preset.id)
                     }
                 }
-                Picker("夜间深色配对主题", selection: $appState.theme.darkThemeID) {
+                Picker("夜间深色配对主题", selection: Binding(
+                    get: { appState.theme.darkThemeID },
+                    set: { newID in
+                        appState.theme.darkThemeID = newID
+                        appState.theme.clearCustomColors(forDark: true)
+                    }
+                )) {
                     ForEach(KeyboardThemePreset.presets.filter(\.isDark)) { preset in
                         Text(preset.name).tag(preset.id)
                     }

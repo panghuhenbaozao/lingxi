@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 import Security
 
 // MARK: - 云端配置与安全凭证存储
@@ -10,12 +11,22 @@ public struct CloudBackendConfig: Codable, Equatable {
     public static let defaultCloudServerURL = "https://lingxi-ime.pages.dev"
     /// 备用 Cloudflare Workers 节点（海外或代理环境自动容灾）
     public static let fallbackCloudServerURL = "https://lingxi-cloud.1455952.workers.dev"
-
-    private static let legacyAutoMigrateURLs: Set<String> = [
-        "http://127.0.0.1:8787",
-        "http://localhost:8787",
-        "https://lingxi-cloud.1455952.workers.dev"
+    /// 经中国大陆三大运营商实测直通的 Cloudflare Pages Anycast IPv4 优选节点（用于规避 5G IPv6 黑洞与偶发丢包节点）
+    public static let chinaDirectIPv4Edges: [String] = [
+        "104.18.14.19",
+        "172.66.44.59",
+        "172.66.47.197",
+        "104.21.48.1",
+        "162.159.135.42"
     ]
+
+    private static func shouldAutoMigrateToDefaultCloud(_ raw: String) -> Bool {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.isEmpty { return true }
+        if lower == "http://127.0.0.1:8787" || lower == "http://localhost:8787" { return true }
+        if lower.contains("lingxi-cloud.1455952.workers.dev") { return true }
+        return false
+    }
 
     public var serverBaseURL: String = CloudBackendConfig.defaultCloudServerURL
     public var userID: String = ""
@@ -40,7 +51,7 @@ public struct CloudBackendConfig: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         var decodedURL = (try c.decodeIfPresent(String.self, forKey: .serverBaseURL) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         while decodedURL.hasSuffix("/") { decodedURL.removeLast() }
-        if decodedURL.isEmpty || Self.legacyAutoMigrateURLs.contains(decodedURL) {
+        if Self.shouldAutoMigrateToDefaultCloud(decodedURL) {
             serverBaseURL = Self.defaultCloudServerURL
         } else {
             serverBaseURL = decodedURL
@@ -72,7 +83,7 @@ public struct CloudBackendConfig: Codable, Equatable {
         while trimmed.hasSuffix("/") {
             trimmed.removeLast()
         }
-        if trimmed.isEmpty || Self.legacyAutoMigrateURLs.contains(trimmed) {
+        if Self.shouldAutoMigrateToDefaultCloud(trimmed) {
             return Self.defaultCloudServerURL
         }
         return trimmed
@@ -936,16 +947,336 @@ private enum LocalAccountVault {
     }
 }
 
+/// 中国大陆强制 IPv4 + TLS 1.3 SNI 直连引擎（使用系统原生 Network.framework + 完整苹果证书链校验，
+/// 自动规避国内 4G/5G 蜂窝网络 IPv6 黑洞、UDP/QUIC 限速与偶发丢包节点）。
+enum ChinaDirectIPv4Transport {
+    private static let lock = NSLock()
+    private static var cachedFastIPv4: String?
+
+    static func orderedCandidateIPs() -> [String] {
+        lock.lock()
+        let fast = cachedFastIPv4
+        lock.unlock()
+        var list = CloudBackendConfig.chinaDirectIPv4Edges
+        if let fast, let idx = list.firstIndex(of: fast) {
+            list.remove(at: idx)
+            list.insert(fast, at: 0)
+        }
+        return list
+    }
+
+    private static func recordFastIPv4(_ ip: String) {
+        lock.lock()
+        cachedFastIPv4 = ip
+        lock.unlock()
+    }
+
+    /// 并行竞速（Happy Eyeballs）直连多条国内实测可用的 Cloudflare Anycast IPv4 边缘，最快响应者胜出。
+    static func send(
+        host: String,
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?,
+        timeoutSeconds: TimeInterval = 8
+    ) async throws -> (statusCode: Int, data: Data, matchedIP: String) {
+        let candidates = orderedCandidateIPs()
+        let firstWave = Array(candidates.prefix(3))
+        let secondWave = Array(candidates.dropFirst(3))
+
+        do {
+            return try await raceBatch(
+                ips: firstWave,
+                host: host,
+                method: method,
+                path: path,
+                headers: headers,
+                body: body,
+                timeoutSeconds: timeoutSeconds
+            )
+        } catch {
+            guard !secondWave.isEmpty else { throw error }
+            return try await raceBatch(
+                ips: secondWave,
+                host: host,
+                method: method,
+                path: path,
+                headers: headers,
+                body: body,
+                timeoutSeconds: timeoutSeconds
+            )
+        }
+    }
+
+    private static func raceBatch(
+        ips: [String],
+        host: String,
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?,
+        timeoutSeconds: TimeInterval
+    ) async throws -> (statusCode: Int, data: Data, matchedIP: String) {
+        try await withThrowingTaskGroup(of: (Int, Data, String).self) { group in
+            for ip in ips {
+                group.addTask {
+                    let res = try await sendSingleIPv4(
+                        ip: ip,
+                        host: host,
+                        method: method,
+                        path: path,
+                        headers: headers,
+                        body: body,
+                        timeoutSeconds: timeoutSeconds
+                    )
+                    return (res.statusCode, res.data, ip)
+                }
+            }
+            var lastErr: Error = CloudBackendError.networkFailure("国内 IPv4 优选节点暂不可达")
+            while let next = await group.nextResult() {
+                switch next {
+                case .success(let winner):
+                    recordFastIPv4(winner.2)
+                    group.cancelAll()
+                    return winner
+                case .failure(let err):
+                    lastErr = err
+                }
+            }
+            throw lastErr
+        }
+    }
+
+    private static func sendSingleIPv4(
+        ip: String,
+        host: String,
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?,
+        timeoutSeconds: TimeInterval
+    ) async throws -> (statusCode: Int, data: Data) {
+        let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, host)
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = max(4, Int(timeoutSeconds.rounded()))
+        let params = NWParameters(tls: tlsOptions, tcp: tcpOptions)
+        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ipOptions.version = .v4
+        }
+
+        let connection = NWConnection(
+            host: NWEndpoint.Host(ip),
+            port: NWEndpoint.Port(integerLiteral: 443),
+            using: params
+        )
+        let queue = DispatchQueue(label: "com.lingxi.china-ipv4.\(ip)")
+        let payloadData = buildHTTP11Request(
+            host: host,
+            method: method,
+            path: path,
+            headers: headers,
+            body: body
+        )
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let finishLock = NSLock()
+                var finished = false
+                var received = Data()
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+
+                func finish(_ result: Result<(Int, Data), Error>) {
+                    finishLock.lock()
+                    if finished {
+                        finishLock.unlock()
+                        return
+                    }
+                    finished = true
+                    finishLock.unlock()
+                    timer.cancel()
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    switch result {
+                    case .success(let pair):
+                        continuation.resume(returning: pair)
+                    case .failure(let err):
+                        continuation.resume(throwing: err)
+                    }
+                }
+
+                timer.schedule(deadline: .now() + timeoutSeconds)
+                timer.setEventHandler {
+                    finish(.failure(CloudBackendError.networkFailure("国内 IPv4 节点(\(ip))连接超时")))
+                }
+                timer.resume()
+
+                func readLoop() {
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, _, isComplete, error in
+                        if let content, !content.isEmpty {
+                            received.append(content)
+                        }
+                        if isComplete {
+                            if let parsed = parseHTTPResponse(received) {
+                                finish(.success(parsed))
+                            } else {
+                                finish(.failure(CloudBackendError.networkFailure("国内 IPv4 节点(\(ip))返回数据不完整")))
+                            }
+                            return
+                        }
+                        if let error {
+                            if let parsed = parseHTTPResponse(received) {
+                                finish(.success(parsed))
+                            } else {
+                                finish(.failure(CloudBackendError.networkFailure("国内 IPv4 读取失败(\(ip))：\(error.localizedDescription)")))
+                            }
+                            return
+                        }
+                        readLoop()
+                    }
+                }
+
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        connection.send(content: payloadData, completion: .contentProcessed { sendErr in
+                            if let sendErr {
+                                finish(.failure(CloudBackendError.networkFailure("国内 IPv4 发送失败(\(ip))：\(sendErr.localizedDescription)")))
+                                return
+                            }
+                            readLoop()
+                        })
+                    case .failed(let err):
+                        finish(.failure(CloudBackendError.networkFailure("国内 IPv4 连接失败(\(ip))：\(err.localizedDescription)")))
+                    case .waiting(let err):
+                        // 若无网络或路由明确不可达则尽快结束，避免干等超时
+                        if case .posix(let code) = err, code == .ENETUNREACH || code == .EHOSTUNREACH || code == .ECONNREFUSED {
+                            finish(.failure(CloudBackendError.networkFailure("国内 IPv4 节点不可达(\(ip))")))
+                        }
+                    case .cancelled:
+                        finish(.failure(CloudBackendError.networkFailure("连接已取消")))
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: queue)
+            }
+        } onCancel: {
+            connection.cancel()
+        }
+    }
+
+    static func buildHTTP11Request(
+        host: String,
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) -> Data {
+        var lines: [String] = [
+            "\(method) \(path) HTTP/1.1",
+            "Host: \(host)",
+            "User-Agent: LingxiIME-iOS/5.1.4",
+            "Accept: application/json",
+            "Accept-Encoding: identity",
+            "Connection: close"
+        ]
+        for (k, v) in headers {
+            let lower = k.lowercased()
+            if lower == "host" || lower == "connection" || lower == "accept-encoding" || lower == "content-length" {
+                continue
+            }
+            lines.append("\(k): \(v)")
+        }
+        if let body, !body.isEmpty {
+            lines.append("Content-Length: \(body.count)")
+        } else if method == "POST" || method == "PUT" || method == "PATCH" {
+            lines.append("Content-Length: 0")
+        }
+        var data = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+        if let body, !body.isEmpty {
+            data.append(body)
+        }
+        return data
+    }
+
+    /// 解析 HTTP/1.1 响应（兼容标准 Content-Length 与 Transfer-Encoding: chunked）。
+    static func parseHTTPResponse(_ raw: Data) -> (statusCode: Int, data: Data)? {
+        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        guard let sepRange = raw.range(of: separator) else { return nil }
+        let headerData = raw[raw.startIndex..<sepRange.lowerBound]
+        guard let headerText = String(data: headerData, encoding: .utf8) ?? String(data: headerData, encoding: .isoLatin1) else {
+            return nil
+        }
+        let headerLines = headerText.components(separatedBy: "\r\n")
+        guard let statusLine = headerLines.first else { return nil }
+        let statusParts = statusLine.split(separator: " ")
+        guard statusParts.count >= 2, let code = Int(statusParts[1]) else { return nil }
+
+        var isChunked = false
+        for line in headerLines.dropFirst() {
+            if let colon = line.firstIndex(of: ":") {
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces).lowercased()
+                if name == "transfer-encoding" && value.contains("chunked") {
+                    isChunked = true
+                }
+            }
+        }
+        let bodySlice = Data(raw[sepRange.upperBound...])
+        if isChunked {
+            guard let decoded = decodeChunkedBody(bodySlice) else { return nil }
+            return (code, decoded)
+        }
+        return (code, bodySlice)
+    }
+
+    private static func decodeChunkedBody(_ data: Data) -> Data? {
+        var result = Data()
+        var cursor = data.startIndex
+        let crlf = Data([0x0D, 0x0A])
+        while cursor < data.endIndex {
+            guard let lineEnd = data.range(of: crlf, in: cursor..<data.endIndex) else {
+                return result.isEmpty ? nil : result
+            }
+            let sizeText = String(data: data[cursor..<lineEnd.lowerBound], encoding: .ascii)?
+                .split(separator: ";").first?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard let chunkSize = Int(sizeText, radix: 16) else {
+                return result.isEmpty ? nil : result
+            }
+            cursor = lineEnd.upperBound
+            if chunkSize == 0 {
+                return result
+            }
+            guard cursor + chunkSize <= data.endIndex else {
+                return nil
+            }
+            result.append(data[cursor..<(cursor + chunkSize)])
+            cursor += chunkSize
+            if cursor + 2 <= data.endIndex && data[cursor..<(cursor + 2)] == crlf {
+                cursor += 2
+            }
+        }
+        return result
+    }
+}
+
 /// 灵犀云端全栈客户端：同时实现 `AuthService`、`SyncService` 与 `InsightService`。
 public final class CloudBackendClient: AuthService, SyncService, InsightService {
     public static let shared = CloudBackendClient()
 
     private let urlSession: URLSession
+    public private(set) var lastActiveRouteDescription: String = "国内直连 (lingxi-ime.pages.dev)"
 
-    public init(timeout: TimeInterval = 12) {
+    public init(timeout: TimeInterval = 10) {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = timeout
-        cfg.timeoutIntervalForResource = timeout * 2
+        cfg.timeoutIntervalForResource = max(timeout * 2, 18)
+        cfg.allowsCellularAccess = true
+        cfg.allowsExpensiveNetworkAccess = true
+        cfg.allowsConstrainedNetworkAccess = true
+        cfg.waitsForConnectivity = false
         self.urlSession = URLSession(configuration: cfg)
     }
 
@@ -959,15 +1290,41 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         CloudCredentialStore.loadAPIKey()
     }
 
+    /// 是否已真实登录云端（排除历史遗留的 lx_local_ 本机离线档案）
+    public var isRealCloudAuthenticated: Bool {
+        let cfg = CloudBackendConfig.load()
+        if cfg.isLocalOnlyAccount { return false }
+        if let s = currentSession, !s.accessToken.isEmpty, !s.accessToken.hasPrefix("lx_local_") {
+            return true
+        }
+        if let k = activeAPIKey, !k.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    /// 当前是否为纯本机离线档案（旧版登录失败回退或用户手动选择的纯本地模式）
+    public var isLocalOfflineSession: Bool {
+        if isRealCloudAuthenticated { return false }
+        if CloudBackendConfig.load().isLocalOnlyAccount { return true }
+        if let s = currentSession, s.accessToken.hasPrefix("lx_local_") { return true }
+        return false
+    }
+
     public var isAuthenticatedOrHasAPIKey: Bool {
         if let s = currentSession, !s.accessToken.isEmpty { return true }
         if let k = activeAPIKey, !k.isEmpty { return true }
         return false
     }
 
-    /// 邮箱 + 用户名 + 密码注册（优先连接自建/云端服务器；若未部署服务器或网络不可达，自动在本机创建加盐加密账号）
+    /// 邮箱 + 用户名 + 密码注册（默认严格直连云端；仅在显式允许离线回退时落入本机库，绝不静默假装已登录）
     @discardableResult
-    public func register(email: String, username: String, password: String) async throws -> AuthSession {
+    public func register(
+        email: String,
+        username: String,
+        password: String,
+        allowOfflineFallback: Bool = false
+    ) async throws -> AuthSession {
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanName = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanEmail.contains("@"), cleanEmail.count >= 5 else {
@@ -995,15 +1352,22 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
                 e2eeSalt: cfg.e2eeSalt
             )
             return session
-        } catch CloudBackendError.networkFailure {
-            let localRec = try LocalAccountVault.register(email: cleanEmail, username: cleanName, password: password)
-            return persistLocalSession(for: localRec)
+        } catch let err as CloudBackendError {
+            if case .networkFailure = err, allowOfflineFallback {
+                let localRec = try LocalAccountVault.register(email: cleanEmail, username: cleanName, password: password)
+                return persistLocalSession(for: localRec)
+            }
+            throw err
         }
     }
 
-    /// 邮箱/用户名 + 密码登录（优先连接云端；若未连服务器自动校验本机加密账号库）
+    /// 邮箱/用户名 + 密码登录（默认严格直连云端；仅在显式允许离线回退时校验本机加密账号库）
     @discardableResult
-    public func login(account: String, password: String) async throws -> AuthSession {
+    public func login(
+        account: String,
+        password: String,
+        allowOfflineFallback: Bool = false
+    ) async throws -> AuthSession {
         let cleanAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanAccount.isEmpty, !password.isEmpty else {
             throw CloudBackendError.badRequest("请输入邮箱地址和密码")
@@ -1025,9 +1389,12 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
                 e2eeSalt: cfg.e2eeSalt
             )
             return session
-        } catch CloudBackendError.networkFailure {
-            let localRec = try LocalAccountVault.authenticate(account: cleanAccount, password: password)
-            return persistLocalSession(for: localRec)
+        } catch let err as CloudBackendError {
+            if case .networkFailure = err, allowOfflineFallback {
+                let localRec = try LocalAccountVault.authenticate(account: cleanAccount, password: password)
+                return persistLocalSession(for: localRec)
+            }
+            throw err
         }
     }
 
@@ -1044,14 +1411,8 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             "user": user,
             "deviceID": SyncInfra.deviceIdentity().deviceID
         ]
-        do {
-            let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple", body: payload, requireAuth: false)
-            return try persistAuthResponse(dict, isLocalOnly: false)
-        } catch CloudBackendError.networkFailure {
-            let suffix = String(user.prefix(6))
-            let rec = LocalAccountVault.upsertQuick(username: "灵犀用户", email: "apple-\(suffix)@lingxi.local")
-            return persistLocalSession(for: rec)
-        }
+        let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple", body: payload, requireAuth: false)
+        return try persistAuthResponse(dict, isLocalOnly: false)
     }
 
     // MARK: - 真 Apple iCloud 通行密钥 (WebAuthn Passkey) 与 Face ID 硬件 P-256 免密登录（侧载零报错）
@@ -1116,7 +1477,11 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     /// Face ID / 触控 ID 通过后，使用本机持久 P-256 硬件私钥签名直连 Cloudflare `/api/v1/auth/apple-device`。
     @discardableResult
-    public func signInWithAppleHardwareKey(username: String = "Apple 用户", email: String? = nil) async throws -> AuthSession {
+    public func signInWithAppleHardwareKey(
+        username: String = "Apple 用户",
+        email: String? = nil,
+        allowOfflineFallback: Bool = false
+    ) async throws -> AuthSession {
         let privKey = try loadOrCreateHardwareSigningKey()
         // CryptoKit x963Representation 为 65 字节未压缩点 (0x04 || X || Y)，与 WebCrypto ECDSA "raw" 公钥完全同构
         let pubX963 = privKey.publicKey.x963Representation
@@ -1141,12 +1506,15 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         do {
             let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/apple-device", body: payload, requireAuth: false)
             return try persistAuthResponse(dict, isLocalOnly: false)
-        } catch CloudBackendError.networkFailure {
-            let rec = LocalAccountVault.upsertQuick(
-                username: cleanName.isEmpty ? "Apple 用户" : cleanName,
-                email: "faceid-\(hardwareID.prefix(8))@lingxi.local"
-            )
-            return persistLocalSession(for: rec)
+        } catch let err as CloudBackendError {
+            if case .networkFailure = err, allowOfflineFallback {
+                let rec = LocalAccountVault.upsertQuick(
+                    username: cleanName.isEmpty ? "Apple 用户" : cleanName,
+                    email: "faceid-\(hardwareID.prefix(8))@lingxi.local"
+                )
+                return persistLocalSession(for: rec)
+            }
+            throw err
         }
     }
 
@@ -1269,6 +1637,14 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         cfg.e2eeSalt = (dict["e2eeSalt"] as? String) ?? cfg.e2eeSalt
         cfg.isLocalOnlyAccount = isLocalOnly
         cfg.save()
+        // 云端真登录成功后，自动将旧版 .localNoop 同步传输层切回 .e2eeCloud，彻底消除登录后仍显示「离线」
+        if !isLocalOnly {
+            var relayCfg = ClipboardRelayConfig.load()
+            if relayCfg.syncTransportMode == .localNoop {
+                relayCfg.syncTransportMode = .e2eeCloud
+                relayCfg.save()
+            }
+        }
         return session
     }
 
@@ -1316,7 +1692,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     }
 
     public func pull(namespace: SyncNamespace, since: UInt64) async throws -> SyncPage {
-        guard isAuthenticatedOrHasAPIKey else {
+        guard isRealCloudAuthenticated else {
             return SyncPage(changes: [], nextCursor: since, hasMore: false)
         }
         let path = "/api/v1/sync/pull?namespace=\(namespace.rawValue)&since=\(since)&limit=100"
@@ -1351,7 +1727,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     }
 
     public func push(_ changes: [SyncChange]) async throws -> [SyncConflict] {
-        guard isAuthenticatedOrHasAPIKey else { return [] }
+        guard isRealCloudAuthenticated else { return [] }
         let serialized: [[String: Any]] = changes.map { c in
             let encrypted = c.tombstone ? c.ciphertext : sealPayloadIfPossible(c.ciphertext)
             return [
@@ -1396,6 +1772,9 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     /// 执行全量重要数据（设置/皮肤/自定义短语/个人词库）云同步 + 打字习惯实时分析同步。
     @discardableResult
     public func syncAllImportantDataAndHabits() async throws -> SyncRunReport {
+        guard isRealCloudAuthenticated else {
+            throw CloudBackendError.unauthorized("当前尚未登录云端账号，请先点上方「登录」连接国内云端后再同步")
+        }
         let engine = SyncEngine(
             sync: self,
             source: SyncEngine.makeFullSyncSource()
@@ -1413,7 +1792,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     // MARK: InsightService & 实时打字习惯 API 分析
 
     public var isAuthorized: Bool {
-        CloudBackendConfig.load().habitAnalysisEnabled && isAuthenticatedOrHasAPIKey
+        CloudBackendConfig.load().habitAnalysisEnabled && isRealCloudAuthenticated
     }
 
     public func submit(_ digests: [TypingSessionDigest]) async throws {
@@ -1444,7 +1823,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     /// 将本地待上报的打字习惯事件流与 AI API 调用日志实时推送到后端分析引擎，并拉取服务器最新画像。
     @discardableResult
     public func syncTypingHabitsWithServer() async throws -> UserTypingHabitProfile {
-        guard isAuthenticatedOrHasAPIKey else {
+        guard isRealCloudAuthenticated else {
             return TypingHabitTracker.shared.currentProfile()
         }
 
@@ -1504,7 +1883,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     public func deleteServerHabits() async throws -> UserTypingHabitProfile {
         TypingHabitTracker.shared.clearAllLocalHabits()
-        guard isAuthenticatedOrHasAPIKey else {
+        guard isRealCloudAuthenticated else {
             return TypingHabitTracker.shared.currentProfile()
         }
         let dict = try await requestJSON(method: "DELETE", path: "/api/v1/analytics/habits", body: nil, requireAuth: true)
@@ -1545,7 +1924,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
     /// 第六部分 PIPL/GDPR：向服务端写入不可变授权审计流水 (`consent_records`)
     public func syncConsentToServer(scope: String, granted: Bool, policyVersion: String = "2026.11-v1") async {
         ComplianceService.shared.recordConsent(scope: scope, granted: granted, policyVersion: policyVersion)
-        guard isAuthenticatedOrHasAPIKey else { return }
+        guard isRealCloudAuthenticated else { return }
         _ = try? await requestJSON(
             method: "POST",
             path: "/api/v1/compliance/consent",
@@ -1556,7 +1935,7 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     /// 第六部分 PIPL/GDPR：一键注销云端账号并级联物理删除所有同步密文、会话与画像数据
     public func deleteCloudAccountCascade() async throws {
-        if isAuthenticatedOrHasAPIKey {
+        if isRealCloudAuthenticated {
             _ = try await requestJSON(method: "DELETE", path: "/api/v1/compliance/account", body: nil, requireAuth: true)
         }
         TypingHabitTracker.shared.clearAllLocalHabits()
@@ -1568,7 +1947,26 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         return try? JSONDecoder().decode(UserTypingHabitProfile.self, from: data)
     }
 
-    // MARK: 底层 HTTP 请求
+    // MARK: 底层 HTTP 请求（中国大陆免代理双引擎：TCP-only HTTPS + 强制 IPv4 TLS 1.3 多节点竞速）
+
+    private func buildAuthHeaders(rawBodyData: Data, requireAuth: Bool) -> [String: String] {
+        var headers: [String: String] = ["Content-Type": "application/json"]
+        if requireAuth {
+            if let apiKey = activeAPIKey, !apiKey.isEmpty {
+                headers["X-API-Key"] = apiKey
+                let ts = Int(Date().timeIntervalSince1970)
+                let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                let sig = SyncCrypto.signRequest(body: rawBodyData, timestamp: ts, nonce: nonce, secret: apiKey)
+                headers["X-Lingxi-Timestamp"] = String(ts)
+                headers["X-Lingxi-Nonce"] = nonce
+                headers["X-Lingxi-Signature"] = sig
+            }
+            if let session = currentSession, !session.accessToken.isEmpty, !session.accessToken.hasPrefix("lx_local_") {
+                headers["Authorization"] = "Bearer \(session.accessToken)"
+            }
+        }
+        return headers
+    }
 
     private func requestJSON(
         method: String,
@@ -1577,74 +1975,96 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         requireAuth: Bool,
         allowRetryOn401: Bool = true
     ) async throws -> [String: Any] {
-        if requireAuth, path != "/api/v1/auth/refresh", let session = currentSession, session.needsRefresh {
+        if requireAuth, path != "/api/v1/auth/refresh", let session = currentSession, session.needsRefresh, !session.accessToken.hasPrefix("lx_local_") {
             _ = try? await refreshIfNeeded()
         }
 
         let baseURL = CloudBackendConfig.load().normalizedBaseURL
-        let candidateBases: [String] = (baseURL == CloudBackendConfig.defaultCloudServerURL)
-            ? [CloudBackendConfig.defaultCloudServerURL, CloudBackendConfig.defaultCloudServerURL, CloudBackendConfig.fallbackCloudServerURL]
-            : [baseURL]
+        let isDefaultCloud = (baseURL == CloudBackendConfig.defaultCloudServerURL)
 
         var rawBodyData = Data()
         if let body {
             rawBodyData = try JSONSerialization.data(withJSONObject: body)
         }
+        let headers = buildAuthHeaders(rawBodyData: rawBodyData, requireAuth: requireAuth)
 
-        var responsePair: (Data, URLResponse)?
+        var statusCode: Int?
+        var responseData: Data?
         var lastNetError: Error?
-        var activeBase = baseURL
 
-        for (attemptIdx, candidateBase) in candidateBases.enumerated() {
-            guard let url = URL(string: candidateBase + path) else {
+        // 通道 1：标准 URLSession（关闭易被国内运营商限速的 HTTP/3 QUIC，纯 TCP TLS 1.3 直连）
+        func tryURLSession(base: String) async throws -> (Int, Data) {
+            guard let url = URL(string: base + path) else {
                 throw CloudBackendError.invalidURL
             }
             var req = URLRequest(url: url)
             req.httpMethod = method
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.assumesHTTP3Capable = false
+            for (k, v) in headers {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
             if body != nil {
                 req.httpBody = rawBodyData
             }
-            if requireAuth {
-                if let apiKey = activeAPIKey, !apiKey.isEmpty {
-                    req.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
-                    let ts = Int(Date().timeIntervalSince1970)
-                    let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-                    let sig = SyncCrypto.signRequest(body: rawBodyData, timestamp: ts, nonce: nonce, secret: apiKey)
-                    req.setValue(String(ts), forHTTPHeaderField: "X-Lingxi-Timestamp")
-                    req.setValue(nonce, forHTTPHeaderField: "X-Lingxi-Nonce")
-                    req.setValue(sig, forHTTPHeaderField: "X-Lingxi-Signature")
-                }
-                if let session = currentSession, !session.accessToken.isEmpty {
-                    req.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
-                }
+            let (data, response) = try await urlSession.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw CloudBackendError.networkFailure("无效的服务器响应")
             }
+            return (http.statusCode, data)
+        }
+
+        do {
+            let (code, data) = try await tryURLSession(base: baseURL)
+            statusCode = code
+            responseData = data
+            lastActiveRouteDescription = isDefaultCloud ? "国内直连 HTTPS (lingxi-ime.pages.dev)" : baseURL
+        } catch {
+            lastNetError = error
+        }
+
+        // 通道 2（国内 4G/5G 核心兜底）：若标准请求因 IPv6 黑洞/运营商 DNS/坏节点超时，自动强制 IPv4 竞速直连 5 组国内实测可用边缘节点
+        if statusCode == nil && isDefaultCloud,
+           let host = URL(string: CloudBackendConfig.defaultCloudServerURL)?.host {
             do {
-                responsePair = try await urlSession.data(for: req)
-                activeBase = candidateBase
-                break
+                let res = try await ChinaDirectIPv4Transport.send(
+                    host: host,
+                    method: method,
+                    path: path,
+                    headers: headers,
+                    body: body != nil ? rawBodyData : nil,
+                    timeoutSeconds: 8
+                )
+                statusCode = res.statusCode
+                responseData = res.data
+                lastActiveRouteDescription = "国内 IPv4 优选直连 (\(res.matchedIP))"
             } catch {
                 lastNetError = error
-                if attemptIdx == 0 && candidateBases.count > 1 {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                }
             }
         }
 
-        guard let (data, response) = responsePair else {
-            throw CloudBackendError.networkFailure("无法连接后端服务器 (\(activeBase))：\(lastNetError?.localizedDescription ?? "网络请求失败")")
+        // 通道 3（海外/代理容灾）：备用 Cloudflare Workers 节点
+        if statusCode == nil && isDefaultCloud {
+            do {
+                let (code, data) = try await tryURLSession(base: CloudBackendConfig.fallbackCloudServerURL)
+                statusCode = code
+                responseData = data
+                lastActiveRouteDescription = "备用边缘节点 (workers.dev)"
+            } catch {
+                lastNetError = error
+            }
         }
 
-        guard let http = response as? HTTPURLResponse else {
-            throw CloudBackendError.networkFailure("无效的服务器响应")
+        guard let httpCode = statusCode, let data = responseData else {
+            let detail = lastNetError?.localizedDescription ?? "网络连接超时"
+            throw CloudBackendError.networkFailure("无法连接云端服务器（已尝试国内直连与 5 组 IPv4 优选节点）：\(detail)")
         }
 
         let jsonObj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        if (200...299).contains(http.statusCode) {
+        if (200...299).contains(httpCode) {
             return jsonObj
         }
 
-        if http.statusCode == 401, requireAuth, allowRetryOn401, let session = currentSession, !session.refreshToken.isEmpty {
+        if httpCode == 401, requireAuth, allowRetryOn401, let session = currentSession, !session.refreshToken.isEmpty, !session.refreshToken.hasPrefix("lx_local_") {
             let payload: [String: Any] = ["refreshToken": session.refreshToken]
             if let refreshedDict = try? await requestJSON(method: "POST", path: "/api/v1/auth/refresh", body: payload, requireAuth: false, allowRetryOn401: false),
                (try? persistAuthResponse(refreshedDict)) != nil {
@@ -1653,10 +2073,10 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         }
 
         let errMsg = ((jsonObj["error"] as? [String: Any])?["message"] as? String)
-            ?? "HTTP \(http.statusCode)"
-        if http.statusCode == 401 {
+            ?? "HTTP \(httpCode)"
+        if httpCode == 401 {
             throw CloudBackendError.unauthorized(errMsg)
-        } else if http.statusCode == 400 {
+        } else if httpCode == 400 {
             throw CloudBackendError.badRequest(errMsg)
         } else {
             throw CloudBackendError.serverError(errMsg)

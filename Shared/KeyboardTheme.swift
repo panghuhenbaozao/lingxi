@@ -423,7 +423,7 @@ struct ThemeCustomization: Codable, Equatable {
     static let customBackgroundImageName = "custom_keyboard_bg.jpg"
 
     private static var cached: ThemeCustomization?
-    private static var cachedMTime: Date?
+    private static var cachedStamp: String?
 
     init() {}
 
@@ -541,21 +541,24 @@ struct ThemeCustomization: Codable, Equatable {
     }
 
     static func load(force: Bool = false) -> ThemeCustomization {
-        let mtime = AppGroup.modificationDate(of: fileName)
-        if !force, let cached, cachedMTime == mtime {
+        let stamp = AppGroup.fileStamp(of: fileName)
+        if !force, let cached, let stamp, cachedStamp == stamp {
             return cached
         }
         let loaded = AppGroup.readJSON(ThemeCustomization.self, from: fileName) ?? ThemeCustomization()
         cached = loaded
-        cachedMTime = mtime
+        cachedStamp = stamp
         return loaded
     }
 
     @discardableResult
-    func save() -> Bool {
+    func save(notify: Bool = true) -> Bool {
         let ok = AppGroup.writeJSON(self, to: Self.fileName)
         Self.cached = self
-        Self.cachedMTime = AppGroup.modificationDate(of: Self.fileName)
+        Self.cachedStamp = AppGroup.fileStamp(of: Self.fileName)
+        if ok && notify {
+            AppGroupNotifications.post(AppGroupNotifications.themeChanged)
+        }
         return ok
     }
 
@@ -582,28 +585,49 @@ struct ThemeCustomization: Codable, Equatable {
         let cKey: String?
         let cText: String?
         let cAccent: String?
-        if appearanceMode == .followSystem {
-            if base.isDark {
+        if base.isDark {
+            if hasDarkCustomOverrides {
                 cCanvas = customDarkCanvasHex
                 cKey = customDarkKeyFillHex
                 cText = customDarkKeyTextHex
                 cAccent = customDarkAccentHex
-            } else {
+            } else if appearanceMode == .alwaysDark,
+                      hasLightCustomOverrides,
+                      let legacyCanvas = customCanvasHex,
+                      HexColor(legacyCanvas).isDarkColor {
+                // 兼容旧版未拆分日夜自由调色时的深色自定义底板
                 cCanvas = customCanvasHex
                 cKey = customKeyFillHex
                 cText = customKeyTextHex
                 cAccent = customAccentHex
+            } else {
+                // 严格隔离：浅色自定义调色绝不串色污染深色主题
+                cCanvas = nil
+                cKey = nil
+                cText = nil
+                cAccent = nil
             }
-        } else if base.isDark && hasDarkCustomOverrides {
-            cCanvas = customDarkCanvasHex
-            cKey = customDarkKeyFillHex
-            cText = customDarkKeyTextHex
-            cAccent = customDarkAccentHex
         } else {
-            cCanvas = customCanvasHex
-            cKey = customKeyFillHex
-            cText = customKeyTextHex
-            cAccent = customAccentHex
+            if hasLightCustomOverrides {
+                if appearanceMode == .followSystem,
+                   let c = customCanvasHex,
+                   HexColor(c).isDarkColor {
+                    cCanvas = nil
+                    cKey = nil
+                    cText = nil
+                    cAccent = nil
+                } else {
+                    cCanvas = customCanvasHex
+                    cKey = customKeyFillHex
+                    cText = customKeyTextHex
+                    cAccent = customAccentHex
+                }
+            } else {
+                cCanvas = nil
+                cKey = nil
+                cText = nil
+                cAccent = nil
+            }
         }
 
         let hasActiveCustom = (cCanvas != nil || cKey != nil || cText != nil || cAccent != nil)
