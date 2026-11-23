@@ -161,18 +161,53 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        if !AppGroup.isAvailable && hasFullAccess {
+            tryImportBridgeTokenFromPasteboardIfPresent()
+        }
         reloadConfigurationIfNeeded()
         adaptToHostTraits()
         feedback.prepare()
         refreshClipboardState()
         updateReturnKeyAppearance()
         autoCapitalizeIfNeeded()
+        if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
+            triggerSideloadBridgeSync(force: false)
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         flushTypingHabitSessionIfNeeded()
         TouchOffsetCalibrator.shared.flush()
+        if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
+            triggerSideloadBridgeSync(force: false)
+        }
+    }
+
+    @discardableResult
+    private func tryImportBridgeTokenFromPasteboardIfPresent() -> Bool {
+        guard UIPasteboard.general.hasStrings,
+              let text = UIPasteboard.general.string,
+              text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(SideloadConfigBridge.tokenPrefix) else {
+            return false
+        }
+        let ok = SideloadConfigBridge.importPairingToken(text)
+        if ok {
+            ClipboardStore.markChangeCountHandled(UIPasteboard.general.changeCount)
+            triggerSideloadBridgeSync(force: true)
+        }
+        return ok
+    }
+
+    private func triggerSideloadBridgeSync(force: Bool) {
+        guard !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess else { return }
+        Task { [weak self] in
+            let report = await SideloadConfigBridge.syncIfNeeded(force: force)
+            guard let self, report != nil else { return }
+            await MainActor.run {
+                self.reloadConfigurationIfNeeded()
+            }
+        }
     }
 
     override func viewWillLayoutSubviews() {
@@ -561,6 +596,7 @@ final class KeyboardViewController: UIInputViewController {
                 self.triggerTranslation(immediately: true)
             }
             self.applyThemeAndSettings()
+            self.triggerSideloadBridgeSync(force: true)
         }
         quickSettingsPanel.onThemeChanged = { [weak self] updatedTheme in
             guard let self else { return }
@@ -573,6 +609,13 @@ final class KeyboardViewController: UIInputViewController {
                 targetSize: self.view.bounds.size.width > 10 ? self.view.bounds.size : CGSize(width: 430, height: 280)
             )
             self.applyThemeAndSettings()
+            self.triggerSideloadBridgeSync(force: true)
+        }
+        quickSettingsPanel.onBridgeSyncNow = { [weak self] in
+            guard let self else { return }
+            if !self.tryImportBridgeTokenFromPasteboardIfPresent() {
+                self.triggerSideloadBridgeSync(force: true)
+            }
         }
         quickSettingsPanel.onOpenEditPad = { [weak self] in
             self?.switchToPanel(.editPad)
@@ -2010,7 +2053,7 @@ final class KeyboardViewController: UIInputViewController {
             }
             self.sessionCommittedChars += inserted.count
             self.sessionCommittedWords += 1
-            if self.sessionCommittedChars >= 24 {
+            if self.sessionCommittedChars >= 8 {
                 self.flushTypingHabitSessionIfNeeded()
             }
         }

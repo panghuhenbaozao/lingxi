@@ -128,7 +128,7 @@ struct TypingStatsView: View {
 
     private var overviewSection: some View {
         let _ = statsRefresh
-        let summary = TypingStatsStore.shared.summary()
+        let summary = appState.typingStatsSummary
         let profile = appState.habitProfile
         return Section("本机习惯画像总览") {
             Toggle("记录近 30 天每日打字量趋势", isOn: $appState.settings.typingStatsEnabled)

@@ -303,7 +303,8 @@ struct LingxiSettings: Codable, Equatable {
     var smartOTPExtraction: Bool = true
     var autoCapitalizeEnglish: Bool = true
     var doubleSpacePeriod: Bool = true
-    var typingStatsEnabled: Bool = false
+    var typingStatsEnabled: Bool = true
+    var typingStatsDefaultMigratedV52: Bool = true
     var translateTargetLang: String = "英文"
     var translateFormalTone: Bool = false
     var stylishFontID: String = StylishFontStyle.normal.rawValue
@@ -348,7 +349,7 @@ struct LingxiSettings: Codable, Equatable {
         case userLearningEnabled, autoLearnThreshold, bigramPredictionEnabled
         case wubiAutoCommitUnique4, wubiShowCodeHints
         case clipboardBannerEnabled, autoReadClipboardPreview, smartOTPExtraction
-        case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled
+        case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled, typingStatsDefaultMigratedV52
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
         case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, customSwipeUpMap, customSwipeDownMap
@@ -397,7 +398,14 @@ struct LingxiSettings: Codable, Equatable {
         smartOTPExtraction = try c.decodeIfPresent(Bool.self, forKey: .smartOTPExtraction) ?? d.smartOTPExtraction
         autoCapitalizeEnglish = try c.decodeIfPresent(Bool.self, forKey: .autoCapitalizeEnglish) ?? d.autoCapitalizeEnglish
         doubleSpacePeriod = try c.decodeIfPresent(Bool.self, forKey: .doubleSpacePeriod) ?? d.doubleSpacePeriod
-        typingStatsEnabled = try c.decodeIfPresent(Bool.self, forKey: .typingStatsEnabled) ?? d.typingStatsEnabled
+        let migratedStats = try c.decodeIfPresent(Bool.self, forKey: .typingStatsDefaultMigratedV52) ?? false
+        if migratedStats {
+            typingStatsEnabled = try c.decodeIfPresent(Bool.self, forKey: .typingStatsEnabled) ?? true
+        } else {
+            // v5.2 一次性迁移：旧版默认关闭导致首页字数始终为 0，升级后默认开启，用户仍可在统计页随时关闭
+            typingStatsEnabled = true
+        }
+        typingStatsDefaultMigratedV52 = true
         translateTargetLang = try c.decodeIfPresent(String.self, forKey: .translateTargetLang) ?? d.translateTargetLang
         translateFormalTone = try c.decodeIfPresent(Bool.self, forKey: .translateFormalTone) ?? d.translateFormalTone
         stylishFontID = try c.decodeIfPresent(String.self, forKey: .stylishFontID) ?? d.stylishFontID

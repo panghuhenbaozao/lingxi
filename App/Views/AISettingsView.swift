@@ -329,11 +329,10 @@ struct AISettingsView: View {
         }
     }
 
-    // MARK: - 3. 核心能力中心（5 个干净二级页入口，告别满屏文字）
+    // MARK: - 3. 核心能力中心（4 个纯粹 AI 二级页入口；地标词库统一归口至「设置 → 词库与实时地标」）
 
     private var modulesHubSection: some View {
         let historyCount = AIRecentHistoryStore.load().count
-        let geoCtx = GeoLocationContext.load()
         return Section("能力中心") {
             NavigationLink {
                 AIPromptsHubView()
@@ -373,16 +372,6 @@ struct AISettingsView: View {
                     icon: "clock.arrow.circlepath",
                     title: "生成历史与账本",
                     badge: "\(historyCount) 历史 · \(appState.aiUsageLedger.count) 次"
-                )
-            }
-
-            NavigationLink {
-                LocationLexiconView()
-            } label: {
-                moduleRow(
-                    icon: "location.fill",
-                    title: "实时城市与地标",
-                    badge: geoCtx.isPopulated ? "\(geoCtx.shortCityName) · \(geoCtx.pois.count)" : "未开启"
                 )
             }
         }

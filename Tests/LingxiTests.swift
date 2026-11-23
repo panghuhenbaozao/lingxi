@@ -499,18 +499,22 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(formalPrompt.contains("正式"))
     }
 
-    // 打字统计（借鉴 WowType）：开关默认关闭 + 按天计数 + 活跃时长阈值 + 清除
+    // 打字统计（v5.2 默认开启 + 旧版一次性迁移 + 跨进程热重载 + 活跃时长阈值 + 清除）
     func testTypingStatsStoreAndSettings() {
-        // 设置开关：默认关闭，且旧版 JSON（无该字段）解码后仍为关闭
+        // 设置开关：v5.2 默认开启；旧版 JSON（无迁移标记）自动迁移开启；显式关闭后保持关闭
         let defaults = LingxiSettings()
-        XCTAssertFalse(defaults.typingStatsEnabled)
+        XCTAssertTrue(defaults.typingStatsEnabled)
         let legacyJSON = Data("{}".utf8)
         let decoded = try? JSONDecoder().decode(LingxiSettings.self, from: legacyJSON)
         XCTAssertNotNil(decoded)
-        XCTAssertFalse(decoded?.typingStatsEnabled ?? true)
+        XCTAssertTrue(decoded?.typingStatsEnabled ?? false)
+        let optedOutJSON = Data("{\"typingStatsEnabled\":false,\"typingStatsDefaultMigratedV52\":true}".utf8)
+        let optedOut = try? JSONDecoder().decode(LingxiSettings.self, from: optedOutJSON)
+        XCTAssertFalse(optedOut?.typingStatsEnabled ?? true)
 
-        // 统计逻辑：字数累加、活跃时长仅在间隔 ≤30s 时计入
+        // 统计逻辑：字数累加、活跃时长仅在间隔 ≤30s 时计入、另一实例可热重载最新落盘数据
         let store = TypingStatsStore()
+        let observerStore = TypingStatsStore()
         let base = Date(timeIntervalSince1970: 1_750_000_000)
         store.clearAll()
         store.recordCommit(text: "你好", at: base)
@@ -521,6 +525,8 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(summary.todayChars, 2 + 2 + 4)
         XCTAssertEqual(summary.totalActiveSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(summary.streakDays, 1)
+        // 验证另一进程/实例无需重建即可热重载磁盘字数
+        XCTAssertEqual(observerStore.summary(now: base.addingTimeInterval(130)).todayChars, 8)
         // 清除后归零
         store.clearAll()
         let cleared = store.summary(now: base)
@@ -1825,5 +1831,61 @@ final class LingxiTests: XCTestCase {
         let workersWithPath = Data("{\"serverBaseURL\":\"https://lingxi-cloud.1455952.workers.dev/\"}".utf8)
         let migrated = try JSONDecoder().decode(CloudBackendConfig.self, from: workersWithPath)
         XCTAssertEqual(migrated.normalizedBaseURL, "https://lingxi-ime.pages.dev")
+    }
+
+    func testV52AppGroupProvisionParserAndSideloadBridge() throws {
+        // 1. 解析 embedded.mobileprovision CMS 二进制包中的 com.apple.security.application-groups
+        let plistXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Entitlements</key>
+            <dict>
+                <key>com.apple.security.application-groups</key>
+                <array>
+                    <string>group.com.other.app</string>
+                    <string>group.com.lingxi.ime.TEAM9988</string>
+                </array>
+            </dict>
+        </dict>
+        </plist>
+        """
+        var cmsWrapped = Data([0x30, 0x82, 0x01, 0x00, 0x06, 0x09])
+        cmsWrapped.append(Data(plistXML.utf8))
+        cmsWrapped.append(Data([0xA0, 0x82, 0x00, 0x10]))
+        let parsedGroups = AppGroup.parseAppGroupsFromMobileProvisionData(cmsWrapped)
+        XCTAssertEqual(parsedGroups.first, "group.com.lingxi.ime.TEAM9988", "应优先匹配含 lingxi 的 SideStore App Group")
+        XCTAssertEqual(parsedGroups.count, 2)
+
+        // 2. 免费侧载云桥接配对串导出/导入往返 & 敏感剪贴板屏蔽
+        let prevCfg = CloudBackendConfig.load()
+        defer {
+            prevCfg.save()
+            CloudCredentialStore.clearAll()
+        }
+        CloudCredentialStore.clearAll()
+        var cloudCfg = CloudBackendConfig()
+        cloudCfg.userID = "u-bridge-52"
+        cloudCfg.username = "侧载桥接测试"
+        cloudCfg.email = "bridge@lingxi.ime"
+        cloudCfg.e2eeSalt = "abcdef0123456789abcdef0123456789"
+        cloudCfg.isLocalOnlyAccount = false
+        cloudCfg.save()
+        CloudCredentialStore.saveAPIKey("lx_live_bridge_secret_token_520")
+
+        let token = try XCTUnwrap(SideloadConfigBridge.exportPairingTokenFromMainApp())
+        XCTAssertTrue(token.hasPrefix(SideloadConfigBridge.tokenPrefix))
+        XCTAssertTrue(ClipboardClassifier.isSensitiveContent(token), "桥接配对串必须被 L1 隐私盾拦截，严禁写入剪贴板历史")
+
+        // 清空本地凭证后模拟键盘端导入配对串
+        CloudCredentialStore.clearAll()
+        var blankCfg = CloudBackendConfig()
+        blankCfg.save()
+        XCTAssertTrue(SideloadConfigBridge.importPairingToken(token))
+        XCTAssertEqual(CloudCredentialStore.loadAPIKey(), "lx_live_bridge_secret_token_520")
+        XCTAssertEqual(CloudBackendConfig.load().userID, "u-bridge-52")
+        XCTAssertEqual(CloudBackendConfig.load().e2eeSalt, "abcdef0123456789abcdef0123456789")
+        XCTAssertTrue(SideloadConfigBridge.isPairedInThisProcess)
     }
 }

@@ -8,7 +8,7 @@ struct ContentView: View {
         TabView(selection: $selectedTab) {
             HomeTestView(onSelectTab: { selectedTab = $0 })
                 .tabItem {
-                    Label("灵犀", systemImage: "keyboard")
+                    Label("首页", systemImage: "keyboard")
                 }
                 .tag(0)
 
@@ -26,7 +26,7 @@ struct ContentView: View {
 
             ClipboardPhrasesView()
                 .tabItem {
-                    Label("剪贴板", systemImage: "doc.on.clipboard")
+                    Label("工具", systemImage: "tray.full")
                 }
                 .tag(3)
 

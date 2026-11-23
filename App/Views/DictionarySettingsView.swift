@@ -53,21 +53,24 @@ struct DictionarySettingsView: View {
                     }
                 }
 
-                Section("输入体验") {
+                Section("核心输入") {
                     settingsLink(icon: "keyboard", tint: Design.Palette.ink, title: "输入方案与布局",
                                  subtitle: appState.settings.inputScheme.displayName + " · " + appState.settings.layoutMode.displayName) {
                         SchemeLayoutSettingsView()
                     }
-                    settingsLink(icon: "hand.tap", tint: Design.Palette.ink, title: "键盘手感",
-                                 subtitle: "震动 " + appState.settings.hapticStrength.displayName + (appState.settings.keySoundEnabled ? " · 音效开" : " · 音效关")) {
+                    settingsLink(icon: "hand.tap", tint: Design.Palette.ink, title: "键盘手感与手势",
+                                 subtitle: "震动 " + appState.settings.hapticStrength.displayName + (appState.settings.keySoundEnabled ? " · 音效开" : " · 音效关") + " · 26键映射") {
                         KeyboardFeelSettingsView()
                     }
-                    settingsLink(icon: "rectangle.3.offgrid", tint: Design.Palette.ink, title: "键盘工具栏",
+                    settingsLink(icon: "rectangle.3.offgrid", tint: Design.Palette.ink, title: "工具栏与候选栏",
                                  subtitle: "按钮排序 · 候选栏高度与字号") {
                         ToolbarSettingsView()
                     }
-                    settingsLink(icon: "wand.and.stars", tint: Design.Palette.ink, title: "智能输入",
-                                 subtitle: "纠错 · 联想 · 剪贴板") {
+                }
+
+                Section("智能与词库") {
+                    settingsLink(icon: "wand.and.stars", tint: Design.Palette.ink, title: "智能纠错与联想",
+                                 subtitle: "纠错 · 标点 · 剪贴板预览") {
                         SmartInputSettingsView()
                     }
                     settingsLink(icon: "waveform", tint: Design.Palette.ink, title: "模糊音",
@@ -76,41 +79,32 @@ struct DictionarySettingsView: View {
                                     : "未开启 · 16 组可选") {
                         FuzzyPinyinSettingsView()
                     }
-                    settingsLink(icon: "textformat.abc", tint: Design.Palette.ink, title: "趣味字体",
-                                 subtitle: stylishFontName) {
-                        StylishFontSettingsView()
+                    settingsLink(
+                        icon: "book.closed",
+                        tint: Design.Palette.accent,
+                        title: "词库与实时地标",
+                        subtitle: lexiconAndLocationSubtitle
+                    ) {
+                        LexiconAndLocationHubView()
                     }
                 }
 
-                Section("词库、数据与可持续生态") {
-                    settingsLink(
-                        icon: "location.fill",
-                        tint: Design.Palette.accent,
-                        title: "实时地理位置与周边地标词库",
-                        subtitle: {
-                            let geo = GeoLocationContext.load()
-                            return geo.isPopulated
-                                ? "\(geo.compactLocationLabel) · 已学 \(geo.pois.count) 个周边地标"
-                                : "全国 6,403 地名已内置 · 点击开启 GPS 周边地标学习"
-                        }()
-                    ) {
-                        LocationLexiconView()
-                    }
-                    settingsLink(icon: "book.closed", tint: Design.Palette.ink, title: "词库管理与社区词包",
-                                 subtitle: "自定义短语 \(appState.customWords.count) · 个人词库 \(appState.userWords.count)") {
-                        LexiconSettingsView()
-                    }
-                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计与本机画像",
-                                 subtitle: "今日 \(TypingStatsStore.shared.summary().todayChars) 字 · 近 30 天与 24h 节律") {
+                Section("数据、同步与诊断") {
+                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计与手型热力图",
+                                 subtitle: "今日 \(appState.typingStatsSummary.todayChars) 字 · 近 30 天趋势与热区") {
                         TypingStatsView()
                     }
-                    settingsLink(icon: "externaldrive", tint: Design.Palette.ink, title: "加密备份与恢复",
-                                 subtitle: backupSubtitle) {
-                        BackupSettingsView()
+                    settingsLink(icon: "icloud.and.arrow.up", tint: Design.Palette.ink, title: "云同步与加密备份",
+                                 subtitle: syncAndBackupSubtitle) {
+                        DataSyncAndBackupHubView()
                     }
-                    settingsLink(icon: "leaf.arrow.triangle.circlepath", tint: Design.Palette.ink, title: "可持续发展 · 三模同步 · 引擎自愈",
-                                 subtitle: sustainabilitySubtitle) {
-                        SustainabilityHubView()
+                    settingsLink(icon: "textformat.abc", tint: Design.Palette.ink, title: "趣味英文字体",
+                                 subtitle: stylishFontName) {
+                        StylishFontSettingsView()
+                    }
+                    settingsLink(icon: "stethoscope", tint: Design.Palette.ink, title: "使用指南与共享诊断",
+                                 subtitle: AppGroup.isAvailable ? "本机共享已连通 · 8 条进阶技巧" : "免费侧载隔离 · 一键云桥接与技巧") {
+                        UsageGuideAndDiagnosticsView()
                     }
                 }
             }
@@ -153,9 +147,16 @@ struct DictionarySettingsView: View {
         return "登录 / 接入 API Key · 6位码跨屏剪贴板 · \(tagSummary)"
     }
 
-    private var sustainabilitySubtitle: String {
+    private var lexiconAndLocationSubtitle: String {
+        let geo = GeoLocationContext.load()
+        let geoPart = geo.isPopulated ? "\(geo.shortCityName)(\(geo.pois.count)地标)" : "6,403地名内置"
+        return "词库 \(appState.userWords.count) · 短语 \(appState.customWords.count) · \(geoPart)"
+    }
+
+    private var syncAndBackupSubtitle: String {
         let health = EngineHealthAndSustainabilityService.shared.diagnose()
-        return "健康度 \(health.healthScore) 分 · \(health.activeTransport.title) · \(health.activePlan.badgeText)"
+        let mode = appState.isCloudAuthenticated ? "云端在线" : "本地备份"
+        return "\(mode) · 健康 \(health.healthScore) 分 · \(backupSubtitle)"
     }
 
     private var backupSubtitle: String {
@@ -274,6 +275,18 @@ private struct KeyboardFeelSettingsView: View {
                 Toggle("上滑直接输入副字符", isOn: $appState.settings.swipeUpForHint)
                 Toggle("下划按键快速输入标点", isOn: $appState.settings.swipeDownForPunctuation)
                 Toggle("空格键触控板移光标", isOn: $appState.settings.spacebarTrackpadEnabled)
+                NavigationLink {
+                    CustomSwipeKeymapEditorView()
+                } label: {
+                    HStack {
+                        Text("26 键上下滑自定义映射")
+                        Spacer()
+                        let cnt = appState.settings.customSwipeUpMap.count + appState.settings.customSwipeDownMap.count
+                        Text(cnt > 0 ? "已改 \(cnt) 键" : "默认")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section {
@@ -282,8 +295,189 @@ private struct KeyboardFeelSettingsView: View {
                 Text("开启后拼音组合直接显示在宿主 App 输入框内（marked text），关闭则只在键盘候选栏显示。")
             }
         }
-        .navigationTitle("键盘手感")
+        .navigationTitle("键盘手感与手势")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - L2 合并子页：词库与实时地标（零重复入口）
+
+private struct LexiconAndLocationHubView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        let geo = GeoLocationContext.load()
+        List {
+            Section("词库与社区码表") {
+                NavigationLink {
+                    LexiconSettingsView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("词库管理与社区词包").font(.body)
+                        Text("个人自学习 \(appState.userWords.count) 词 · 自定义编码短语 \(appState.customWords.count) 条")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
+            Section("地理位置词库") {
+                NavigationLink {
+                    LocationLexiconView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("实时城市与 5km 周边地标").font(.body)
+                        Text(geo.isPopulated
+                             ? "\(geo.compactLocationLabel) · 已学会 \(geo.pois.count) 个周边商圈/路名"
+                             : "已内置全国 6,403 省市区县，点击开启 GPS 周边地标学习")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .navigationTitle("词库与实时地标")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - L2 合并子页：云同步、局域网与加密备份
+
+private struct DataSyncAndBackupHubView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        let health = EngineHealthAndSustainabilityService.shared.diagnose()
+        List {
+            Section("云端与跨设备") {
+                NavigationLink {
+                    CloudAccountView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("灵犀云端账号与 10 类透明同步").font(.body)
+                        Text(appState.isCloudAuthenticated ? "国内直连云端在线 · E2EE 加密同步" : "未登录 · 点击绑定国内免代理云端")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                NavigationLink {
+                    SustainabilityHubView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("三模同步、局域网直连与引擎自愈").font(.body)
+                        Text("引擎健康度 \(health.healthScore) 分 · 局域网 6 位码同步与词频自愈")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
+            Section("离线本地备份") {
+                NavigationLink {
+                    BackupSettingsView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("加密备份与恢复 (.lxbak)").font(.body)
+                        Text("AES-GCM 本地口令打包词库、短语与主题")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .navigationTitle("云同步与加密备份")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - L2 子页：使用指南与 App↔键盘共享诊断（收纳原首页 8 条进阶玩法 + 侧载诊断）
+
+private struct UsageGuideAndDiagnosticsView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var bridgeStatus: String?
+    @State private var isSyncingBridge = false
+    @State private var showOnboarding = false
+
+    private let tips: [(icon: String, title: String, desc: String)] = [
+        ("bolt.circle.fill", "随打 @ai / // 零切屏指令 + 🎲3选1", "输入「@ai 帮我委婉拒加班」顶栏一键直达；AI 面板点「🎲3选1」一次出 3 套版本。"),
+        ("location.fill", "全国 6,403 地名 + GPS 5km 周边学习", "全国省市区县开箱首选，开启定位自动学习附近路名商圈；打 vwz / vdz 一键发当前位置。"),
+        ("sparkles", "框选即改 + 顺着续写 + 博弈军师", "选中段落自动浮现润色/翻译；复制棘手消息点「博弈军师」一键出 3 套高情商回复。"),
+        ("character.textbox", "长拼音音节回改 & 四声调筛字", "打长句点顶栏任意音节原地换字；展开候选切「只看单字」可按四声调精准找生僻字。"),
+        ("textformat.123", "中数英无缝混输", "直接连打 mingtian3dianjian 出「明天3点见」，fayigepdfgeiwo 出「发一个PDF给我」。"),
+        ("arrow.up.and.down.and.arrow.left.and.right", "专业编辑台 + 26 键自定义滑行映射", "键盘快捷设置可开「📐 编辑台」精准移光标；在「键盘手感与手势」可自定义任意键上下滑输出。"),
+        ("function", "v 模式 · 大写金额与 AA 均摊", "全拼输 v12800rmb 出「壹万贰仟捌佰元整」，输 v1280/4 自动出「人均 ¥320」。"),
+        ("lock.shield.fill", "Face ID 本地加密安全保险箱", "身份证、银行卡与税号仅存本机受保护容器，绝不上云、绝不进剪贴板历史。")
+    ]
+
+    var body: some View {
+        List {
+            Section("App ↔ 键盘共享同步诊断") {
+                LabeledContent("App Group 状态", value: AppGroup.isAvailable ? "已打通 ✓" : "沙盒隔离")
+                LabeledContent("解析标识", value: AppGroup.identifier)
+                LabeledContent("匹配来源", value: AppGroup.resolutionSource)
+                LabeledContent("键盘启用状态", value: appState.isKeyboardEnabled ? "已启用" : "未启用")
+
+                if !AppGroup.isAvailable {
+                    Button {
+                        Task {
+                            isSyncingBridge = true
+                            defer { isSyncingBridge = false }
+                            let res = await appState.copySideloadBridgeTokenAndSync()
+                            bridgeStatus = res.message
+                        }
+                    } label: {
+                        HStack {
+                            if isSyncingBridge { ProgressView().padding(.trailing, 4) }
+                            Label("一键复制云桥接凭证给键盘", systemImage: "arrow.triangle.2.circlepath")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    .disabled(isSyncingBridge)
+
+                    Text("免费个人 Apple ID 侧载会被苹果禁用本机 App Group。点击上方按钮复制凭证后，切出灵犀键盘（需开启「允许完全访问」）即可自动认领，之后 App 改外观和键盘统计字数都会自动通过你的国内云端双向同步。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let msg = bridgeStatus {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(msg.hasPrefix("✓") ? Color(Design.Palette.success) : .orange)
+                }
+
+                Button("查看系统启用与完全访问教程") {
+                    showOnboarding = true
+                }
+            }
+
+            Section("灵犀进阶玩法速查 (\(tips.count) 条)") {
+                ForEach(Array(tips.enumerated()), id: \.offset) { _, tip in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: tip.icon)
+                            .font(.subheadline)
+                            .foregroundStyle(Color(Design.Palette.accent))
+                            .frame(width: 22)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(tip.title).font(.subheadline.weight(.semibold))
+                            Text(tip.desc).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+        }
+        .navigationTitle("指南与共享诊断")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingGuideView()
+        }
     }
 }
 

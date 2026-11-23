@@ -25,6 +25,7 @@ final class TypingStatsStore {
     private static let retainedDays = 400
     private var days: [String: TypingDailyStat] = [:]
     private var lastCommitAt: Date?
+    private var lastFileStamp: String?
     private var dirty = false
     private let queue = DispatchQueue(label: "com.lingxi.typingstats", qos: .utility)
     /// 仅测试代码直接实例化（避免共享单例在测试间串状态）；业务代码一律使用 `shared`
@@ -40,14 +41,32 @@ final class TypingStatsStore {
     }
     private func load() {
         queue.sync {
-            days = AppGroup.readJSON([String: TypingDailyStat].self, from: Self.fileName) ?? [:]
+            reloadIfChangedLocked(force: true)
         }
     }
+
+    /// 跨进程热重载：键盘扩展写入新字数后，主 App 无需杀进程重启即可实时读取最新统计。
+    func reloadFromDisk() {
+        queue.sync {
+            reloadIfChangedLocked(force: true)
+        }
+    }
+
+    private func reloadIfChangedLocked(force: Bool = false) {
+        let stamp = AppGroup.fileStamp(of: Self.fileName)
+        if !force, stamp == lastFileStamp {
+            return
+        }
+        days = AppGroup.readJSON([String: TypingDailyStat].self, from: Self.fileName) ?? [:]
+        lastFileStamp = stamp
+    }
+
     /// 记录一次上屏（字数按 text 的字符数计）。调用方需已确认开关开启且非隐私输入框。
     func recordCommit(text: String, at now: Date = Date()) {
         let count = text.count
         guard count > 0 else { return }
         queue.sync {
+            reloadIfChangedLocked()
             let key = Self.dayKey(for: now)
             var stat = days[key] ?? TypingDailyStat()
             stat.chars += count
@@ -75,7 +94,8 @@ final class TypingStatsStore {
     }
     func summary(now: Date = Date()) -> Summary {
         queue.sync {
-            summarizeLocked(now: now)
+            reloadIfChangedLocked()
+            return summarizeLocked(now: now)
         }
     }
     private func summarizeLocked(now: Date) -> Summary {
@@ -108,6 +128,7 @@ final class TypingStatsStore {
     /// 最近 N 天窗口内有记录的数据点（按日期升序），供趋势图展示。
     func recentDays(limit: Int, now: Date = Date()) -> [TypingDailyEntry] {
         queue.sync {
+            reloadIfChangedLocked()
             let cutoffDay = Self.dayKey(
                 for: Calendar.current.date(byAdding: .day, value: -(limit - 1), to: now) ?? now
             )
@@ -140,6 +161,8 @@ final class TypingStatsStore {
         guard dirty else { return }
         if AppGroup.writeJSON(days, to: Self.fileName) {
             dirty = false
+            lastFileStamp = AppGroup.fileStamp(of: Self.fileName)
+            AppGroupNotifications.post(AppGroupNotifications.statsChanged)
         }
     }
 }

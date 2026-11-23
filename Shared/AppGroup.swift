@@ -1,10 +1,11 @@
 import CoreFoundation
 import Foundation
 
-/// 跨进程 Darwin 通知（主 App 与键盘扩展毫秒级双向实时同步外观与设置，彻底消除不同步）。
+/// 跨进程 Darwin 通知（主 App 与键盘扩展毫秒级双向实时同步外观、设置与字数统计，彻底消除不同步）。
 enum AppGroupNotifications {
     static let themeChanged = "com.lingxi.ime.themeChanged"
     static let settingsChanged = "com.lingxi.ime.settingsChanged"
+    static let statsChanged = "com.lingxi.ime.statsChanged"
 
     static func post(_ name: String) {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
@@ -58,15 +59,26 @@ enum AppGroupNotifications {
 enum AppGroup {
     static let defaultIdentifier = "group.com.lingxi.ime"
 
-    /// 当前进程实际可用的 App Group 标识。
-    static let identifier: String = resolveIdentifier()
+    /// 当前进程实际可用的 App Group 标识与来源诊断。
+    private static let resolution: (identifier: String, source: String, candidates: [String]) = resolveIdentifierWithDiagnostics()
 
-    /// 共享容器目录；为 nil 表示 App Group 权限缺失（签名问题）。
+    static var identifier: String { resolution.identifier }
+    static var resolutionSource: String { resolution.source }
+    static var inspectedCandidates: [String] { resolution.candidates }
+
+    /// 共享容器目录；为 nil 表示当前签名未包含可用的 App Group 权限（例如免费个人 Apple ID 侧载）。
     static var containerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)
     }
 
     static var isAvailable: Bool { containerURL != nil }
+
+    static var diagnosticSummary: String {
+        if isAvailable {
+            return "本机共享容器已打通（\(identifier) · \(resolutionSource)）"
+        }
+        return "未检测到本机 App Group 共享容器（常见于免费个人 Apple ID 侧载，系统会隔离 App 与键盘沙盒）"
+    }
 
     /// 数据目录：优先使用共享容器；不可用时退回进程私有目录，并由 UI 明确提示用户。
     static var dataDirectory: URL {
@@ -126,23 +138,108 @@ enum AppGroup {
         }
     }
 
-    private static func resolveIdentifier() -> String {
-        var candidates: [String] = []
-        if let altGroups = Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] {
-            // 优先选择与本应用相关的分组（严格弱序比较器，避免 Swift sort 断言）
-            candidates += altGroups.sorted { lhs, rhs in
-                lhs.contains("lingxi") && !rhs.contains("lingxi")
+    /// 4 级精准探测本机可用 App Group：
+    /// 1) 自身 embedded.mobileprovision 的 com.apple.security.application-groups
+    /// 2) 键盘扩展自动向上读取父包 Lingxi.app 的 embedded.mobileprovision 与 Info.plist (ALTAppGroups)
+    /// 3) 自身 Info.plist (ALTAppGroups / LingxiAppGroup)
+    /// 4) 基于 Bundle ID 推导的常见侧载组名 + 默认 group.com.lingxi.ime
+    private static func resolveIdentifierWithDiagnostics() -> (identifier: String, source: String, candidates: [String]) {
+        var ordered: [(id: String, source: String)] = []
+        var seen = Set<String>()
+
+        func appendCandidate(_ raw: String?, source: String) {
+            guard let id = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty,
+                  seen.insert(id).inserted else { return }
+            ordered.append((id, source))
+        }
+
+        // Level 1: 自身签名描述文件 embedded.mobileprovision
+        for g in readMobileProvisionAppGroups(in: Bundle.main.bundleURL) {
+            appendCandidate(g, source: "自身描述文件")
+        }
+
+        // Level 2: 若当前处于 .appex 键盘扩展，向上读取宿主 Lingxi.app 的描述文件与 Info.plist
+        if let hostAppURL = parentAppBundleURL() {
+            for g in readMobileProvisionAppGroups(in: hostAppURL) {
+                appendCandidate(g, source: "主App描述文件")
+            }
+            if let hostPlist = readInfoPlist(in: hostAppURL) {
+                if let altGroups = hostPlist["ALTAppGroups"] as? [String] {
+                    let sorted = altGroups.sorted { lhs, rhs in
+                        lhs.contains("lingxi") && !rhs.contains("lingxi")
+                    }
+                    for g in sorted { appendCandidate(g, source: "主App ALTAppGroups") }
+                }
+                if let configured = hostPlist["LingxiAppGroup"] as? String {
+                    appendCandidate(configured, source: "主App Info.plist")
+                }
             }
         }
-        if let configured = Bundle.main.object(forInfoDictionaryKey: "LingxiAppGroup") as? String, !configured.isEmpty {
-            candidates.append(configured)
-        }
-        candidates.append(defaultIdentifier)
 
-        for candidate in candidates
-        where FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: candidate) != nil {
-            return candidate
+        // Level 3: 自身 Info.plist
+        if let altGroups = Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] {
+            let sorted = altGroups.sorted { lhs, rhs in
+                lhs.contains("lingxi") && !rhs.contains("lingxi")
+            }
+            for g in sorted { appendCandidate(g, source: "ALTAppGroups") }
         }
-        return candidates.first ?? defaultIdentifier
+        if let configured = Bundle.main.object(forInfoDictionaryKey: "LingxiAppGroup") as? String {
+            appendCandidate(configured, source: "Info.plist")
+        }
+
+        // Level 4: 常见侧载推导组名 & 默认组名
+        if let bid = Bundle.main.bundleIdentifier, !bid.isEmpty {
+            let baseBid = bid.hasSuffix(".keyboard") ? String(bid.dropLast(".keyboard".count)) : bid
+            appendCandidate("group.\(baseBid)", source: "BundleID推导")
+        }
+        appendCandidate(defaultIdentifier, source: "默认标识")
+
+        let allIDs = ordered.map(\.id)
+        for item in ordered
+        where FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: item.id) != nil {
+            return (item.id, item.source, allIDs)
+        }
+        let fallback = ordered.first ?? (defaultIdentifier, "未匹配")
+        return (fallback.id, fallback.source, allIDs)
+    }
+
+    private static func parentAppBundleURL() -> URL? {
+        let url = Bundle.main.bundleURL
+        guard url.pathExtension.lowercased() == "appex" else { return nil }
+        let candidate = url.deletingLastPathComponent().deletingLastPathComponent()
+        return candidate.pathExtension.lowercased() == "app" ? candidate : nil
+    }
+
+    private static func readInfoPlist(in bundleURL: URL) -> [String: Any]? {
+        let plistURL = bundleURL.appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+            return nil
+        }
+        return obj
+    }
+
+    /// 从 iOS embedded.mobileprovision 二进制 CMS 包中解析 XML plist 并提取 com.apple.security.application-groups。
+    static func parseAppGroupsFromMobileProvisionData(_ data: Data) -> [String] {
+        guard let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex) else {
+            return []
+        }
+        let xmlData = data.subdata(in: start.lowerBound..<end.upperBound)
+        guard let plist = try? PropertyListSerialization.propertyList(from: xmlData, options: [], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let groups = entitlements["com.apple.security.application-groups"] as? [String] else {
+            return []
+        }
+        return groups.sorted { lhs, rhs in
+            lhs.contains("lingxi") && !rhs.contains("lingxi")
+        }
+    }
+
+    private static func readMobileProvisionAppGroups(in bundleURL: URL) -> [String] {
+        let provURL = bundleURL.appendingPathComponent("embedded.mobileprovision")
+        guard let data = try? Data(contentsOf: provURL) else { return [] }
+        return parseAppGroupsFromMobileProvisionData(data)
     }
 }

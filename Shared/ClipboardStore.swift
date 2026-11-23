@@ -78,6 +78,7 @@ enum ClipboardClassifier {
     /// 命中时自动屏蔽，不进键盘顶栏横幅、不落本地剪贴板历史。
     static func isSensitiveContent(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(SideloadConfigBridge.tokenPrefix) { return true }
         guard !trimmed.isEmpty else { return false }
 
         // 1. 私钥或 PEM 块

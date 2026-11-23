@@ -4,6 +4,7 @@ import UIKit
 final class QuickSettingsSheetView: UIView {
     var onSettingsChanged: ((LingxiSettings) -> Void)?
     var onThemeChanged: ((ThemeCustomization) -> Void)?
+    var onBridgeSyncNow: (() -> Void)?
     var onOpenEditPad: (() -> Void)?
     var onClose: (() -> Void)?
 
@@ -92,6 +93,26 @@ final class QuickSettingsSheetView: UIView {
         header.addArrangedSubview(title)
         header.addArrangedSubview(closeBtn)
         stackView.addArrangedSubview(header)
+
+        // 免费侧载沙盒隔离时：提供一键认领/同步主 App 外观与设置的云桥接横幅
+        if !AppGroup.isAvailable {
+            let paired = SideloadConfigBridge.isPairedInThisProcess
+            let bridgeBtn = ActionClosureButton(type: .system)
+            let stateText = paired
+                ? "☁️ 云桥接已连 · 点此立即同步主 App 外观与设置"
+                : "⚠️ 免费侧载沙盒隔离 · 主 App 复制凭证后点此同步"
+            bridgeBtn.setTitle(stateText, for: .normal)
+            bridgeBtn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+            bridgeBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+            bridgeBtn.backgroundColor = paired ? theme.accentFill.withAlphaComponent(0.18) : UIColor.systemOrange.withAlphaComponent(0.20)
+            bridgeBtn.setTitleColor(paired ? theme.candidateHighlight : UIColor.systemOrange, for: .normal)
+            bridgeBtn.layer.cornerRadius = 9
+            bridgeBtn.contentEdgeInsets = UIEdgeInsets(top: 7, left: 10, bottom: 7, right: 10)
+            bridgeBtn.actionHandler = { [weak self] in
+                self?.onBridgeSyncNow?()
+            }
+            stackView.addArrangedSubview(bridgeBtn)
+        }
 
         // 0. 键盘布局模式（26键 / 九宫格）
         stackView.addArrangedSubview(makeSegmentedRow(
@@ -239,176 +260,70 @@ final class QuickSettingsSheetView: UIView {
         ])
         stackView.addArrangedSubview(skinScroll)
 
-        // 5. 常用开关
-        let toggleRow = UIStackView()
-        toggleRow.axis = .horizontal
-        toggleRow.distribution = .fillEqually
-        toggleRow.spacing = 6
+        // 5. 高频开关（精简为 2 排 6 个常用开关 + 1 排快捷能力，更多细节统一收口至主 App「设置」）
+        let row1 = UIStackView()
+        row1.axis = .horizontal
+        row1.distribution = .fillEqually
+        row1.spacing = 6
 
-        toggleRow.addArrangedSubview(makeToggleChip("按键音", on: settings.keySoundEnabled, theme: theme) { [weak self] in
+        row1.addArrangedSubview(makeToggleChip("按键音", on: settings.keySoundEnabled, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.keySoundEnabled.toggle()
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        toggleRow.addArrangedSubview(makeToggleChip("震动反馈", on: settings.hapticStrength != .off, theme: theme) { [weak self] in
+        row1.addArrangedSubview(makeToggleChip("震动", on: settings.hapticStrength != .off, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.hapticStrength = (self.settings.hapticStrength == .off) ? .light : .off
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        toggleRow.addArrangedSubview(makeToggleChip("成对标点", on: settings.autoPairPunctuation, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.autoPairPunctuation.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        stackView.addArrangedSubview(toggleRow)
-
-        let extraRow = UIStackView()
-        extraRow.axis = .horizontal
-        extraRow.distribution = .fillEqually
-        extraRow.spacing = 6
-
-        extraRow.addArrangedSubview(makeToggleChip(settings.traditionalChineseEnabled ? "繁体输出" : "简体输出", on: settings.traditionalChineseEnabled, theme: theme) { [weak self] in
+        row1.addArrangedSubview(makeToggleChip(settings.traditionalChineseEnabled ? "繁体" : "简体", on: settings.traditionalChineseEnabled, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.traditionalChineseEnabled.toggle()
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        extraRow.addArrangedSubview(makeToggleChip("中英空格", on: settings.panguSpaceLetters, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.panguSpaceLetters.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        extraRow.addArrangedSubview(makeToggleChip("中数空格", on: settings.panguSpaceDigits, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.panguSpaceDigits.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        stackView.addArrangedSubview(extraRow)
+        stackView.addArrangedSubview(row1)
 
-        let smartRow = UIStackView()
-        smartRow.axis = .horizontal
-        smartRow.distribution = .fillEqually
-        smartRow.spacing = 6
+        let row2 = UIStackView()
+        row2.axis = .horizontal
+        row2.distribution = .fillEqually
+        row2.spacing = 6
 
-        smartRow.addArrangedSubview(makeToggleChip("拼写纠错", on: settings.typoCorrectionEnabled, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.typoCorrectionEnabled.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        smartRow.addArrangedSubview(makeToggleChip("表情联想", on: settings.emojiSuggestionEnabled, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.emojiSuggestionEnabled.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        smartRow.addArrangedSubview(makeToggleChip("译:\(settings.translateTargetLang)", on: true, theme: theme) { [weak self] in
-            guard let self else { return }
-            let langs = TranslateTargetLanguage.allCases.map(\.rawValue)
-            if let idx = langs.firstIndex(of: self.settings.translateTargetLang) {
-                self.settings.translateTargetLang = langs[(idx + 1) % langs.count]
-            } else {
-                self.settings.translateTargetLang = langs.first ?? "英文"
-            }
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        stackView.addArrangedSubview(smartRow)
-
-        let wowRow = UIStackView()
-        wowRow.axis = .horizontal
-        wowRow.distribution = .fillEqually
-        wowRow.spacing = 6
-
-        wowRow.addArrangedSubview(makeToggleChip("标点:\(settings.punctuationStyle.shortBadge)", on: settings.punctuationStyle == .fullwidth, theme: theme) { [weak self] in
+        row2.addArrangedSubview(makeToggleChip("标点:\(settings.punctuationStyle.shortBadge)", on: settings.punctuationStyle == .fullwidth, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.punctuationStyle = (self.settings.punctuationStyle == .fullwidth) ? .halfwidth : .fullwidth
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        if settings.inputScheme.isWubi {
-            wowRow.addArrangedSubview(makeToggleChip("四码直出", on: settings.wubiAutoCommitUnique4, theme: theme) { [weak self] in
-                guard let self else { return }
-                self.settings.wubiAutoCommitUnique4.toggle()
-                self.settings.save()
-                self.onSettingsChanged?(self.settings)
-                self.rebuild()
-            })
-            wowRow.addArrangedSubview(makeToggleChip("编码提示", on: settings.wubiShowCodeHints, theme: theme) { [weak self] in
-                guard let self else { return }
-                self.settings.wubiShowCodeHints.toggle()
-                self.settings.save()
-                self.onSettingsChanged?(self.settings)
-                self.rebuild()
-            })
-        } else {
-            wowRow.addArrangedSubview(makeToggleChip("弯引号配对", on: settings.smartQuotePairing, theme: theme) { [weak self] in
-                guard let self else { return }
-                self.settings.smartQuotePairing.toggle()
-                self.settings.save()
-                self.onSettingsChanged?(self.settings)
-                self.rebuild()
-            })
-            wowRow.addArrangedSubview(makeToggleChip("学习阈值:\(settings.autoLearnThreshold)次", on: settings.autoLearnThreshold > 1, theme: theme) { [weak self] in
-                guard let self else { return }
-                self.settings.autoLearnThreshold = (self.settings.autoLearnThreshold % 5) + 1
-                self.settings.save()
-                self.onSettingsChanged?(self.settings)
-                self.rebuild()
-            })
-        }
-        stackView.addArrangedSubview(wowRow)
-
-        let proRow = UIStackView()
-        proRow.axis = .horizontal
-        proRow.distribution = .fillEqually
-        proRow.spacing = 6
-
-        proRow.addArrangedSubview(makeToggleChip("滑行输入", on: settings.glideTypingEnabled, theme: theme) { [weak self] in
+        row2.addArrangedSubview(makeToggleChip("滑行输入", on: settings.glideTypingEnabled, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.glideTypingEnabled.toggle()
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        proRow.addArrangedSubview(makeToggleChip("顶部数字行", on: settings.showNumberRow, theme: theme) { [weak self] in
+        row2.addArrangedSubview(makeToggleChip("顶部数字行", on: settings.showNumberRow, theme: theme) { [weak self] in
             guard let self else { return }
             self.settings.showNumberRow.toggle()
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        proRow.addArrangedSubview(makeToggleChip("动态防误触", on: settings.dynamicKeyHitBoxEnabled, theme: theme) { [weak self] in
-            guard let self else { return }
-            self.settings.dynamicKeyHitBoxEnabled.toggle()
-            self.settings.save()
-            self.onSettingsChanged?(self.settings)
-            self.rebuild()
-        })
-        stackView.addArrangedSubview(proRow)
+        stackView.addArrangedSubview(row2)
 
-        let v5Row = UIStackView()
-        v5Row.axis = .horizontal
-        v5Row.distribution = .fillEqually
-        v5Row.spacing = 6
+        let row3 = UIStackView()
+        row3.axis = .horizontal
+        row3.distribution = .fillEqually
+        row3.spacing = 6
 
         let aiCfg = AIConfig.load()
-        v5Row.addArrangedSubview(makeToggleChip("🧠思考:\(aiCfg.thinkingMode.shortBadge)", on: aiCfg.thinkingMode.isEnabled, theme: theme) { [weak self] in
+        row3.addArrangedSubview(makeToggleChip("🧠思考:\(aiCfg.thinkingMode.shortBadge)", on: aiCfg.thinkingMode.isEnabled, theme: theme) { [weak self] in
             guard let self else { return }
             var cfg = AIConfig.load()
             let modes: [AIThinkingMode] = [.off, .auto, .low, .medium, .high]
@@ -420,17 +335,22 @@ final class QuickSettingsSheetView: UIView {
             cfg.save()
             self.rebuild()
         })
-        v5Row.addArrangedSubview(makeToggleChip("框选即改", on: settings.selectionMagicEnabled, theme: theme) { [weak self] in
+        row3.addArrangedSubview(makeToggleChip("译:\(settings.translateTargetLang)", on: true, theme: theme) { [weak self] in
             guard let self else { return }
-            self.settings.selectionMagicEnabled.toggle()
+            let langs = TranslateTargetLanguage.allCases.map(\.rawValue)
+            if let idx = langs.firstIndex(of: self.settings.translateTargetLang) {
+                self.settings.translateTargetLang = langs[(idx + 1) % langs.count]
+            } else {
+                self.settings.translateTargetLang = langs.first ?? "英文"
+            }
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        v5Row.addArrangedSubview(makeToggleChip("📐 编辑台", on: false, theme: theme) { [weak self] in
+        row3.addArrangedSubview(makeToggleChip("📐 编辑台", on: false, theme: theme) { [weak self] in
             self?.onOpenEditPad?()
         })
-        stackView.addArrangedSubview(v5Row)
+        stackView.addArrangedSubview(row3)
 
         setNeedsLayout()
     }

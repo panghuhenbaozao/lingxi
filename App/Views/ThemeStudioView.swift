@@ -46,14 +46,15 @@ extension Color {
     }
 }
 
+/// 键盘外观 L1 主屏（v5.2 分级重构）：主屏聚焦「模式切换 + 实时预览 + 12 套精校主题」，
+/// 自由调色板、壁纸与键帽细节、皮肤 JSON 分享各收口到 L2 独立子页，清爽高效。
 struct ThemeStudioView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
-    @State private var selectedPhotoItem: PhotosPickerItem?
-    @State private var previewBarState: Int = 0 // 0=常规双簇态, 1=打字候选态, 2=验证码全栏接管态
-    @State private var previewDarkOverride: Bool? = nil // nil=跟随当前外观，false=强制预览日间，true=强制预览夜间
+    @State private var previewDarkOverride: Bool? = nil
     @State private var pressedPreviewKey: String?
-    @State private var themeShareStatus: String?
+    @State private var bridgeToast: String?
+    @State private var isSyncingBridge = false
 
     private var previewIsDark: Bool {
         switch appState.theme.appearanceMode {
@@ -75,31 +76,28 @@ struct ThemeStudioView: View {
         case .followSystem:
             let dayName = KeyboardThemePreset.find(id: appState.theme.lightThemeID).name
             let nightName = KeyboardThemePreset.find(id: appState.theme.darkThemeID).name
-            return "跟随系统：日间「\(dayName)」· 夜间「\(nightName)」。点下方任意相反明暗皮肤可立即锁定，不再自动变色。"
+            return "跟随系统：日间「\(dayName)」· 夜间「\(nightName)」"
         case .alwaysLight:
-            return "已锁定浅色「\(activePreset.name)」，切换微信/抖音/搜索框均保持固定配色，绝不乱切。"
+            return "已锁定浅色「\(activePreset.name)」，切换任意 App 不变色"
         case .alwaysDark:
-            return "已锁定深色「\(activePreset.name)」，切换微信/抖音/搜索框均保持固定配色，绝不乱切。"
+            return "已锁定深色「\(activePreset.name)」，切换任意 App 不变色"
         }
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     appearanceModeCard
-                    previewControlsBar
                     previewCard
                     groupedPresetGrid
-                    customColorPaletteSection
-                    customBackgroundSection
-                    keyAppearanceSection
-                    communityThemeShareSection
+                    advancedLinksCard
                 }
-                .padding()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("键盘外观")
+            .navigationTitle("外观")
             .onAppear {
                 appState.reloadSharedThemeAndSettingsIfNeeded()
                 if appState.theme.appearanceMode != .followSystem {
@@ -111,34 +109,26 @@ struct ThemeStudioView: View {
                     previewDarkOverride = nil
                 }
             }
-            .onChange(of: selectedPhotoItem) { newItem in
-                guard let newItem else { return }
-                Task {
-                    if let data = try? await newItem.loadTransferable(type: Data.self),
-                       let uiImage = UIImage(data: data) {
-                        await MainActor.run {
-                            appState.saveCustomBackgroundImage(uiImage)
-                        }
-                    }
-                }
-            }
         }
     }
+
+    // MARK: - 1. 外观模式卡 + 跨进程同步状态
 
     private var appearanceModeCard: some View {
         let isDefaultComfortable = (
             appState.theme.lightThemeID == "lingxi_pure" &&
             appState.theme.darkThemeID == "midnight_geek" &&
+            appState.theme.appearanceMode == .followSystem &&
             !appState.theme.hasCustomColorOverrides
         )
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("外观策略（苹果精校护眼 · 日夜双套独立）", systemImage: "circle.lefthalf.filled")
+                Text("外观模式")
                     .font(.subheadline.bold())
                     .foregroundStyle(Color(Design.Palette.ink))
                 Spacer()
                 if !isDefaultComfortable {
-                    Button("恢复原生精校") {
+                    Button("恢复默认") {
                         appState.theme.lightThemeID = "lingxi_pure"
                         appState.theme.darkThemeID = "midnight_geek"
                         appState.theme.selectedThemeID = "lingxi_pure"
@@ -149,18 +139,14 @@ struct ThemeStudioView: View {
                         previewDarkOverride = nil
                     }
                     .font(.caption.bold())
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color(Design.Palette.accent))
-                    .foregroundStyle(Color.white)
-                    .clipShape(Capsule())
-                    .buttonStyle(.plain)
+                    .foregroundStyle(Color(Design.Palette.accent))
                 } else {
-                    Text("已启用")
-                        .font(.caption.bold())
+                    Label(AppGroup.isAvailable ? "实时同步" : "原生精校", systemImage: "checkmark.circle.fill")
+                        .font(.caption2.bold())
                         .foregroundStyle(Color(Design.Palette.success))
                 }
             }
+
             Picker("键盘外观模式", selection: Binding(
                 get: { appState.theme.appearanceMode },
                 set: { newMode in
@@ -173,13 +159,64 @@ struct ThemeStudioView: View {
                 }
             }
             .pickerStyle(.segmented)
-            Text(appearanceStatusSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+
+            HStack(spacing: 6) {
+                Text(appearanceStatusSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if appState.theme.appearanceMode == .followSystem {
+                    Button {
+                        previewDarkOverride = !previewIsDark
+                    } label: {
+                        Label(previewIsDark ? "看日间" : "看夜间", systemImage: previewIsDark ? "sun.max" : "moon")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color(Design.Palette.accentSoft))
+                            .foregroundStyle(Color(Design.Palette.accent))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
             if !AppGroup.isAvailable {
-                Label("未检测到共享容器权限，App 与键盘外观可能无法跨进程同步，请检查签名 App Group 配置。", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
+                Button {
+                    Task {
+                        isSyncingBridge = true
+                        defer { isSyncingBridge = false }
+                        let res = await appState.copySideloadBridgeTokenAndSync()
+                        bridgeToast = res.message
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isSyncingBridge {
+                            ProgressView().scaleEffect(0.75)
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.caption.bold())
+                        }
+                        Text("免费侧载沙盒隔离 · 选好皮肤后点此同步给键盘")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.orange.opacity(0.12))
                     .foregroundStyle(.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSyncingBridge)
+            }
+
+            if let toast = bridgeToast {
+                Text(toast)
+                    .font(.caption2)
+                    .foregroundStyle(toast.hasPrefix("✓") ? Color(Design.Palette.success) : .orange)
             }
         }
         .padding(14)
@@ -187,46 +224,7 @@ struct ThemeStudioView: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    private var previewControlsBar: some View {
-        VStack(spacing: 8) {
-            if appState.theme.appearanceMode == .followSystem {
-                HStack(spacing: 8) {
-                    Button {
-                        previewDarkOverride = false
-                    } label: {
-                        Label("☀️ 日间预览", systemImage: previewIsDark ? "sun.max" : "sun.max.fill")
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                            .background(!previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
-                            .foregroundStyle(!previewIsDark ? Color.white : Color(Design.Palette.ink))
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        previewDarkOverride = true
-                    } label: {
-                        Label("🌙 夜间预览", systemImage: previewIsDark ? "moon.fill" : "moon")
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                            .background(previewIsDark ? Color(Design.Palette.accent) : Color(.secondarySystemGroupedBackground))
-                            .foregroundStyle(previewIsDark ? Color.white : Color(Design.Palette.ink))
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            Picker("顶栏预览状态", selection: $previewBarState) {
-                Text("常规双簇态").tag(0)
-                Text("打字候选态").tag(1)
-                Text("验证码全栏接管").tag(2)
-            }
-            .pickerStyle(.segmented)
-        }
-    }
-
-    // MARK: - 实时拟真预览（日夜自由切换 + 完整联动顶栏三态）
+    // MARK: - 2. 精简实时键盘预览卡
 
     private var previewCard: some View {
         let preset = activePreset
@@ -236,79 +234,33 @@ struct ThemeStudioView: View {
 
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
-                if previewBarState == 0 {
-                    Text("✨ 灵犀 AI")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(Color(hexColor: preset.accentFill).opacity(0.18))
-                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                        .clipShape(Capsule())
+                Text("✨ AI")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Color(hexColor: preset.accentFill).opacity(0.18))
+                    .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                    .clipShape(Capsule())
 
-                    Text("💬 译")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .padding(.horizontal, 9)
-                        .frame(height: 28)
-                        .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
-                        .foregroundStyle(Color(hexColor: preset.keyText))
-                        .clipShape(Capsule())
-
-                    Spacer()
-
-                    ForEach(["doc.on.clipboard", "slider.horizontal.3"], id: \.self) { icon in
-                        Image(systemName: icon)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color(hexColor: preset.keyText))
-                            .frame(width: 28, height: 28)
-                            .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
-                            .clipShape(Capsule())
-                    }
-                } else if previewBarState == 1 {
-                    Text("灵犀输入法")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                    Text("苹果精校")
-                        .font(.subheadline)
-                        .foregroundStyle(Color(hexColor: preset.candidateText))
-                    Text("护眼高对比")
-                        .font(.subheadline)
-                        .foregroundStyle(Color(hexColor: preset.candidateText))
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(hexColor: preset.candidateText))
-                } else {
-                    Text("💬 验证码")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color(hexColor: preset.accentFill).opacity(0.18))
-                        .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                        .clipShape(Capsule())
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text("849201 · 【灵犀】您的登录验证码是 849201，5分钟内有效")
-                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-
-                    Spacer()
-
-                    Text("填入 849201")
-                        .font(.system(size: 11, weight: .bold))
-                        .padding(.horizontal, 9)
-                        .frame(height: 25)
-                        .background(Color(hexColor: preset.accentFill))
-                        .foregroundStyle(Color(hexColor: preset.accentText))
-                        .clipShape(Capsule())
-                }
+                Text("灵犀输入法")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                Text("丝滑流畅")
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Color(hexColor: preset.candidateText))
+                Spacer()
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color(hexColor: preset.keyText))
+                    .frame(width: 26, height: 26)
+                    .background(Color(hexColor: preset.keyFill, opacityScale: keyAlpha))
+                    .clipShape(Capsule())
             }
             .padding(.horizontal, 10)
-            .frame(height: 44)
+            .frame(height: 40)
             .background(Color(hexColor: preset.toolbarBackground).opacity(hasBg ? 0.85 : 1.0))
 
-            VStack(spacing: 7) {
+            VStack(spacing: 6) {
                 HStack(spacing: 5) {
                     ForEach(["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"], id: \.self) { ch in
                         mockKey(ch, fill: Color(hexColor: preset.keyFill, opacityScale: keyAlpha), text: Color(hexColor: preset.keyText), radius: radius)
@@ -347,12 +299,12 @@ struct ThemeStudioView: View {
                 }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
         )
-        .shadow(color: Color.black.opacity(preset.isDark ? 0.25 : 0.08), radius: 8, y: 4)
+        .shadow(color: Color.black.opacity(preset.isDark ? 0.24 : 0.08), radius: 8, y: 3)
     }
 
     private func mockKey(_ label: String, fill: Color, text: Color, radius: Double, widthWeight: Double = 1.0) -> some View {
@@ -366,10 +318,10 @@ struct ThemeStudioView: View {
             }
         } label: {
             Text(label)
-                .font(.system(size: label.count > 2 ? 11 : 14, weight: appState.theme.boldKeyLabel ? .semibold : .regular))
+                .font(.system(size: label.count > 2 ? 11 : 13.5, weight: appState.theme.boldKeyLabel ? .semibold : .regular))
                 .foregroundStyle(text)
                 .frame(maxWidth: .infinity)
-                .frame(height: 32)
+                .frame(height: 30)
                 .background(activeFill)
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay(
@@ -383,21 +335,24 @@ struct ThemeStudioView: View {
         .layoutPriority(widthWeight)
     }
 
-    // MARK: - 12 套精校预设主题（浅色护眼 6 套 + 深色舒适 6 套分组呈现）
+    // MARK: - 3. 12 套精校预设主题
 
     private var groupedPresetGrid: some View {
         let lightPresets = KeyboardThemePreset.presets.filter { !$0.isDark }
         let darkPresets = KeyboardThemePreset.presets.filter(\.isDark)
         return VStack(alignment: .leading, spacing: 14) {
-            presetSection(title: "☀️ 浅色护眼精选 (\(lightPresets.count))", presets: lightPresets)
-            presetSection(title: "🌙 深色舒适精校 (\(darkPresets.count))", presets: darkPresets)
+            presetSection(title: "浅色护眼", presets: lightPresets)
+            presetSection(title: "深色精校", presets: darkPresets)
         }
     }
 
     private func presetSection(title: String, presets: [KeyboardThemePreset]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.headline)
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 ForEach(presets) { preset in
                     let hasCustomForPresetSide = preset.isDark
@@ -413,13 +368,12 @@ struct ThemeStudioView: View {
                             : (appState.theme.lightThemeID == preset.id)
                     }()
                     Button {
-                        // 与键盘内「快捷设置」完全一致的选择逻辑：点任意皮肤立即同步生效，不再出现预览与真实键盘不一致
                         appState.theme.applyPresetSelection(preset, isSystemDark: colorScheme == .dark)
                         previewDarkOverride = nil
                     } label: {
                         HStack(spacing: 10) {
                             ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
                                     .fill(
                                         LinearGradient(
                                             colors: [Color(hexColor: preset.canvasTop), Color(hexColor: preset.canvasBottom)],
@@ -427,23 +381,24 @@ struct ThemeStudioView: View {
                                             endPoint: .bottomTrailing
                                         )
                                     )
-                                    .frame(width: 40, height: 40)
+                                    .frame(width: 36, height: 36)
                                     .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
                                             .fill(Color(hexColor: preset.keyFill))
-                                            .frame(width: 24, height: 14)
+                                            .frame(width: 22, height: 12)
                                             .offset(y: -4)
                                     )
                                 Circle()
                                     .fill(Color(hexColor: preset.accentFill))
-                                    .frame(width: 10, height: 10)
-                                    .offset(x: 8, y: 9)
+                                    .frame(width: 9, height: 9)
+                                    .offset(x: 7, y: 8)
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(preset.name)
-                                    .font(.subheadline.bold())
+                                    .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.primary)
+                                    .lineLimit(1)
                                 Text(preset.subtitle)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
@@ -465,10 +420,10 @@ struct ThemeStudioView: View {
                         }
                         .padding(10)
                         .background(Color(.secondarySystemGroupedBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(isCurrentlyActive ? Color(Design.Palette.accent) : Color(Design.Palette.hairline).opacity(0.6), lineWidth: isCurrentlyActive ? 2 : 0.5)
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(isCurrentlyActive ? Color(Design.Palette.accent) : Color(Design.Palette.hairline).opacity(0.5), lineWidth: isCurrentlyActive ? 2 : 0.5)
                         )
                     }
                     .buttonStyle(.plain)
@@ -477,75 +432,152 @@ struct ThemeStudioView: View {
         }
     }
 
-    // MARK: - 日夜双套独立自由调色板
+    // MARK: - 4. L2 进阶外观子页入口（自由调色 / 壁纸几何 / JSON 分享）
 
-    private var customColorPaletteSection: some View {
-        let editingDark = previewIsDark
-        let hasOverrides = editingDark ? appState.theme.hasDarkCustomOverrides : appState.theme.hasLightCustomOverrides
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label(editingDark ? "🌙 夜间独立自由调色板" : "☀️ 日间独立自由调色板", systemImage: "eyedropper.halffull")
-                    .font(.headline)
-                Spacer()
+    private var advancedLinksCard: some View {
+        VStack(spacing: 0) {
+            NavigationLink {
+                ThemeColorPaletteView()
+            } label: {
+                subpageRow(
+                    icon: "eyedropper.halffull",
+                    title: "自由调色板",
+                    badge: appState.theme.hasCustomColorOverrides ? "已自定义" : "日夜双套"
+                )
+            }
+            Divider().padding(.leading, 44)
+            NavigationLink {
+                ThemeWallpaperAndKeyDetailView()
+            } label: {
+                subpageRow(
+                    icon: "photo.on.rectangle.angled",
+                    title: "壁纸与键帽细节",
+                    badge: appState.customBgPreview != nil ? "已设壁纸" : "圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                )
+            }
+            Divider().padding(.leading, 44)
+            NavigationLink {
+                ThemeCommunityShareView()
+            } label: {
+                subpageRow(
+                    icon: "square.and.arrow.up.on.square",
+                    title: "皮肤分享与导入",
+                    badge: "JSON"
+                )
+            }
+        }
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func subpageRow(icon: String, title: String, badge: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 24)
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color(Design.Palette.ink))
+            Spacer()
+            Text(badge)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Image(systemName: "chevron.right")
+                .font(.caption2.bold())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+    }
+}
+
+// MARK: - L2 子页 1：日夜双套独立自由调色板
+
+struct ThemeColorPaletteView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var editingDark: Bool = false
+
+    private var activePreset: KeyboardThemePreset {
+        appState.theme.activePreset(isSystemDark: editingDark)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("编辑通道", selection: $editingDark) {
+                    Text("☀️ 日间浅色").tag(false)
+                    Text("🌙 夜间深色").tag(true)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section {
+                ColorPicker(
+                    "键盘底板颜色",
+                    selection: hexColorBinding(editingDark ? \.customDarkCanvasHex : \.customCanvasHex, fallback: activePreset.canvasTop),
+                    supportsOpacity: false
+                )
+                ColorPicker(
+                    "字母键帽颜色",
+                    selection: hexColorBinding(editingDark ? \.customDarkKeyFillHex : \.customKeyFillHex, fallback: activePreset.keyFill),
+                    supportsOpacity: false
+                )
+                ColorPicker(
+                    "按键文字颜色",
+                    selection: hexColorBinding(editingDark ? \.customDarkKeyTextHex : \.customKeyTextHex, fallback: activePreset.keyText),
+                    supportsOpacity: false
+                )
+                ColorPicker(
+                    "发送键与强调色",
+                    selection: hexColorBinding(editingDark ? \.customDarkAccentHex : \.customAccentHex, fallback: activePreset.accentFill),
+                    supportsOpacity: false
+                )
+            } header: {
+                Text(editingDark ? "夜间独立调色（不影响日间）" : "日间独立调色（不影响夜间）")
+            }
+
+            Section("对比度校验 (WCAG AA)") {
+                let ratio = activePreset.keyFill.contrastRatio(with: activePreset.keyText)
+                HStack(spacing: 8) {
+                    Image(systemName: ratio >= 4.5 ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(ratio >= 4.5 ? Color(Design.Palette.success) : .orange)
+                    Text(ratio >= 4.5
+                         ? "对比度达标 (\(String(format: "%.1f", ratio)):1 · 清晰护眼)"
+                         : "对比度偏低 (\(String(format: "%.1f", ratio)):1)")
+                        .font(.subheadline)
+                    Spacer()
+                    if ratio < 4.5 {
+                        Button("自动优化") {
+                            let autoText = activePreset.keyFill.isDarkColor ? "#FFFFFF" : "#111113"
+                            if editingDark {
+                                appState.theme.customDarkKeyTextHex = autoText
+                            } else {
+                                appState.theme.customKeyTextHex = autoText
+                            }
+                        }
+                        .font(.caption.bold())
+                    }
+                }
+
+                let hasOverrides = editingDark ? appState.theme.hasDarkCustomOverrides : appState.theme.hasLightCustomOverrides
                 if hasOverrides {
-                    Button("恢复\(editingDark ? "夜间" : "日间")原色") {
+                    Button("恢复\(editingDark ? "夜间" : "日间")默认原色", role: .destructive) {
                         appState.theme.clearCustomColors(forDark: editingDark)
                     }
-                    .font(.caption.bold())
-                    .foregroundStyle(Color(Design.Palette.accent))
                 }
             }
-
-            ColorPicker(
-                "键盘底板颜色",
-                selection: hexColorBinding(editingDark ? \.customDarkCanvasHex : \.customCanvasHex, fallback: activePreset.canvasTop),
-                supportsOpacity: false
-            )
-            ColorPicker(
-                "字母键帽颜色",
-                selection: hexColorBinding(editingDark ? \.customDarkKeyFillHex : \.customKeyFillHex, fallback: activePreset.keyFill),
-                supportsOpacity: false
-            )
-            ColorPicker(
-                "按键文字颜色",
-                selection: hexColorBinding(editingDark ? \.customDarkKeyTextHex : \.customKeyTextHex, fallback: activePreset.keyText),
-                supportsOpacity: false
-            )
-            ColorPicker(
-                "发送键与强调色",
-                selection: hexColorBinding(editingDark ? \.customDarkAccentHex : \.customAccentHex, fallback: activePreset.accentFill),
-                supportsOpacity: false
-            )
-
-            let ratio = activePreset.keyFill.contrastRatio(with: activePreset.keyText)
-            HStack(spacing: 8) {
-                Image(systemName: ratio >= 4.5 ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(ratio >= 4.5 ? Color(Design.Palette.success) : .orange)
-                Text(ratio >= 4.5
-                     ? "WCAG AA 对比度达标 (\(String(format: "%.1f", ratio)):1 · 舒适清晰)"
-                     : "文字与键帽对比度偏低 (\(String(format: "%.1f", ratio)):1)，建议自动优化")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if ratio < 4.5 {
-                    Button("自动优化") {
-                        let autoText = activePreset.keyFill.isDarkColor ? "#FFFFFF" : "#111113"
-                        if editingDark {
-                            appState.theme.customDarkKeyTextHex = autoText
-                        } else {
-                            appState.theme.customKeyTextHex = autoText
-                        }
-                    }
-                    .font(.caption.bold())
-                }
-            }
-            .padding(8)
-            .background((ratio >= 4.5 ? Color(Design.Palette.success) : Color.orange).opacity(0.10))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .navigationTitle("自由调色板")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            switch appState.theme.appearanceMode {
+            case .alwaysDark: editingDark = true
+            case .alwaysLight: editingDark = false
+            case .followSystem: editingDark = (colorScheme == .dark)
+            }
+        }
     }
 
     private func hexColorBinding(_ keyPath: WritableKeyPath<ThemeCustomization, String?>, fallback: HexColor) -> Binding<Color> {
@@ -561,146 +593,82 @@ struct ThemeStudioView: View {
             }
         )
     }
+}
 
-    // MARK: - 相册自定义背景
+// MARK: - L2 子页 2：相册壁纸、键帽几何与日夜配对
 
-    private var customBackgroundSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("自定义相册壁纸", systemImage: "photo.on.rectangle.angled")
-                    .font(.headline)
-                Spacer()
-                if appState.customBgPreview != nil {
-                    Button("移除壁纸", role: .destructive) {
+struct ThemeWallpaperAndKeyDetailView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var selectedPhotoItem: PhotosPickerItem?
+
+    var body: some View {
+        Form {
+            Section("相册背景壁纸") {
+                PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                    Label(appState.customBgPreview == nil ? "从相册选择键盘背景图" : "更换键盘背景图", systemImage: "photo.badge.plus")
+                }
+
+                if let img = appState.customBgPreview {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(height: 110)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    sliderRow(title: "背景模糊度", value: $appState.theme.backgroundBlurRadius, range: 0...24, format: "%.0f")
+                    sliderRow(title: "遮罩暗化", value: $appState.theme.backgroundDimOpacity, range: 0...0.75, format: "%.2f")
+                    sliderRow(title: "按键不透明度", value: $appState.theme.keyOpacity, range: 0.4...1.0, format: "%.2f")
+                    Button("移除背景壁纸", role: .destructive) {
                         appState.removeCustomBackgroundImage()
                     }
-                    .font(.caption.bold())
                 }
             }
 
-            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                HStack {
-                    Image(systemName: "photo.badge.plus")
-                    Text(appState.customBgPreview == nil ? "从相册挑选一张照片作为键盘背景" : "更换背景图片（已自动压缩适配扩展内存）")
-                        .font(.subheadline.bold())
-                    Spacer()
-                }
-                .padding(12)
-                .background(Color(Design.Palette.accentSoft))
-                .foregroundStyle(Color(Design.Palette.accent))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Section("键帽细节") {
+                sliderRow(title: "按键圆角", value: $appState.theme.keyCornerRadius, range: 2...14, format: "%.0f pt")
+                sliderRow(title: "立体阴影强度", value: $appState.theme.keyShadowScale, range: 0.0...1.6, format: "%.1fx")
+                Toggle("键帽加粗字体", isOn: $appState.theme.boldKeyLabel)
             }
-
-            if appState.customBgPreview != nil {
-                sliderRow(title: "背景模糊度", value: $appState.theme.backgroundBlurRadius, range: 0...24, format: "%.0f")
-                sliderRow(title: "暗化/柔光遮罩", value: $appState.theme.backgroundDimOpacity, range: 0...0.75, format: "%.2f")
-                sliderRow(title: "按键不透明度", value: $appState.theme.keyOpacity, range: 0.4...1.0, format: "%.2f")
-            }
-        }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 按键几何、立体阴影与系统配对
-
-    private var keyAppearanceSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("键帽圆角、浮雕阴影与深浅配对")
-                .font(.headline)
-            sliderRow(title: "按键圆角", value: $appState.theme.keyCornerRadius, range: 2...14, format: "%.0f pt")
-            sliderRow(title: "按键立体阴影强度", value: $appState.theme.keyShadowScale, range: 0.0...1.6, format: "%.1fx")
-
-            Toggle("键帽加粗字体", isOn: $appState.theme.boldKeyLabel)
 
             if appState.theme.appearanceMode == .followSystem {
-                Picker("日间浅色配对主题", selection: Binding(
-                    get: { appState.theme.lightThemeID },
-                    set: { newID in
-                        appState.theme.lightThemeID = newID
-                        appState.theme.clearCustomColors(forDark: false)
+                Section("跟随系统日夜配对") {
+                    Picker("日间浅色主题", selection: Binding(
+                        get: { appState.theme.lightThemeID },
+                        set: { newID in
+                            appState.theme.lightThemeID = newID
+                            appState.theme.clearCustomColors(forDark: false)
+                        }
+                    )) {
+                        ForEach(KeyboardThemePreset.presets.filter { !$0.isDark }) { preset in
+                            Text(preset.name).tag(preset.id)
+                        }
                     }
-                )) {
-                    ForEach(KeyboardThemePreset.presets.filter { !$0.isDark }) { preset in
-                        Text(preset.name).tag(preset.id)
-                    }
-                }
-                Picker("夜间深色配对主题", selection: Binding(
-                    get: { appState.theme.darkThemeID },
-                    set: { newID in
-                        appState.theme.darkThemeID = newID
-                        appState.theme.clearCustomColors(forDark: true)
-                    }
-                )) {
-                    ForEach(KeyboardThemePreset.presets.filter(\.isDark)) { preset in
-                        Text(preset.name).tag(preset.id)
+                    Picker("夜间深色主题", selection: Binding(
+                        get: { appState.theme.darkThemeID },
+                        set: { newID in
+                            appState.theme.darkThemeID = newID
+                            appState.theme.clearCustomColors(forDark: true)
+                        }
+                    )) {
+                        ForEach(KeyboardThemePreset.presets.filter(\.isDark)) { preset in
+                            Text(preset.name).tag(preset.id)
+                        }
                     }
                 }
             }
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 开源社区皮肤 JSON 导出分享与导入
-
-    private var communityThemeShareSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("社区皮肤 JSON 分享与导入", systemImage: "square.and.arrow.up.on.square")
-                .font(.headline)
-            Text("可将当前调好的日夜双套色彩、圆角与阴影配置一键复制为 JSON 分享，或从剪贴板导入。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 10) {
-                Button {
-                    let enc = JSONEncoder()
-                    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-                    if let data = try? enc.encode(appState.theme),
-                       let json = String(data: data, encoding: .utf8) {
-                        UIPasteboard.general.string = json
-                        themeShareStatus = "✓ 已复制当前皮肤配置 JSON 到剪贴板"
+        .navigationTitle("壁纸与键帽细节")
+        .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: selectedPhotoItem) { newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self),
+                   let uiImage = UIImage(data: data) {
+                    await MainActor.run {
+                        appState.saveCustomBackgroundImage(uiImage)
                     }
-                } label: {
-                    Label("复制皮肤 JSON", systemImage: "doc.on.doc")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .background(Color(Design.Palette.surface))
-                        .foregroundStyle(Color(Design.Palette.ink))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
-                .buttonStyle(.plain)
-
-                Button {
-                    guard let raw = UIPasteboard.general.string,
-                          let data = raw.data(using: .utf8),
-                          let imported = try? JSONDecoder().decode(ThemeCustomization.self, from: data) else {
-                        themeShareStatus = "剪贴板中未检测到有效的皮肤 JSON 配置"
-                        return
-                    }
-                    appState.theme = imported
-                    themeShareStatus = "✓ 已成功从剪贴板导入并应用社区皮肤配置"
-                } label: {
-                    Label("从剪贴板导入", systemImage: "arrow.down.doc.fill")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .background(Color(Design.Palette.accent))
-                        .foregroundStyle(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if let msg = themeShareStatus {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(Color(Design.Palette.accent))
             }
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func sliderRow(title: String, value: Binding<Double>, range: ClosedRange<Double>, format: String) -> some View {
@@ -714,5 +682,55 @@ struct ThemeStudioView: View {
             }
             Slider(value: value, in: range)
         }
+    }
+}
+
+// MARK: - L2 子页 3：社区皮肤 JSON 分享与导入
+
+struct ThemeCommunityShareView: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var statusMessage: String?
+
+    var body: some View {
+        Form {
+            Section {
+                Button {
+                    let enc = JSONEncoder()
+                    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    if let data = try? enc.encode(appState.theme),
+                       let json = String(data: data, encoding: .utf8) {
+                        UIPasteboard.general.string = json
+                        statusMessage = "✓ 已复制当前皮肤配置 JSON 到剪贴板"
+                    }
+                } label: {
+                    Label("复制当前皮肤 JSON", systemImage: "doc.on.doc")
+                }
+
+                Button {
+                    guard let raw = UIPasteboard.general.string,
+                          let data = raw.data(using: .utf8),
+                          let imported = try? JSONDecoder().decode(ThemeCustomization.self, from: data) else {
+                        statusMessage = "剪贴板中未检测到有效的皮肤 JSON 配置"
+                        return
+                    }
+                    appState.theme = imported
+                    statusMessage = "✓ 已导入并立即应用皮肤配置"
+                } label: {
+                    Label("从剪贴板导入皮肤 JSON", systemImage: "arrow.down.doc.fill")
+                }
+            } footer: {
+                Text("导出内容包含日夜双套配色、圆角与阴影参数，便于与好友分享或跨设备复用。")
+            }
+
+            if let msg = statusMessage {
+                Section {
+                    Text(msg)
+                        .font(.footnote)
+                        .foregroundStyle(msg.hasPrefix("✓") ? Color(Design.Palette.success) : .orange)
+                }
+            }
+        }
+        .navigationTitle("皮肤分享与导入")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

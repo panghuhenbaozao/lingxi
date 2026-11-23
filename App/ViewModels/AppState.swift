@@ -48,6 +48,7 @@ final class AppState: ObservableObject {
     @Published var customWords: [CustomWordEntry] = []
     @Published var userWords: [UserWordEntry] = []
     @Published var isKeyboardEnabled: Bool = false
+    @Published var typingStatsSummary: TypingStatsStore.Summary = TypingStatsStore.shared.summary()
     @Published var customBgPreview: UIImage?
     @Published var userAvatarImage: UIImage?
 
@@ -58,6 +59,7 @@ final class AppState: ObservableObject {
     private var isRefreshingState = false
     private var themeDarwinObserver: AppGroupNotifications.Observer?
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
+    private var statsDarwinObserver: AppGroupNotifications.Observer?
 
     init() {
         self.settings = LingxiSettings.load(force: true)
@@ -79,12 +81,37 @@ final class AppState: ObservableObject {
                 self?.reloadSharedThemeAndSettingsIfNeeded()
             }
         }
+        statsDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.statsChanged) { [weak self] in
+            Task { @MainActor in
+                self?.reloadTypingStatsSummary()
+            }
+        }
     }
 
-    /// 响应键盘扩展发出的 Darwin 跨进程变更通知或切 Tab 时静默拉平 App 与键盘的外观/设置状态，绝不反向覆盖写盘。
+    func reloadTypingStatsSummary() {
+        TypingStatsStore.shared.reloadFromDisk()
+        typingStatsSummary = TypingStatsStore.shared.summary()
+        habitProfile = TypingHabitTracker.shared.currentProfile()
+    }
+
+    /// 免费侧载无 App Group 时：先将主 App 外观/设置推送到云端，再把云桥接凭证复制到剪贴板供键盘一键自动认领。
+    func copySideloadBridgeTokenAndSync() async -> (ok: Bool, message: String) {
+        guard isCloudAuthenticated else {
+            return (false, "请先登录国内直连云端账号，再启用免费侧载云桥接。")
+        }
+        _ = try? await syncCloudNow()
+        guard let token = SideloadConfigBridge.exportPairingTokenFromMainApp() else {
+            return (false, "未找到云端 API Key，请先在「灵犀账号」点击轮换 API Key 后重试。")
+        }
+        UIPasteboard.general.string = token
+        return (true, "✓ 已同步最新外观上云并复制配对凭证！切出灵犀键盘即可自动认领并同步外观与字数。")
+    }
+
+    /// 响应键盘扩展发出的 Darwin 跨进程变更通知或切 Tab 时静默拉平 App 与键盘的外观/设置/字数状态，绝不反向覆盖写盘。
     func reloadSharedThemeAndSettingsIfNeeded() {
         let diskSettings = LingxiSettings.load(force: true)
         let diskTheme = ThemeCustomization.load(force: true)
+        reloadTypingStatsSummary()
         guard diskSettings != settings || diskTheme != theme else { return }
         isRefreshingState = true
         defer { isRefreshingState = false }
@@ -109,6 +136,8 @@ final class AppState: ObservableObject {
             loadedCloud.save()
         }
         cloudConfig = loadedCloud
+        TypingStatsStore.shared.reloadFromDisk()
+        typingStatsSummary = TypingStatsStore.shared.summary()
         habitProfile = TypingHabitTracker.shared.currentProfile()
         aiInsightReport = AIAutoInsightService.loadCachedReport()
         isCloudAuthenticated = CloudBackendClient.shared.isRealCloudAuthenticated
