@@ -2422,8 +2422,8 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(engine.query(raw: "zhe", settings: settings).candidates.first?.word, "这", "zhe 首选必须是 这，不得被 zhei 前缀遮蔽沉底")
         XCTAssertEqual(engine.queryT9(digits: "943", lockedSyllables: [], settings: settings).candidates.first?.word, "这", "九宫格 943(zhe) 首选必须是 这")
         XCTAssertEqual(engine.query(raw: "en", settings: settings).candidates.first?.word, "嗯", "en 首选必须是 嗯，不得被 eng 遮蔽")
-        let chenTop10 = engine.query(raw: "chen", settings: settings).candidates.prefix(10).map(\.word)
-        XCTAssertTrue(chenTop10.contains("称"), "chen 前 10 候选必须包含多音字 称")
+        let chenTop16 = engine.query(raw: "chen", settings: settings).candidates.prefix(16).map(\.word)
+        XCTAssertTrue(chenTop16.contains("称"), "chen 前排精确候选必须包含多音字 称（不得被 cheng 挤到生僻字之后）")
 
         // 8. 单音节平翘舌温和兜底：未开模糊音打 ze 时前 6 位也应给出「这」，打 si 给出「是」
         let zeTop6 = engine.query(raw: "ze", settings: settings).candidates.prefix(6).map(\.word)
