@@ -7,6 +7,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case translate
     case screenshot
     case voice
+    case emoji
     case clipboard
     case layout
     case editPad
@@ -19,6 +20,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "实时翻译"
         case .screenshot: return "截屏识图"
         case .voice: return "语音互译"
+        case .emoji: return "表情符号"
         case .clipboard: return "剪贴板"
         case .layout: return "九键/26键切换"
         case .editPad: return "专业编辑台"
@@ -32,6 +34,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "character.bubble"
         case .screenshot: return "camera.viewfinder"
         case .voice: return "mic.fill"
+        case .emoji: return "face.smiling"
         case .clipboard: return "doc.on.clipboard"
         case .layout: return "rectangle.grid.3x2"
         case .editPad: return "cursorarrow.and.square.on.square.dashed"
@@ -453,10 +456,10 @@ struct LingxiSettings: Codable, Equatable {
     private static var cachedStamp: String?
     private static var lastStampCheckTime: CFAbsoluteTime = 0
 
-    /// 读取最新设置；高频热路径 1.2s 内直接返回内存缓存，超窗再校验文件内容指纹（mtime+size+inode）。
+    /// 读取最新设置；高频热路径 6.0s 内直接返回内存缓存（跨进程变更已由 Darwin 通知即时推送刷新）。
     static func load(force: Bool = false) -> LingxiSettings {
         let now = CFAbsoluteTimeGetCurrent()
-        if !force, let cached = cachedValue, now - lastStampCheckTime < 1.2 {
+        if !force, let cached = cachedValue, now - lastStampCheckTime < 6.0 {
             return cached
         }
         lastStampCheckTime = now

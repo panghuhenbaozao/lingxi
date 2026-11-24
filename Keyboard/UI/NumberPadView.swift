@@ -7,6 +7,7 @@ final class NumberPadView: UIView {
         case backspace
         case returnKey
         case backToLetters
+        case openSymbols
         case space
     }
 
@@ -65,6 +66,20 @@ final class NumberPadView: UIView {
         }
         gridContainer.subviews.forEach { $0.removeFromSuperview() }
         guard let theme else { return }
+
+        let emojiEntryBtn = ActionClosureButton(type: .system)
+        emojiEntryBtn.setTitle("😊符号", for: .normal)
+        emojiEntryBtn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        emojiEntryBtn.setTitleColor(theme.candidateHighlight, for: .normal)
+        emojiEntryBtn.backgroundColor = theme.accentFill.withAlphaComponent(0.14)
+        emojiEntryBtn.layer.cornerRadius = theme.keyCornerRadius
+        emojiEntryBtn.layer.cornerCurve = .continuous
+        emojiEntryBtn.translatesAutoresizingMaskIntoConstraints = false
+        emojiEntryBtn.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        emojiEntryBtn.actionHandler = { [weak self] in
+            self?.onEvent?(.openSymbols)
+        }
+        leftSymbolStack.addArrangedSubview(emojiEntryBtn)
 
         let syms = isChineseMode ? chineseSideSymbols : englishSideSymbols
         for sym in syms {

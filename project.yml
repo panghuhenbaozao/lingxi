@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "5.7.0"
+    MARKETING_VERSION: "5.8.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
@@ -96,6 +96,8 @@ targets:
           - "Resources/**"
       - path: Keyboard/Resources/pinyin.sqlite
         buildPhase: resources
+      - path: Keyboard/Resources/supplement_lexicon.tsv
+        buildPhase: resources
       - path: Shared
     info:
       path: Keyboard/Info.plist
@@ -140,6 +142,8 @@ targets:
       - path: Shared
       - path: Keyboard/Engine
       - path: Keyboard/Resources/pinyin.sqlite
+        buildPhase: resources
+      - path: Keyboard/Resources/supplement_lexicon.tsv
         buildPhase: resources
     settings:
       base:

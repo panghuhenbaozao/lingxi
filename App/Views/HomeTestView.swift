@@ -141,9 +141,9 @@ struct HomeTestView: View {
                         appState.showPermissionsCenter = true
                     }
                     actionPill(
-                        bgVoice.isWarm ? "🟢 键盘语音在线" : "激活键盘语音",
+                        bgVoice.isWarm ? "🟢 后台语音增强在线" : "🎙️ 后台低延迟语音",
                         icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
-                        filled: !bgVoice.isWarm
+                        filled: false
                     ) {
                         if bgVoice.isWarm {
                             bgVoice.shutdown()
@@ -162,9 +162,9 @@ struct HomeTestView: View {
                         appState.showPermissionsCenter = true
                     }
                     actionPill(
-                        bgVoice.isWarm ? "🟢 键盘语音在线" : "激活键盘语音",
+                        bgVoice.isWarm ? "🟢 后台语音增强在线" : "🎙️ 后台低延迟语音",
                         icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
-                        filled: !bgVoice.isWarm
+                        filled: false
                     ) {
                         if bgVoice.isWarm {
                             bgVoice.shutdown()

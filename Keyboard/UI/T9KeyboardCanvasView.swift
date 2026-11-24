@@ -659,15 +659,25 @@ final class T9KeyboardCanvasView: UIView {
     }
 
     private func nearestKey(at point: CGPoint) -> T9KeyModel? {
+        guard !keyModels.isEmpty else { return nil }
         if let exact = keyModels.first(where: { $0.rect.contains(point) }) {
             return exact
         }
+        // 避开左侧音节滚动栏区域，对其余九宫格按键区执行无死区最近邻匹配，杜绝键缝漏按
+        if leftScroll.frame.insetBy(dx: -1, dy: -1).contains(point) {
+            return nil
+        }
+        guard gridHost.bounds.insetBy(dx: -8, dy: -8).contains(point) else { return nil }
         var best: T9KeyModel?
         var bestDist = CGFloat.infinity
-        for m in keyModels where m.rect.insetBy(dx: -8, dy: -8).contains(point) {
-            let dx = point.x - m.rect.midX
-            let dy = point.y - m.rect.midY
-            let d = dx * dx + dy * dy
+        for m in keyModels {
+            let clampedX = min(max(point.x, m.rect.minX), m.rect.maxX)
+            let clampedY = min(max(point.y, m.rect.minY), m.rect.maxY)
+            let dx = point.x - clampedX
+            let dy = point.y - clampedY
+            let cx = (point.x - m.rect.midX) * 0.15
+            let cy = (point.y - m.rect.midY) * 0.15
+            let d = dx * dx + dy * dy + cx * cx + cy * cy
             if d < bestDist {
                 bestDist = d
                 best = m

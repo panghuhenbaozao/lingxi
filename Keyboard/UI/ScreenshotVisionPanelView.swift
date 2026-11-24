@@ -80,6 +80,14 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         streamTask?.cancel()
     }
 
+    /// 内存吃紧且面板隐藏时释放已缓存的截屏位图，守住键盘 50MB Jetsam 红线。
+    func releaseTransientMemory() {
+        guard isHidden else { return }
+        capturedImage = nil
+        capturedJPEGData = nil
+        thumbImageView.image = nil
+    }
+
     private func setupViews() {
         thumbImageView.contentMode = .scaleAspectFill
         thumbImageView.clipsToBounds = true

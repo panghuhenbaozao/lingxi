@@ -2336,4 +2336,82 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(floats[2], -0.5, accuracy: 0.0001)
         XCTAssertGreaterThan(floats[3], 0.999)
     }
+
+    func testV580FullUnicodeCoverageZeroTruncAndNaturalTypingFeel() throws {
+        guard let dbURL = findTestDBURL() else {
+            throw XCTSkip("未找到测试词库 pinyin.sqlite")
+        }
+        let engine = PinyinEngine(databaseURL: dbURL)
+        var settings = LingxiSettings()
+        settings.userLearningEnabled = false
+        settings.geoLocationBoostEnabled = false
+
+        // 1. 全字库无截断检索：高频拥挤音节（yi/xuan/kun/rong/miao/zhe）与 Unicode 扩展生僻字（幵/龘/並/亂）100% 可打
+        let yiWords = Set(engine.query(raw: "yi", settings: settings).candidates.map(\.word))
+        for expectedYi in ["一", "衣", "祎", "翊", "熠", "懿", "肄", "劓", "壹", "薏"] {
+            XCTAssertTrue(yiWords.contains(expectedYi), "单音节 yi 应完整包含汉字 \(expectedYi)，不得被候选上限截断")
+        }
+        XCTAssertGreaterThanOrEqual(yiWords.filter { $0.count == 1 }.count, 140, "yi 应返回全部规范字与扩展生僻字")
+
+        let rareChecks: [(String, String)] = [
+            ("xuan", "煊"),
+            ("kun", "堃"),
+            ("rong", "镕"),
+            ("miao", "淼"),
+            ("zhe", "喆"),
+            ("jian", "幵"),
+            ("da", "龘"),
+            ("bing", "並"),
+        ]
+        for (py, ch) in rareChecks {
+            let words = Set(engine.query(raw: py, settings: settings).candidates.map(\.word))
+            XCTAssertTrue(words.contains(ch), "全拼 \(py) 必须能打出汉字 \(ch)")
+        }
+
+        // 2. 九宫格 T9 无截断校验：此前因 LIMIT 1200 丢失的 W/X/Y/Z 单字（煊/瑄/壹/薏/栀/祉）与扩展字全部恢复
+        let t9XuanWords = Set(engine.queryT9(digits: "9826", lockedSyllables: [], settings: settings).candidates.map(\.word))
+        XCTAssertTrue(t9XuanWords.contains("煊"), "T9 九宫格 9826(xuan) 必须包含 煊")
+        XCTAssertTrue(t9XuanWords.contains("瑄"), "T9 九宫格 9826(xuan) 必须包含 瑄")
+
+        let t9YiZhiWords = Set(engine.queryT9(digits: "94", lockedSyllables: [], settings: settings).candidates.map(\.word))
+        for ch in ["壹", "薏", "栀", "祉", "痔"] {
+            XCTAssertTrue(t9YiZhiWords.contains(ch), "T9 九宫格 94(yi/zhi) 必须包含 \(ch)")
+        }
+        let t9DaWords = Set(engine.queryT9(digits: "32", lockedSyllables: [], settings: settings).candidates.map(\.word))
+        XCTAssertTrue(t9DaWords.contains("龘"), "T9 九宫格 32(da) 必须能打出 龘")
+
+        // 3. 现代口语热词补充词包（全拼、简拼、九宫格同步生效）
+        XCTAssertEqual(engine.query(raw: "aduiduidui", settings: settings).candidates.first?.word, "啊对对对")
+        XCTAssertTrue(engine.query(raw: "addd", settings: settings).candidates.prefix(3).contains(where: { $0.word == "啊对对对" }))
+        XCTAssertEqual(engine.query(raw: "yiduluanhui", settings: settings).candidates.first?.word, "已读乱回")
+        XCTAssertEqual(engine.query(raw: "jushenzhineng", settings: settings).candidates.first?.word, "具身智能")
+
+        // 4. 自然打字手感：正常多词短语绝不被邻键纠错劫持，而真实错拼依然精准纠正
+        let naturalPhrases: [(String, String)] = [
+            ("tashuo", "他说"),
+            ("quna", "去哪"),
+            ("woxiangquchifan", "我想去吃饭"),
+        ]
+        for (raw, expected) in naturalPhrases {
+            let res = engine.query(raw: raw, settings: settings)
+            XCTAssertNil(res.correctedHint, "正常合法短语 \(raw) 不得被误判为错拼")
+            XCTAssertEqual(res.candidates.first?.word, expected, "\(raw) 首选应保持 \(expected)")
+        }
+
+        XCTAssertEqual(engine.query(raw: "meiyuo", settings: settings).candidates.first?.word, "没有")
+        XCTAssertEqual(engine.query(raw: "shengme", settings: settings).candidates.first?.word, "什么")
+        XCTAssertEqual(engine.query(raw: "mihao", settings: settings).candidates.first?.word, "你好")
+        XCTAssertEqual(engine.query(raw: "zidao", settings: settings).candidates.first?.word, "知道")
+
+        // 5. 简拼动态热区集合：首字母后必须包含全部合法声母，杜绝 nh/wm/zd 简拼漂移到元音键
+        let seg = PinyinSegmenter()
+        XCTAssertTrue(seg.validNextLetters(for: "n", scheme: .quanpin).contains("h"))
+        XCTAssertTrue(seg.validNextLetters(for: "w", scheme: .quanpin).contains("m"))
+        XCTAssertTrue(seg.validNextLetters(for: "z", scheme: .quanpin).contains("d"))
+
+        // 6. 顶栏新增表情符号入口及旧版配置向后兼容
+        XCTAssertTrue(ToolbarButtonID.allCases.contains(.emoji))
+        let legacyDecoded = try JSONDecoder().decode(LingxiSettings.self, from: Data("{\"toolbarLayout\":[{\"buttonID\":\"ai\",\"isVisible\":true,\"order\":0}]}".utf8))
+        XCTAssertTrue(legacyDecoded.toolbarLayout.contains(where: { $0.buttonID == .emoji && $0.isVisible }))
+    }
 }

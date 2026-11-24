@@ -494,8 +494,25 @@ final class VoiceInputPanelView: UIView {
 
     private func startLiveSpeechRecognizerIfAuthorized() {
         stopSpeechRecognizer(finish: false)
-        guard SFSpeechRecognizer.authorizationStatus() == .authorized,
-              let recognizer = SFSpeechRecognizer(locale: Locale(identifier: mode.sourceLocaleID)),
+        let status = SFSpeechRecognizer.authorizationStatus()
+        switch status {
+        case .authorized:
+            attachSpeechRecognitionSession()
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization { [weak self] newStatus in
+                DispatchQueue.main.async {
+                    guard let self, newStatus == .authorized, (self.isStartingMic || self.isRecording) else { return }
+                    self.attachSpeechRecognitionSession()
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    private func attachSpeechRecognitionSession() {
+        stopSpeechRecognizer(finish: false)
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: mode.sourceLocaleID)),
               recognizer.isAvailable else {
             return
         }

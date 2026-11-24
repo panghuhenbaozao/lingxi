@@ -38,7 +38,8 @@ final class CustomWordStore {
 
     static func load(force: Bool = false) -> [CustomWordEntry] {
         let now = CFAbsoluteTimeGetCurrent()
-        if !force, let cached, now - lastStatCheckTime < 2.5 {
+        // 打字热路径 10 秒内纯内存直返，彻底杜绝逐键磁盘 stat 开销
+        if !force, let cached, now - lastStatCheckTime < 10.0 {
             return cached
         }
         lastStatCheckTime = now

@@ -1057,39 +1057,34 @@ final class KeyboardCanvasView: UIView {
     }
 
     private func nearestKey(at point: CGPoint) -> KeyModel? {
-        // 1. 若落点位于按键核心内圈（留出 1.5pt 键缝缓冲），直接命中该键
-        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 1.5, dy: 1.5).contains(point) }) {
+        guard !keys.isEmpty else { return nil }
+        // 1. 若落点位于按键核心内圈（留出 1.2pt 极窄边缘缓冲），100% 忠实命中手指视觉按键，绝不漂移
+        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 1.2, dy: 1.2).contains(point) }) {
             return coreHit
         }
-        // 2. 边缘/键缝区域：紧凑扩边（Apple 原生手感 ~5pt/键宽，防误触抢占邻键）
-        //    + 动态下一合法拼音按键热区加权（降低 26% 有效距离）
-        let gridW = keysContainer.bounds.width
-        let gridH = keysContainer.bounds.height
+        // 2. 键缝与边缘区域（含 A 左侧、L 右侧、Shift-Z 与 M-⌫ 间隙）：
+        //    采用 Apple 原生键盘同款全画布无死区最近邻（Voronoi）划分 + 温和拼音防误触（0.86 轻量领带消歧），
+        //    彻底消灭按键缝隙漏字/吞键与简拼按键漂移感！
+        let gridBounds = keysContainer.bounds.insetBy(dx: -8, dy: -10)
+        guard gridBounds.contains(point) else { return nil }
+
         let useDynamicBias = settings.dynamicKeyHitBoxEnabled && !validNextLetters.isEmpty && !isEnglishMode
         var best: KeyModel?
         var bestDist = CGFloat.infinity
         for key in keys {
-            var hitRect = key.rect.insetBy(dx: -3, dy: -5)
-            if key.id == "k_a" {
-                hitRect = CGRect(x: 0, y: hitRect.minY, width: hitRect.maxX, height: hitRect.height)
-            } else if key.id == "k_l" {
-                hitRect = CGRect(x: hitRect.minX, y: hitRect.minY, width: max(hitRect.width, gridW - hitRect.minX), height: hitRect.height)
-            } else if key.id == "k_123" {
-                hitRect = CGRect(x: 0, y: hitRect.minY, width: hitRect.maxX, height: max(hitRect.height, gridH - hitRect.minY))
-            } else if key.id == "k_return" {
-                hitRect = CGRect(x: hitRect.minX, y: hitRect.minY, width: max(hitRect.width, gridW - hitRect.minX), height: max(hitRect.height, gridH - hitRect.minY))
-            } else if key.id == "k_space" {
-                hitRect = key.rect.insetBy(dx: -2, dy: -4)
-            }
-            guard hitRect.contains(point) else { continue }
-            let dx = point.x - key.rect.midX
-            let dy = point.y - key.rect.midY
-            var dist = dx * dx + dy * dy
+            // 计算点到按键边缘+中心混合距离：大键（如空格、回车、退格、Shift）按实际键帽矩形边缘度量，防止空格中心过远被误判给上排字母
+            let clampedX = min(max(point.x, key.rect.minX), key.rect.maxX)
+            let clampedY = min(max(point.y, key.rect.minY), key.rect.maxY)
+            let edgeDX = point.x - clampedX
+            let edgeDY = point.y - clampedY
+            let centerDX = (point.x - key.rect.midX) * 0.18
+            let centerDY = (point.y - key.rect.midY) * 0.18
+            var dist = edgeDX * edgeDX + edgeDY * edgeDY + centerDX * centerDX + centerDY * centerDY
             if useDynamicBias,
                case .character(let primary, _, _, _) = key.kind,
                let ch = primary.lowercased().first,
                validNextLetters.contains(ch) {
-                dist *= 0.74
+                dist *= 0.86
             }
             if dist < bestDist {
                 bestDist = dist

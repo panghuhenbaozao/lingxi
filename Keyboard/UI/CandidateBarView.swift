@@ -220,7 +220,7 @@ final class CandidateBarView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        let visibleCount = min(candidates.count, 36)
+        let visibleCount = min(candidates.count, 64)
 
         for idx in 0..<visibleCount {
             let cand = candidates[idx]
@@ -265,15 +265,10 @@ final class CandidateBarView: UIView {
                 btn.setTitleColor(mainColor, for: .normal)
             }
             btn.backgroundColor = isPrimary
-                ? theme.candidateHighlight.withAlphaComponent(0.12)
+                ? theme.candidateHighlight.withAlphaComponent(0.13)
                 : .clear
-            // 轻盈中选态：首选淡底+主题色文字，次选补 hairline 边框，层次分明不压抑
-            if isPrimary {
-                btn.layer.borderWidth = 0
-            } else {
-                btn.layer.borderWidth = 0.5
-                btn.layer.borderColor = theme.keyFill.withAlphaComponent(0.28).cgColor
-            }
+            // 对齐微信输入法 / iOS 原生极简通透候选栏：首选胶囊高亮，次选无繁琐方框干扰视线
+            btn.layer.borderWidth = 0
             lp.isEnabled = (cand.source == .dictionary || cand.source == .userLearned)
         }
 
@@ -331,6 +326,7 @@ final class ExpandedCandidatesView: UIView {
     private let scrollView = LingxiScrollView()
     private let gridContainer = UIView()
     private let emptyHintLabel = UILabel()
+    private var gridButtonPool: [UIButton] = []
     private var allCandidates: [PinyinCandidate] = []
     private var visibleIndices: [Int] = []
     private var currentFilter: Filter = .all
@@ -447,12 +443,29 @@ final class ExpandedCandidatesView: UIView {
         setNeedsLayout()
     }
 
+    private func ensureGridButton(at idx: Int) -> UIButton {
+        while gridButtonPool.count <= idx {
+            let btn = UIButton(type: .custom)
+            btn.titleLabel?.lineBreakMode = .byTruncatingTail
+            btn.layer.cornerRadius = 8
+            btn.layer.cornerCurve = .continuous
+            btn.contentEdgeInsets = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+            btn.addTarget(self, action: #selector(handleTap(_:)), for: .touchUpInside)
+
+            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+            lp.minimumPressDuration = 0.45
+            btn.addGestureRecognizer(lp)
+            gridContainer.addSubview(btn)
+            gridButtonPool.append(btn)
+        }
+        return gridButtonPool[idx]
+    }
+
     private func rebuildButtons() {
-        // 关闭隐式动画，避免按钮移除/重建过程在动画上下文中闪烁
+        // 复用按钮池并关闭隐式动画：即使展开 400+ 同音生僻单字或切换声调筛选，也能 0 分配毫秒级秒切
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        gridContainer.subviews.forEach { $0.removeFromSuperview() }
         guard let theme else { return }
 
         visibleIndices = allCandidates.indices.filter { idx in
@@ -470,10 +483,10 @@ final class ExpandedCandidatesView: UIView {
         }
         emptyHintLabel.isHidden = !visibleIndices.isEmpty
 
-        for origIdx in visibleIndices {
+        for (poolIdx, origIdx) in visibleIndices.enumerated() {
             let cand = allCandidates[origIdx]
-            // 防闪烁：使用 .custom 而非 .system——system 按钮在 setTitle/setAttributedTitle 时触发内置标题淡入淡出动画（UIView 层级，CATransaction 禁不掉），逐键刷新即闪烁；.custom 无此动画
-            let btn = UIButton(type: .custom)
+            let btn = ensureGridButton(at: poolIdx)
+            btn.isHidden = false
             btn.tag = origIdx
             let mainFont = UIFont.systemFont(ofSize: candidateFontSize + 0.5, weight: origIdx == 0 ? .semibold : .regular)
             let mainColor = origIdx == 0 ? theme.candidateHighlight : theme.candidateText
@@ -489,22 +502,18 @@ final class ExpandedCandidatesView: UIView {
                         .foregroundColor: theme.keyHintText,
                     ]
                 ))
+                btn.setTitle(nil, for: .normal)
                 btn.setAttributedTitle(attr, for: .normal)
             } else {
+                btn.setAttributedTitle(nil, for: .normal)
                 btn.setTitle(cand.word, for: .normal)
                 btn.titleLabel?.font = mainFont
                 btn.setTitleColor(mainColor, for: .normal)
             }
-            btn.titleLabel?.lineBreakMode = .byTruncatingTail
-            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.75)
-            btn.layer.cornerRadius = 8
-            btn.contentEdgeInsets = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-            btn.addTarget(self, action: #selector(handleTap(_:)), for: .touchUpInside)
-
-            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-            lp.minimumPressDuration = 0.45
-            btn.addGestureRecognizer(lp)
-            gridContainer.addSubview(btn)
+            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.78)
+        }
+        for idx in visibleIndices.count..<gridButtonPool.count {
+            gridButtonPool[idx].isHidden = true
         }
         setNeedsLayout()
     }
@@ -517,9 +526,10 @@ final class ExpandedCandidatesView: UIView {
         var y: CGFloat = padding
         let rowHeight: CGFloat = candidateFontSize + 21.5
 
-        for sub in gridContainer.subviews {
+        for idx in 0..<min(visibleIndices.count, gridButtonPool.count) {
+            let sub = gridButtonPool[idx]
             let intrinsic = sub.sizeThatFits(CGSize(width: maxWidth, height: rowHeight))
-            let width = min(maxWidth, max(48, intrinsic.width))
+            let width = min(maxWidth, max(46, intrinsic.width))
             if x + width > bounds.width - padding && x > padding {
                 x = padding
                 y += rowHeight + spacing
@@ -527,7 +537,7 @@ final class ExpandedCandidatesView: UIView {
             sub.frame = CGRect(x: x, y: y, width: width, height: rowHeight)
             x += width + spacing
         }
-        let totalHeight = y + rowHeight + padding
+        let totalHeight = visibleIndices.isEmpty ? scrollView.bounds.height : (y + rowHeight + padding)
         gridContainer.frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(scrollView.bounds.height, totalHeight))
         scrollView.contentSize = gridContainer.frame.size
     }

@@ -377,6 +377,8 @@ final class PinyinSegmenter {
     }
 
     /// 预测当前拼音末尾之后可能合法延续的下一个按键集合（供键盘动态热区防误触使用，0.02ms 级）。
+    /// 注意：中文输入随时允许简拼/混拼开启新音节（如 `nh` 你好、`wm` 我们、`zd` 知道），
+    /// 因此不能把合法声母排除在热区之外（仅排除 `i/u/v` 等无法独立起首音节的孤立字母），彻底消除简拼按键漂移感！
     func validNextLetters(for raw: String, scheme: InputScheme) -> Set<Character> {
         let lower = raw.lowercased()
         guard !lower.isEmpty, scheme == .quanpin else { return [] }
@@ -384,16 +386,11 @@ final class PinyinSegmenter {
               let last = seg.last else { return [] }
 
         var valid = Set<Character>()
-        if last.kind == .partial {
-            let p = last.text
-            for pref in prefixes where pref.count == p.count + 1 && pref.hasPrefix(p) {
-                if let ch = pref.last { valid.insert(ch) }
-            }
-        } else if last.kind == .complete {
-            let p = last.text
-            for pref in prefixes where pref.count == p.count + 1 && pref.hasPrefix(p) {
-                if let ch = pref.last { valid.insert(ch) }
-            }
+        let p = last.text
+        for pref in prefixes where pref.count == p.count + 1 && pref.hasPrefix(p) {
+            if let ch = pref.last { valid.insert(ch) }
+        }
+        if last.kind == .complete || (last.kind == .partial && p.count <= 2) {
             for ch in "bpmfdtnlgkhjqxrzcsywaoe" {
                 valid.insert(ch)
             }

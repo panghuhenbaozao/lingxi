@@ -89,7 +89,8 @@ struct GeoLocationContext: Codable, Equatable {
 
     static func load(force: Bool = false) -> GeoLocationContext {
         let now = CFAbsoluteTimeGetCurrent()
-        if !force, let cached, now - lastStatCheckTime < 2.5 {
+        // 打字热路径 10 秒内纯内存直返，彻底消除每次敲键的磁盘 stat 系统调用开销
+        if !force, let cached, now - lastStatCheckTime < 10.0 {
             return cached
         }
         lastStatCheckTime = now

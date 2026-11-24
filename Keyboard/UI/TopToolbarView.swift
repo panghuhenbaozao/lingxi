@@ -29,6 +29,7 @@ final class TopToolbarView: UIView {
         case toggleTranslateTone
         case commitTranslatedText
         case commitTranslateSource
+        case toggleEmoji
         case toggleClipboard
         case toggleEditPad
         case toggleQuickSettings
@@ -78,6 +79,7 @@ final class TopToolbarView: UIView {
     private let translateButton = UIButton(type: .system)
     private let screenshotButton = UIButton(type: .system)
     private let voiceButton = UIButton(type: .system)
+    private let emojiButton = UIButton(type: .system)
     private let clipboardButton = UIButton(type: .system)
     private let layoutButton = UIButton(type: .system)
     private let editPadButton = UIButton(type: .system)
@@ -243,7 +245,14 @@ final class TopToolbarView: UIView {
             action: #selector(didTapVoice)
         )
 
-        // 右侧工具胶囊：撤销、九键切换、剪贴板、快捷设置
+        // 右侧工具胶囊：表情符号、撤销、九键切换、剪贴板、快捷设置
+        configureUtilityButton(
+            emojiButton,
+            title: nil,
+            symbol: "face.smiling",
+            accessibilityLabel: "表情与符号面板",
+            action: #selector(didTapEmoji)
+        )
         configureUtilityButton(
             clipboardButton,
             title: nil,
@@ -298,7 +307,7 @@ final class TopToolbarView: UIView {
         leftClusterStack.addArrangedSubview(translateButton)
         leftClusterStack.addArrangedSubview(screenshotButton)
         leftClusterStack.addArrangedSubview(voiceButton)
-        [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton, dismissKeyboardButton].forEach {
+        [undoButton, emojiButton, layoutButton, editPadButton, clipboardButton, settingsButton, dismissKeyboardButton].forEach {
             rightClusterStack.addArrangedSubview($0)
         }
 
@@ -487,6 +496,7 @@ final class TopToolbarView: UIView {
         case .translate: return translateButton
         case .screenshot: return screenshotButton
         case .voice: return voiceButton
+        case .emoji: return emojiButton
         case .clipboard: return clipboardButton
         case .layout: return layoutButton
         case .editPad: return editPadButton
@@ -674,7 +684,7 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        for btn in [screenshotButton, voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
+        for btn in [screenshotButton, voiceButton, emojiButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
@@ -1194,6 +1204,7 @@ final class TopToolbarView: UIView {
     @objc private func didTapTranslate() { onAction?(.toggleTranslateMode) }
     @objc private func didTapScreenshot() { onAction?(.openScreenshotAI) }
     @objc private func didTapVoice() { onAction?(.openVoiceTranslator) }
+    @objc private func didTapEmoji() { onAction?(.toggleEmoji) }
     @objc private func didTapClipboard() { onAction?(.toggleClipboard) }
     @objc private func didTapLayout() { onAction?(.toggleLayoutQuick) }
     @objc private func didTapEditPad() { onAction?(.toggleEditPad) }

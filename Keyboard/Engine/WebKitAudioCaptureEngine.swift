@@ -122,6 +122,33 @@ final class WebKitAudioCaptureEngine: NSObject, WKUIDelegate, WKNavigationDelega
         }
     }
 
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // 系统在极端内存压力下回收了后台 WebContent 进程：自动重置句柄，下次点击毫秒级重建不黑屏不静默失效！
+        let wasActive = wantsCapture || isCapturing
+        teardown()
+        if wasActive {
+            onError?("WebContentTerminated", "系统回收了后台音频通道，请再点一次「开始说话」即可重新开麦")
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        isPageReady = false
+        if wantsCapture {
+            wantsCapture = false
+            isCapturing = false
+            onError?("NavigationFailed", "音频页面加载失败：\(error.localizedDescription)")
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        isPageReady = false
+        if wantsCapture {
+            wantsCapture = false
+            isCapturing = false
+            onError?("ProvisionalNavFailed", "音频环境初始化失败：\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - WKUIDelegate（自动放行本域麦克风权限，避免弹出网页重复询问框）
 
     @available(iOS 15.0, *)

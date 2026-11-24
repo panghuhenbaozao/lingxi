@@ -14,6 +14,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private enum ActivePanel {
         case letters
         case numbers
+        case emoji
         case clipboard
         case ai
         case voice
@@ -50,15 +51,122 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
     private let bodyContainer = UIView()
     private let lettersCanvas = KeyboardCanvasView()
-    private let t9Canvas = T9KeyboardCanvasView()
-    private let numberPad = NumberPadView()
-    private let expandedCandidates = ExpandedCandidatesView()
-    private let clipboardPanel = ClipboardPanelView()
-    private let aiPanel = AIAssistantPanelView()
-    private let voicePanel = VoiceInputPanelView()
-    private let screenshotPanel = ScreenshotVisionPanelView()
-    private let quickSettingsPanel = QuickSettingsSheetView()
-    private let editPadPanel = TextEditingPadView()
+
+    // 按需懒加载与懒挂载子面板：冷启动仅实例化当前主键盘画布，彻底砍掉微信唤起键盘时一次性初始化 10 个复杂面板的卡顿与内存开销！
+    private var mountedSubpanels = Set<ObjectIdentifier>()
+    private var hasCreatedT9Canvas = false
+    private var hasCreatedNumberPad = false
+    private var hasCreatedExpandedCandidates = false
+    private var hasCreatedEmojiPanel = false
+    private var hasCreatedClipboardPanel = false
+    private var hasCreatedAIPanel = false
+    private var hasCreatedVoicePanel = false
+    private var hasCreatedScreenshotPanel = false
+    private var hasCreatedQuickSettingsPanel = false
+    private var hasCreatedEditPadPanel = false
+
+    private lazy var t9Canvas: T9KeyboardCanvasView = {
+        hasCreatedT9Canvas = true
+        let v = T9KeyboardCanvasView()
+        v.onEvent = { [weak self] event in self?.handleT9Event(event) }
+        return v
+    }()
+    private lazy var numberPad: NumberPadView = {
+        hasCreatedNumberPad = true
+        let v = NumberPadView()
+        v.onEvent = { [weak self] event in self?.handleNumberPadEvent(event) }
+        return v
+    }()
+    private lazy var expandedCandidates: ExpandedCandidatesView = {
+        hasCreatedExpandedCandidates = true
+        let v = ExpandedCandidatesView()
+        v.apply(theme: resolvedTheme)
+        v.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
+        v.onSelectCandidate = { [weak self] idx in self?.selectCandidate(at: idx) }
+        v.onLongPressCandidate = { [weak self] idx, _ in self?.handleLongPressCandidate(at: idx) }
+        v.onClose = { [weak self] in
+            guard let self else { return }
+            self.isCandidatesExpanded = false
+            self.updateVisiblePanel()
+            self.refreshToolbar()
+        }
+        return v
+    }()
+    private lazy var emojiPanel: EmojiSymbolPanelView = {
+        hasCreatedEmojiPanel = true
+        let v = EmojiSymbolPanelView()
+        v.onInsertText = { [weak self] text in
+            guard let self else { return }
+            self.markUserKeystroke()
+            self.lastSpaceTapTime = 0
+            self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.insertFinalText(text, checkPairing: false)
+            self.updateIdleSuggestions()
+        }
+        v.onBackspace = { [weak self] in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .delete, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.performBackspace(isRepeat: false)
+        }
+        v.onSpace = { [weak self] in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.insertFinalText(" ", checkPairing: false)
+        }
+        v.onClose = { [weak self] in
+            self?.switchToPanel(.letters)
+        }
+        return v
+    }()
+    private lazy var clipboardPanel: ClipboardPanelView = {
+        hasCreatedClipboardPanel = true
+        let v = ClipboardPanelView()
+        wireClipboardPanel(v)
+        return v
+    }()
+    private lazy var aiPanel: AIAssistantPanelView = {
+        hasCreatedAIPanel = true
+        let v = AIAssistantPanelView()
+        wireAIPanel(v)
+        return v
+    }()
+    private lazy var voicePanel: VoiceInputPanelView = {
+        hasCreatedVoicePanel = true
+        let v = VoiceInputPanelView()
+        wireVoicePanel(v)
+        return v
+    }()
+    private lazy var screenshotPanel: ScreenshotVisionPanelView = {
+        hasCreatedScreenshotPanel = true
+        let v = ScreenshotVisionPanelView()
+        wireScreenshotPanel(v)
+        return v
+    }()
+    private lazy var quickSettingsPanel: QuickSettingsSheetView = {
+        hasCreatedQuickSettingsPanel = true
+        let v = QuickSettingsSheetView()
+        wireQuickSettingsPanel(v)
+        return v
+    }()
+    private lazy var editPadPanel: TextEditingPadView = {
+        hasCreatedEditPadPanel = true
+        let v = TextEditingPadView()
+        v.apply(theme: resolvedTheme)
+        v.onAction = { [weak self] action in self?.handleEditPadAction(action) }
+        v.onClose = { [weak self] in self?.switchToPanel(.letters) }
+        return v
+    }()
+
+    /// 宿主输入框轻量内存快照：将拼音连续敲键期间的跨进程同步 XPC IPC 调用从 7 次/键直接降至 0 次/键！
+    private struct HostContextSnapshot {
+        var beforeInput: String?
+        var selectedText: String?
+        var keyboardType: UIKeyboardType = .default
+        var returnKeyType: UIReturnKeyType = .default
+        var isSecure: Bool = false
+        var isValid: Bool = false
+    }
+    private var hostSnapshot = HostContextSnapshot()
 
     private struct PendingDetectedScreenshot {
         let image: UIImage
@@ -203,6 +311,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        refreshHostContextSnapshot(includeSelection: true)
         if !AppGroup.isAvailable && hasFullAccess {
             tryImportBridgeTokenFromPasteboardIfPresent()
         }
@@ -214,9 +323,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         refreshClipboardState()
         updateReturnKeyAppearance()
         autoCapitalizeIfNeeded()
-        if activePanel == .ai {
+        if activePanel == .ai && hasCreatedAIPanel {
             aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
-        } else if activePanel == .voice {
+        } else if activePanel == .voice && hasCreatedVoicePanel {
             voicePanel.refreshEngineStatus(hasFullAccess: hasFullAccess)
         }
         registerPhotoScreenshotObserverIfNeeded()
@@ -228,8 +337,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        voicePanel.stopAllRecording(runFinalTranslate: false)
-        voicePanel.teardownWebAudio()
+        if hasCreatedVoicePanel {
+            voicePanel.stopAllRecording(runFinalTranslate: false)
+            voicePanel.teardownWebAudio()
+        }
         TypingStatsStore.shared.flush()
         flushTypingHabitSessionIfNeeded()
         TouchOffsetCalibrator.shared.flush()
@@ -354,14 +465,43 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         engine?.releaseMemory()
+        if hasCreatedVoicePanel && activePanel != .voice {
+            voicePanel.teardownWebAudio()
+        }
+        if hasCreatedScreenshotPanel {
+            screenshotPanel.releaseTransientMemory()
+        }
         translateCache.removeAll(keepingCapacity: false)
         translateCacheOrder.removeAll(keepingCapacity: false)
     }
 
+    private func refreshHostContextSnapshot(includeSelection: Bool = false) {
+        let proxy = textDocumentProxy
+        hostSnapshot.beforeInput = proxy.documentContextBeforeInput
+        if includeSelection {
+            hostSnapshot.selectedText = proxy.selectedText
+        }
+        hostSnapshot.keyboardType = proxy.keyboardType ?? .default
+        hostSnapshot.returnKeyType = proxy.returnKeyType ?? .default
+        hostSnapshot.isSecure = (proxy.isSecureTextEntry == true)
+        hostSnapshot.isValid = true
+    }
+
+    private func invalidateHostContextSnapshot() {
+        hostSnapshot.isValid = false
+    }
+
+    private func ensureHostSnapshot() {
+        if !hostSnapshot.isValid {
+            refreshHostContextSnapshot(includeSelection: false)
+        }
+    }
+
     private var currentHostFieldSignature: String {
-        let kb = (textDocumentProxy.keyboardType ?? .default).rawValue
-        let ret = (textDocumentProxy.returnKeyType ?? .default).rawValue
-        return "\(kb)|\(ret)|\(isSecureField)"
+        ensureHostSnapshot()
+        let kb = hostSnapshot.keyboardType.rawValue
+        let ret = hostSnapshot.returnKeyType.rawValue
+        return "\(kb)|\(ret)|\(hostSnapshot.isSecure)"
     }
 
     private func markUserKeystroke() {
@@ -370,6 +510,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        refreshHostContextSnapshot(includeSelection: rawComposing.isEmpty && englishComposing.isEmpty)
         let now = CACurrentMediaTime()
         let fieldSig = currentHostFieldSignature
         let hostFieldChanged = !lastHostFieldSignature.isEmpty && lastHostFieldSignature != fieldSig
@@ -414,7 +555,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 // 保护正在输入中的中文/拼音不被发送后的异步 textDidChange 误清空（彻底根治点发送后莫名吞字）
                 if InputStabilityGuard.shouldClearEnglishComposingOnTextDidChange(
                     englishComposing: englishComposing,
-                    documentBeforeInput: textDocumentProxy.documentContextBeforeInput,
+                    documentBeforeInput: hostSnapshot.beforeInput,
                     hostFieldChanged: hostFieldChanged,
                     secondsSinceLastInternalEdit: sinceInternalEdit,
                     secondsSinceLastKeystroke: sinceKeystroke,
@@ -494,27 +635,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             bodyContainer.bottomAnchor.constraint(equalTo: rootContainer.bottomAnchor),
         ])
 
-        let subpanels: [UIView] = [
-            lettersCanvas,
-            t9Canvas,
-            numberPad,
-            expandedCandidates,
-            clipboardPanel,
-            aiPanel,
-            voicePanel,
-            screenshotPanel,
-            quickSettingsPanel,
-            editPadPanel,
-        ]
-        for panel in subpanels {
-            panel.translatesAutoresizingMaskIntoConstraints = false
-            bodyContainer.addSubview(panel)
-            NSLayoutConstraint.activate([
-                panel.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
-                panel.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
-                panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-                panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
-            ])
+        mountSubpanelIfNeeded(lettersCanvas)
+        if isUsingT9Layout {
+            mountSubpanelIfNeeded(t9Canvas)
         }
 
         let totalH = effectiveToolbarHeight + CGFloat(settings.heightPreset.bodyHeight)
@@ -524,6 +647,19 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         self.heightConstraint = hc
 
         updateVisiblePanel()
+    }
+
+    private func mountSubpanelIfNeeded(_ panel: UIView) {
+        let oid = ObjectIdentifier(panel)
+        guard mountedSubpanels.insert(oid).inserted else { return }
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        bodyContainer.addSubview(panel)
+        NSLayoutConstraint.activate([
+            panel.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
+            panel.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
+            panel.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
+        ])
     }
 
     private func preloadEngine() {
@@ -585,18 +721,26 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private var activeContextBeforeCursor: String? {
-        aiPromptDraft ?? (isTranslateMode ? translateSourceBuffer : textDocumentProxy.documentContextBeforeInput)
+        if let draft = aiPromptDraft { return draft }
+        if isTranslateMode { return translateSourceBuffer }
+        ensureHostSnapshot()
+        return hostSnapshot.beforeInput
     }
 
     private var isSecureField: Bool {
-        textDocumentProxy.isSecureTextEntry == true
+        ensureHostSnapshot()
+        return hostSnapshot.isSecure
+    }
+
+    private var cachedKeyboardType: UIKeyboardType {
+        ensureHostSnapshot()
+        return hostSnapshot.keyboardType
     }
 
     /// 密码框、邮箱、网址输入框中不自动插入中英/中数盘古空格（对齐 WowType `autospace.rs`）。
     private var shouldAllowPanguSpace: Bool {
         guard !isSecureField else { return false }
-        let kbType = textDocumentProxy.keyboardType ?? .default
-        switch kbType {
+        switch cachedKeyboardType {
         case .emailAddress, .URL, .webSearch, .twitter, .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad:
             return false
         default:
@@ -606,7 +750,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     /// 根据宿主输入框的 `keyboardType` 与密码属性自动适配面板与隐私策略。
     private func adaptToHostTraits() {
-        let kbType = textDocumentProxy.keyboardType ?? .default
+        let kbType = cachedKeyboardType
         let sig = "\(kbType.rawValue)-\(isSecureField)"
         guard sig != lastAdaptedTraitSignature else { return }
         lastAdaptedTraitSignature = sig
@@ -647,20 +791,20 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
         let bodyH: CGFloat
         if activePanel == .ai {
-            if aiPanel.isExpandedReadingHeight {
+            if hasCreatedAIPanel && aiPanel.isExpandedReadingHeight {
                 bodyH = isCompactLandscape ? max(baseH, 218) : max(baseH, 380)
             } else {
                 bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 312)
             }
         } else if activePanel == .screenshot {
-            if screenshotPanel.isExpandedReadingHeight {
+            if hasCreatedScreenshotPanel && screenshotPanel.isExpandedReadingHeight {
                 bodyH = isCompactLandscape ? max(baseH, 218) : max(baseH, 380)
             } else {
                 bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 316)
             }
         } else if activePanel == .voice {
             bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 296)
-        } else if activePanel == .clipboard {
+        } else if activePanel == .clipboard || activePanel == .emoji {
             bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 268)
         } else {
             bodyH = baseH
@@ -923,7 +1067,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         toolbarView.onToggleExpandCandidates = { [weak self] in
             guard let self else { return }
             self.isCandidatesExpanded.toggle()
-            self.expandedCandidates.update(candidates: self.currentCandidates)
+            if self.isCandidatesExpanded {
+                self.mountSubpanelIfNeeded(self.expandedCandidates)
+                self.expandedCandidates.update(candidates: self.currentCandidates)
+            }
             self.updateVisiblePanel()
             self.refreshToolbar()
         }
@@ -931,77 +1078,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             self?.handleToolbarAction(action)
         }
 
-        expandedCandidates.onSelectCandidate = { [weak self] idx in
-            self?.selectCandidate(at: idx)
-        }
-        expandedCandidates.onLongPressCandidate = { [weak self] idx, _ in
-            self?.handleLongPressCandidate(at: idx)
-        }
-        expandedCandidates.onClose = { [weak self] in
-            guard let self else { return }
-            self.isCandidatesExpanded = false
-            self.updateVisiblePanel()
-            self.refreshToolbar()
-        }
-
         lettersCanvas.onEvent = { [weak self] event in
             self?.handleCanvasEvent(event)
         }
 
-        t9Canvas.onEvent = { [weak self] event in
-            self?.handleT9Event(event)
-        }
-
-        numberPad.onEvent = { [weak self] event in
-            self?.handleNumberPadEvent(event)
-        }
-
-        clipboardPanel.onInsertText = { [weak self] text in
-            guard let self else { return }
-            self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            let rendered = DynamicTemplateEngine.render(
-                text,
-                clipboard: ClipboardStore.items().first?.text,
-                selectedText: self.textDocumentProxy.selectedText
-            )
-            self.insertFinalText(rendered, checkPairing: false)
-        }
-        clipboardPanel.onSendToAI = { [weak self] text in
-            self?.openAIPanel(preferredAction: .replyClipboard, explicitClipboard: text)
-        }
-        clipboardPanel.onStylishFontChanged = { [weak self] style in
-            guard let self else { return }
-            self.settings.stylishFontID = style.rawValue
-            self.settings.save()
-        }
-        clipboardPanel.onClose = { [weak self] in
-            self?.switchToPanel(.letters)
-        }
-
-        aiPanel.onInsertText = { [weak self] text in
-            guard let self else { return }
-            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.exitTransientAIAndTranslateModes()
-            self.lastAIInsertedText = text
-            self.insertDirectlyIntoHost(text)
-            self.switchToPanel(.letters)
-        }
-        aiPanel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
-            guard let self else { return }
-            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.exitTransientAIAndTranslateModes()
-            self.lastAIInsertedText = replacement
-            self.performEdit {
-                for _ in 0..<deleteCount {
-                    self.textDocumentProxy.deleteBackward()
-                }
-                self.textDocumentProxy.insertText(replacement)
-            }
-            if self.shouldAllowPanguSpace, self.settings.typingStatsEnabled, !replacement.isEmpty {
-                TypingStatsStore.shared.recordCommit(text: replacement)
-            }
-            self.switchToPanel(.letters)
-        }
         liveDockView.onAction = { [weak self] action in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
@@ -1070,15 +1150,66 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 self.aiPanel.prepare(
                     theme: self.resolvedTheme,
                     hasFullAccess: self.hasFullAccess,
-                    beforeCursor: self.textDocumentProxy.documentContextBeforeInput ?? "",
+                    beforeCursor: self.hostSnapshot.beforeInput ?? "",
                     clipboardText: nil,
                     preferredAction: nil,
                     preservedDraft: draft
                 )
             }
         }
+    }
 
-        aiPanel.onBeginTypingPrompt = { [weak self] existingDraft in
+    private func wireClipboardPanel(_ panel: ClipboardPanelView) {
+        panel.onInsertText = { [weak self] text in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            let rendered = DynamicTemplateEngine.render(
+                text,
+                clipboard: ClipboardStore.items().first?.text,
+                selectedText: self.textDocumentProxy.selectedText
+            )
+            self.insertFinalText(rendered, checkPairing: false)
+        }
+        panel.onSendToAI = { [weak self] text in
+            self?.openAIPanel(preferredAction: .replyClipboard, explicitClipboard: text)
+        }
+        panel.onStylishFontChanged = { [weak self] style in
+            guard let self else { return }
+            self.settings.stylishFontID = style.rawValue
+            self.settings.save()
+        }
+        panel.onClose = { [weak self] in
+            self?.switchToPanel(.letters)
+        }
+    }
+
+    private func wireAIPanel(_ panel: AIAssistantPanelView) {
+        panel.onInsertText = { [weak self] text in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.exitTransientAIAndTranslateModes()
+            self.lastAIInsertedText = text
+            self.insertDirectlyIntoHost(text)
+            self.switchToPanel(.letters)
+        }
+        panel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.exitTransientAIAndTranslateModes()
+            self.lastAIInsertedText = replacement
+            self.performEdit {
+                for _ in 0..<deleteCount {
+                    self.textDocumentProxy.deleteBackward()
+                }
+                self.textDocumentProxy.insertText(replacement)
+            }
+            self.refreshHostContextSnapshot(includeSelection: false)
+            if self.shouldAllowPanguSpace, self.settings.typingStatsEnabled, !replacement.isEmpty {
+                TypingStatsStore.shared.recordCommit(text: replacement)
+            }
+            self.switchToPanel(.letters)
+        }
+        panel.onBeginTypingPrompt = { [weak self] existingDraft in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             if self.isTranslateMode {
@@ -1092,14 +1223,14 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             self.aiPromptDraft = existingDraft
             self.switchToPanel(.letters)
         }
-        aiPanel.onReadingHeightChanged = { [weak self] _ in
+        panel.onReadingHeightChanged = { [weak self] _ in
             guard let self else { return }
             UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
                 self.updatePreferredHeight()
                 self.view.layoutIfNeeded()
             }
         }
-        aiPanel.onOpenFullAccessSettings = { [weak self] done in
+        panel.onOpenFullAccessSettings = { [weak self] done in
             guard let self else { done(false); return }
             if let settingsURL = URL(string: "app-settings:") {
                 self.openURLFromExtension(settingsURL) { [weak self] opened in
@@ -1115,35 +1246,37 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 done(false)
             }
         }
-        aiPanel.onOpenHostAppAI = { [weak self] done in
+        panel.onOpenHostAppAI = { [weak self] done in
             guard let self, let url = URL(string: "lingxi://ai-settings") else {
                 done(false)
                 return
             }
             self.openURLFromExtension(url, completion: done)
         }
-        aiPanel.onImportBridgeToken = { [weak self] in
+        panel.onImportBridgeToken = { [weak self] in
             self?.tryImportBridgeTokenFromPasteboardIfPresent() ?? false
         }
-        aiPanel.onTriggerScreenshotVision = { [weak self] in
+        panel.onTriggerScreenshotVision = { [weak self] in
             self?.handleOpenScreenshotAI()
         }
-        aiPanel.onOpenScreenshotWorkbench = { [weak self] deleteAssetID in
+        panel.onOpenScreenshotWorkbench = { [weak self] deleteAssetID in
             self?.openHostScreenshotWorkbench(deleteAssetID: deleteAssetID)
         }
-        aiPanel.onClose = { [weak self] in
+        panel.onClose = { [weak self] in
             self?.aiPromptDraft = nil
             self?.switchToPanel(.letters)
         }
+    }
 
-        voicePanel.onInsertText = { [weak self] text in
+    private func wireVoicePanel(_ panel: VoiceInputPanelView) {
+        panel.onInsertText = { [weak self] text in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             self.exitTransientAIAndTranslateModes()
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
         }
-        voicePanel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
+        panel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             self.exitTransientAIAndTranslateModes()
@@ -1153,69 +1286,74 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 }
                 self.textDocumentProxy.insertText(replacement)
             }
+            self.refreshHostContextSnapshot(includeSelection: false)
             if self.shouldAllowPanguSpace, self.settings.typingStatsEnabled, !replacement.isEmpty {
                 TypingStatsStore.shared.recordCommit(text: replacement)
             }
             self.switchToPanel(.letters)
         }
-        voicePanel.onFetchHostInputContext = { [weak self] in
+        panel.onFetchHostInputContext = { [weak self] in
             self?.textDocumentProxy.documentContextBeforeInput ?? ""
         }
-        voicePanel.onWarmUpHostVoiceEngine = { [weak self] done in
+        panel.onWarmUpHostVoiceEngine = { [weak self] done in
             self?.openHostVoiceWarmUp(completion: done)
         }
-        voicePanel.onOpenFullVoiceWorkbench = { [weak self] mode, done in
+        panel.onOpenFullVoiceWorkbench = { [weak self] mode, done in
             self?.openHostVoiceTranslator(mode: mode, completion: done)
         }
-        voicePanel.onOpenPermissions = { [weak self] done in
+        panel.onOpenPermissions = { [weak self] done in
             self?.openHostPermissionsCenter(completion: done)
         }
-        voicePanel.onClose = { [weak self] in
+        panel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
         }
+    }
 
-        screenshotPanel.onInsertText = { [weak self] text in
+    private func wireScreenshotPanel(_ panel: ScreenshotVisionPanelView) {
+        panel.onInsertText = { [weak self] text in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
             self.exitTransientAIAndTranslateModes()
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
         }
-        screenshotPanel.onSettingsChanged = { [weak self] updated in
+        panel.onSettingsChanged = { [weak self] updated in
             self?.settings = updated
             self?.triggerSideloadBridgeSync(force: true)
         }
-        screenshotPanel.onReadingHeightChanged = { [weak self] _ in
+        panel.onReadingHeightChanged = { [weak self] _ in
             guard let self else { return }
             UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
                 self.updatePreferredHeight()
                 self.view.layoutIfNeeded()
             }
         }
-        screenshotPanel.onTriggerAutoScreenshotShortcut = { [weak self] in
+        panel.onTriggerAutoScreenshotShortcut = { [weak self] in
             self?.triggerAutoScreenshotShortcut()
         }
-        screenshotPanel.onOpenPermissions = { [weak self] in
+        panel.onOpenPermissions = { [weak self] in
             self?.openHostPermissionsCenter()
         }
-        screenshotPanel.onImportBridgeToken = { [weak self] in
+        panel.onImportBridgeToken = { [weak self] in
             self?.tryImportBridgeTokenFromPasteboardIfPresent() ?? false
         }
-        screenshotPanel.onOpenHostAppAI = { [weak self] in
+        panel.onOpenHostAppAI = { [weak self] in
             guard let url = URL(string: "lingxi://ai-settings") else { return }
             self?.openURLFromExtension(url) { _ in }
         }
-        screenshotPanel.onOpenHostDeleteAsset = { [weak self] assetID in
+        panel.onOpenHostDeleteAsset = { [weak self] assetID in
             self?.openHostScreenshotWorkbench(deleteAssetID: assetID)
         }
-        screenshotPanel.onOpenHostWorkbench = { [weak self] in
+        panel.onOpenHostWorkbench = { [weak self] in
             self?.openHostScreenshotWorkbench(deleteAssetID: nil)
         }
-        screenshotPanel.onClose = { [weak self] in
+        panel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
         }
+    }
 
-        quickSettingsPanel.onSettingsChanged = { [weak self] updated in
+    private func wireQuickSettingsPanel(_ panel: QuickSettingsSheetView) {
+        panel.onSettingsChanged = { [weak self] updated in
             guard let self else { return }
             let layoutOrSchemeChanged = updated.layoutMode != self.settings.layoutMode || updated.inputScheme != self.settings.inputScheme
             let translateLangChanged = updated.translateTargetLang != self.settings.translateTargetLang
@@ -1236,7 +1374,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             self.applyThemeAndSettings()
             self.triggerSideloadBridgeSync(force: true)
         }
-        quickSettingsPanel.onThemeChanged = { [weak self] updatedTheme in
+        panel.onThemeChanged = { [weak self] updatedTheme in
             guard let self else { return }
             let darkNow = self.isDarkInterface
             self.themeCustomization = updatedTheme
@@ -1249,26 +1387,19 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             self.applyThemeAndSettings()
             self.triggerSideloadBridgeSync(force: true)
         }
-        quickSettingsPanel.onBridgeSyncNow = { [weak self] in
+        panel.onBridgeSyncNow = { [weak self] in
             guard let self else { return }
             if !self.tryImportBridgeTokenFromPasteboardIfPresent() {
                 self.triggerSideloadBridgeSync(force: true)
             }
         }
-        quickSettingsPanel.onOpenEditPad = { [weak self] in
+        panel.onOpenEditPad = { [weak self] in
             self?.switchToPanel(.editPad)
         }
-        quickSettingsPanel.onOpenPermissions = { [weak self] in
+        panel.onOpenPermissions = { [weak self] in
             self?.openHostPermissionsCenter()
         }
-        quickSettingsPanel.onClose = { [weak self] in
-            self?.switchToPanel(.letters)
-        }
-
-        editPadPanel.onAction = { [weak self] action in
-            self?.handleEditPadAction(action)
-        }
-        editPadPanel.onClose = { [weak self] in
+        panel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
         }
     }
@@ -1332,6 +1463,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 performEdit {
                     self.textDocumentProxy.adjustTextPosition(byCharacterOffset: steps)
                 }
+                invalidateHostContextSnapshot()
             }
 
         case .switchToNumberPad:
@@ -1447,7 +1579,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 reordered.append(c)
             }
             currentCandidates = reordered
-            expandedCandidates.update(candidates: reordered)
+            if isCandidatesExpanded {
+                mountSubpanelIfNeeded(expandedCandidates)
+                expandedCandidates.update(candidates: reordered)
+            }
             refreshUI()
         }
     }
@@ -1528,6 +1663,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 performEdit {
                     self.textDocumentProxy.adjustTextPosition(byCharacterOffset: steps)
                 }
+                invalidateHostContextSnapshot()
             }
 
         case .switchToNumberPad:
@@ -1613,6 +1749,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         case .backToLetters:
             feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
             switchToPanel(.letters)
+        case .openSymbols:
+            feedback.triggerKeyFeedback(tone: .modifier, settings: settings, hasFullAccess: hasFullAccess)
+            switchToPanel(.emoji)
         }
     }
 
@@ -1680,6 +1819,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             commitTranslatedOutput()
         case .commitTranslateSource:
             commitTranslateSourceOutput()
+        case .toggleEmoji:
+            commitRawIfNeeded()
+            switchToPanel(activePanel == .emoji ? .letters : .emoji)
         case .toggleClipboard:
             switchToPanel(activePanel == .clipboard ? .letters : .clipboard)
         case .toggleEditPad:
@@ -2039,6 +2181,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         performEdit {
             self.textDocumentProxy.insertText("\n")
         }
+        invalidateHostContextSnapshot()
         refreshUI()
         autoCapitalizeIfNeeded()
 
@@ -2139,6 +2282,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             } else {
                 self.textDocumentProxy.deleteBackward()
             }
+        }
+        if hostSnapshot.isValid, let cur = hostSnapshot.beforeInput, !cur.isEmpty {
+            hostSnapshot.beforeInput = String(cur.dropLast())
+            hostSnapshot.selectedText = nil
+        } else {
+            invalidateHostContextSnapshot()
         }
         if englishComposing.isEmpty && !currentCandidates.isEmpty {
             currentCandidates = []
@@ -2244,8 +2393,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             updateIdleSuggestions()
             return
         }
-        let kbType = textDocumentProxy.keyboardType ?? .default
-        let contextBefore = aiPromptDraft ?? (isTranslateMode ? translateSourceBuffer : textDocumentProxy.documentContextBeforeInput)
+        let kbType = cachedKeyboardType
+        let contextBefore = activeContextBeforeCursor
         var cands = SmartCandidateHelper.contextCompletions(
             beforeCursor: contextBefore,
             isEmailField: kbType == .emailAddress,
@@ -2267,7 +2416,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             }
         }
         currentCandidates = cands
-        expandedCandidates.update(candidates: currentCandidates)
+        if isCandidatesExpanded {
+            mountSubpanelIfNeeded(expandedCandidates)
+            expandedCandidates.update(candidates: currentCandidates)
+        }
         refreshToolbar()
     }
 
@@ -2347,10 +2499,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             currentCorrectedHint = nil
             merged = res.candidates
 
-            // 九宫格同样支持 WowType 首位候选中文词 Emoji 推荐（如「今天好开心😊」）
+            // 九宫格 Emoji 推荐温和排在第 5 位（index 4），绝不挤占前 4 个核心中文候选词位！
             if settings.emojiSuggestionEnabled, let topWord = merged.first?.word {
                 var existing = Set(merged.map(\.word))
-                var insertAt = min(2, merged.count)
+                var insertAt = min(4, merged.count)
                 for rec in EmojiCatalog.recommendForTopCandidate(topWord) where existing.insert(rec.word).inserted {
                     merged.insert(
                         PinyinCandidate(word: rec.word, py: "", lp: -4.0, consumed: rawComposing.count, isExact: false, source: .smartHelper),
@@ -2390,7 +2542,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             }
             if settings.emojiSuggestionEnabled, let topWord = merged.first?.word {
                 var existing = Set(merged.map(\.word))
-                var insertAt = min(2, merged.count)
+                var insertAt = min(4, merged.count)
                 for rec in EmojiCatalog.recommendForTopCandidate(topWord) where existing.insert(rec.word).inserted {
                     merged.insert(
                         PinyinCandidate(word: rec.word, py: "", lp: -4.0, consumed: rawComposing.count, isExact: false, source: .smartHelper),
@@ -2422,12 +2574,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             )
             var existingWords = Set(merged.map(\.word))
             var frontInsertIndex = 0
-            var emojiInsertIndex = min(2, merged.count)
+            // 保护前 4 个核心中文候选词位不被表情/日期打乱，体验看齐微信输入法
+            var emojiInsertIndex = min(4, merged.count)
             for hc in helperCands where existingWords.insert(hc.word).inserted {
                 if hc.source == .smartHelper && hc.lp > 0 {
                     merged.insert(hc, at: frontInsertIndex)
                     frontInsertIndex += 1
-                    emojiInsertIndex = min(frontInsertIndex + 2, merged.count)
+                    emojiInsertIndex = min(frontInsertIndex + 4, merged.count)
                 } else if hc.source == .smartHelper {
                     let idx = min(emojiInsertIndex, merged.count)
                     merged.insert(hc, at: idx)
@@ -2469,7 +2622,11 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
 
         currentCandidates = merged
-        expandedCandidates.update(candidates: merged)
+        // 关键零延迟优化：折叠态绝不重建隐藏的展开网格（此前每按一键都在后台重排上百个隐藏按钮！）
+        if isCandidatesExpanded {
+            mountSubpanelIfNeeded(expandedCandidates)
+            expandedCandidates.update(candidates: merged)
+        }
         syncInlineMarkedTextIfEnabled()
         refreshUI()
     }
@@ -2522,7 +2679,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                     var merged = [patchedCand] + baseList.filter { $0.word != patchedWord }
                     if merged.isEmpty { merged = [patchedCand] }
                     currentCandidates = merged
-                    expandedCandidates.update(candidates: merged)
+                    if isCandidatesExpanded {
+                        mountSubpanelIfNeeded(expandedCandidates)
+                        expandedCandidates.update(candidates: merged)
+                    }
                     refreshUI()
                     return
                 }
@@ -2708,12 +2868,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private func updateIdleSuggestions() {
         guard rawComposing.isEmpty && englishComposing.isEmpty else { return }
         var suggestions: [PinyinCandidate] = []
-        let kbType = textDocumentProxy.keyboardType ?? .default
-        let contextBefore = aiPromptDraft ?? (isTranslateMode ? translateSourceBuffer : textDocumentProxy.documentContextBeforeInput)
+        let kbType = cachedKeyboardType
+        let contextBefore = activeContextBeforeCursor
 
         // 1. 实时算式求值（同时支持 `125*8=` 与未敲等号的 `125*8`）
         if aiPromptDraft == nil,
-           let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty {
+           let before = hostSnapshot.beforeInput, !before.isEmpty {
             let tail = String(before.suffix(48))
             let exprSlice: String
             if let eqStart = tail.lastIndex(where: { !($0.isNumber || "+-*/%×÷^().=".contains($0)) }) {
@@ -2838,6 +2998,11 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
             self.textDocumentProxy.insertText(text)
         }
+        // 本地同步更新宿主快照，免去下一次敲键跨进程重读 documentContextBeforeInput
+        if hostSnapshot.isValid {
+            hostSnapshot.beforeInput = (hostSnapshot.beforeInput ?? "") + inserted
+            hostSnapshot.selectedText = nil
+        }
         // 打字统计与实时习惯画像采样：仅统计真实上屏文本；密码/邮箱/网址等隐私框与换行键不统计
         if self.shouldAllowPanguSpace, !inserted.isEmpty, inserted != "\n" {
             if self.settings.typingStatsEnabled {
@@ -2892,14 +3057,22 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                text != "\n",
                (self.settings.panguSpaceLetters || self.settings.panguSpaceDigits),
                PanguSpacer.needsLeadingSpace(
-                   beforeCursor: self.textDocumentProxy.documentContextBeforeInput,
+                   beforeCursor: self.activeContextBeforeCursor,
                    inserting: text,
                    spaceLetters: self.settings.panguSpaceLetters,
                    spaceDigits: self.settings.panguSpaceDigits
                ) {
                 self.textDocumentProxy.insertText(" " + text)
+                if self.hostSnapshot.isValid {
+                    self.hostSnapshot.beforeInput = (self.hostSnapshot.beforeInput ?? "") + " " + text
+                    self.hostSnapshot.selectedText = nil
+                }
             } else {
                 self.textDocumentProxy.insertText(text)
+                if self.hostSnapshot.isValid {
+                    self.hostSnapshot.beforeInput = (self.hostSnapshot.beforeInput ?? "") + text
+                    self.hostSnapshot.selectedText = nil
+                }
             }
         }
         if shouldAllowPanguSpace, settings.typingStatsEnabled, text != "\n", !text.isEmpty {
@@ -3261,15 +3434,41 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     // MARK: - 面板切换与主题刷新
 
     private func switchToPanel(_ target: ActivePanel, autoPrepareScreenshot: Bool = true) {
-        if activePanel == .voice && target != .voice {
+        if activePanel == .voice && target != .voice && hasCreatedVoicePanel {
             voicePanel.stopAllRecording(runFinalTranslate: false)
         }
         activePanel = target
         isCandidatesExpanded = false
+
+        // 首次切换到对应面板时按需懒创建并挂载 AutoLayout，冷启动不耗分毫内存
+        switch target {
+        case .letters:
+            if isUsingT9Layout { mountSubpanelIfNeeded(t9Canvas) }
+            else { mountSubpanelIfNeeded(lettersCanvas) }
+        case .numbers:
+            mountSubpanelIfNeeded(numberPad)
+        case .emoji:
+            mountSubpanelIfNeeded(emojiPanel)
+        case .clipboard:
+            mountSubpanelIfNeeded(clipboardPanel)
+        case .ai:
+            mountSubpanelIfNeeded(aiPanel)
+        case .voice:
+            mountSubpanelIfNeeded(voicePanel)
+        case .screenshot:
+            mountSubpanelIfNeeded(screenshotPanel)
+        case .quickSettings:
+            mountSubpanelIfNeeded(quickSettingsPanel)
+        case .editPad:
+            mountSubpanelIfNeeded(editPadPanel)
+        }
+
         updatePreferredHeight()
         updateVisiblePanel()
 
         switch target {
+        case .emoji:
+            emojiPanel.configure(theme: resolvedTheme)
         case .clipboard:
             clipboardPanel.configure(
                 theme: resolvedTheme,
@@ -3307,16 +3506,20 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     private func updateVisiblePanel() {
         let showMainLetters = (activePanel == .letters) && !isCandidatesExpanded
+        if showMainLetters && isUsingT9Layout {
+            mountSubpanelIfNeeded(t9Canvas)
+        }
         lettersCanvas.isHidden = !showMainLetters || isUsingT9Layout
-        t9Canvas.isHidden = !showMainLetters || !isUsingT9Layout
-        expandedCandidates.isHidden = !isCandidatesExpanded
-        numberPad.isHidden = (activePanel != .numbers)
-        clipboardPanel.isHidden = (activePanel != .clipboard)
-        aiPanel.isHidden = (activePanel != .ai)
-        voicePanel.isHidden = (activePanel != .voice)
-        screenshotPanel.isHidden = (activePanel != .screenshot)
-        quickSettingsPanel.isHidden = (activePanel != .quickSettings)
-        editPadPanel.isHidden = (activePanel != .editPad)
+        if hasCreatedT9Canvas { t9Canvas.isHidden = !showMainLetters || !isUsingT9Layout }
+        if hasCreatedExpandedCandidates { expandedCandidates.isHidden = !isCandidatesExpanded }
+        if hasCreatedNumberPad { numberPad.isHidden = (activePanel != .numbers) }
+        if hasCreatedEmojiPanel { emojiPanel.isHidden = (activePanel != .emoji) }
+        if hasCreatedClipboardPanel { clipboardPanel.isHidden = (activePanel != .clipboard) }
+        if hasCreatedAIPanel { aiPanel.isHidden = (activePanel != .ai) }
+        if hasCreatedVoicePanel { voicePanel.isHidden = (activePanel != .voice) }
+        if hasCreatedScreenshotPanel { screenshotPanel.isHidden = (activePanel != .screenshot) }
+        if hasCreatedQuickSettingsPanel { quickSettingsPanel.isHidden = (activePanel != .quickSettings) }
+        if hasCreatedEditPadPanel { editPadPanel.isHidden = (activePanel != .editPad) }
     }
 
     private func applyThemeAndSettings() {
@@ -3327,30 +3530,38 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         backdropView.apply(theme: resolvedTheme)
         liveDockView.apply(theme: resolvedTheme)
         toolbarView.apply(theme: resolvedTheme)
-        expandedCandidates.apply(theme: resolvedTheme)
-        editPadPanel.apply(theme: resolvedTheme)
-        // 候选字号可调：单行候选条与展开网格联动应用
         toolbarView.candidateBar.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
-        expandedCandidates.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
-        let (retTitle, _) = returnKeyAppearance()
-        numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
-        if activePanel == .quickSettings {
+        if hasCreatedExpandedCandidates {
+            expandedCandidates.apply(theme: resolvedTheme)
+            expandedCandidates.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
+        }
+        if hasCreatedEditPadPanel {
+            editPadPanel.apply(theme: resolvedTheme)
+        }
+        if hasCreatedNumberPad {
+            let (retTitle, _) = returnKeyAppearance()
+            numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
+        }
+        if hasCreatedEmojiPanel && activePanel == .emoji {
+            emojiPanel.configure(theme: resolvedTheme)
+        }
+        if activePanel == .quickSettings && hasCreatedQuickSettingsPanel {
             quickSettingsPanel.updateTheme(
                 resolvedTheme,
                 settings: settings,
                 customization: themeCustomization,
                 isSystemDark: isDarkInterface
             )
-        } else if activePanel == .clipboard {
+        } else if activePanel == .clipboard && hasCreatedClipboardPanel {
             clipboardPanel.configure(
                 theme: resolvedTheme,
                 activeFontStyle: StylishFontStyle(rawValue: settings.stylishFontID) ?? .normal
             )
-        } else if activePanel == .ai {
+        } else if activePanel == .ai && hasCreatedAIPanel {
             aiPanel.applyTheme(resolvedTheme)
-        } else if activePanel == .voice {
+        } else if activePanel == .voice && hasCreatedVoicePanel {
             voicePanel.applyTheme(resolvedTheme)
-        } else if activePanel == .screenshot {
+        } else if activePanel == .screenshot && hasCreatedScreenshotPanel {
             screenshotPanel.applyTheme(resolvedTheme)
         }
         refreshUI()
@@ -3411,11 +3622,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let composingSyllables: [String] = (!rawComposing.isEmpty && !isUsingT9Layout && !isVToolActive && !settings.traditionalChineseEnabled && currentCorrectedHint == nil && wubiDisplayBuffer == nil && uModeDisplayBuffer == nil && currentTokens.count >= 2 && currentTokens.allSatisfy({ !($0.lockedSyllable ?? $0.text).isEmpty }))
             ? currentTokens.map { $0.lockedSyllable ?? $0.text }
             : []
-        let activeSelectedText: String? = (!isActivelyComposing && settings.selectionMagicEnabled && !isSecureField)
-            ? textDocumentProxy.selectedText
+        // 全部走本地快照，零跨进程 XPC 阻塞！
+        let secureNow = isSecureField
+        let activeSelectedText: String? = (!isActivelyComposing && settings.selectionMagicEnabled && !secureNow)
+            ? hostSnapshot.selectedText
             : nil
-        let inlineAICmd: InlineAICommandMatch? = (!isSecureField && !isActivelyComposing && activePanel == .letters)
-            ? InlineAICommandDetector.detect(in: textDocumentProxy.documentContextBeforeInput ?? "")
+        let inlineAICmd: InlineAICommandMatch? = (!secureNow && !isActivelyComposing && activePanel == .letters)
+            ? InlineAICommandDetector.detect(in: hostSnapshot.beforeInput ?? "")
             : nil
 
         liveDockView.update(mode: currentLiveDockMode())
@@ -3462,7 +3675,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             if !savedSentenceCandidatesBeforeEdit.isEmpty {
                 currentCandidates = savedSentenceCandidatesBeforeEdit
                 savedSentenceCandidatesBeforeEdit = []
-                expandedCandidates.update(candidates: currentCandidates)
+                if isCandidatesExpanded {
+                    mountSubpanelIfNeeded(expandedCandidates)
+                    expandedCandidates.update(candidates: currentCandidates)
+                }
             }
             refreshUI()
             return
@@ -3471,10 +3687,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             savedSentenceCandidatesBeforeEdit = currentCandidates
         }
         editingSyllableIndex = idx
-        let singleList = engine.candidatesForSingleToken(currentTokens[idx], isT9: isUsingT9Layout, settings: settings, limit: 48)
+        let singleList = engine.candidatesForSingleToken(currentTokens[idx], isT9: isUsingT9Layout, settings: settings, limit: 360)
         if !singleList.isEmpty {
             currentCandidates = singleList
-            expandedCandidates.update(candidates: singleList)
+            if isCandidatesExpanded {
+                mountSubpanelIfNeeded(expandedCandidates)
+                expandedCandidates.update(candidates: singleList)
+            }
         }
         refreshUI()
     }
@@ -3546,6 +3765,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 insertDirectlyIntoHost(TextFormatterToolbox.collapseBlankLines(clip))
             }
         }
+        invalidateHostContextSnapshot()
     }
 
     private func refreshCanvas() {
@@ -3593,7 +3813,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         if isTranslateMode && !translateSourceBuffer.isEmpty {
             return ("译·上屏", true)
         }
-        switch textDocumentProxy.returnKeyType {
+        ensureHostSnapshot()
+        switch hostSnapshot.returnKeyType {
         case .send: return ("发送", true)
         case .search: return ("搜索", true)
         case .go: return ("前往", true)

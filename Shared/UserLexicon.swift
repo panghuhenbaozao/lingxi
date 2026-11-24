@@ -34,6 +34,15 @@ final class UserLexicon {
         openDatabase()
     }
 
+    /// 响应内存警告，执行非阻塞 WAL 检查点并释放 SQLite 缓存页。
+    func releaseMemory() {
+        queue.async { [weak self] in
+            guard let db = self?.db else { return }
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE);", nil, nil, nil)
+            sqlite3_db_release_memory(db)
+        }
+    }
+
     deinit {
         if let singleAbbrStmt { sqlite3_finalize(singleAbbrStmt) }
         if let singleT9Stmt { sqlite3_finalize(singleT9Stmt) }

@@ -74,6 +74,7 @@ final class PinyinEngine {
     ]
 
     private var db: OpaquePointer?
+    private var dbURL: URL?
     private var abbrStmt: OpaquePointer?
     private var t9Stmt: OpaquePointer?
     private var wordExactStmt: OpaquePointer?
@@ -121,10 +122,12 @@ final class PinyinEngine {
         self.userLexicon = userLexicon
         self.segmenter = PinyinSegmenter()
 
-        let dbURL = databaseURL ?? Bundle.main.url(forResource: "pinyin", withExtension: "sqlite")
-        if let dbURL {
-            openSystemDict(at: dbURL)
+        let resolvedURL = databaseURL ?? Bundle.main.url(forResource: "pinyin", withExtension: "sqlite")
+        self.dbURL = resolvedURL
+        if let resolvedURL {
+            openSystemDict(at: resolvedURL)
         }
+        SupplementLexicon.shared.ensureLoaded(nearDatabaseURL: resolvedURL)
     }
 
     deinit {
@@ -164,8 +167,10 @@ final class PinyinEngine {
             sqlite3_finalize(metaStmt)
         }
 
-        sqlite3_prepare_v2(handle, "SELECT word, py, lp FROM dict WHERE abbr = ? ORDER BY lp DESC LIMIT 2500", -1, &abbrStmt, nil)
-        sqlite3_prepare_v2(handle, "SELECT word, py, lp FROM dict WHERE t9_abbr = ? ORDER BY lp DESC LIMIT 1200", -1, &t9Stmt, nil)
+        // 完整覆盖所有首字母缩写桶（abbr 最大桶 915 条，t9_abbr 最大桶 '99' 为 7,689 条），
+        // 彻底根治九宫格与单音节生僻字因 SQL LIMIT 过小导致的漏字/缺词问题！
+        sqlite3_prepare_v2(handle, "SELECT word, py, lp FROM dict WHERE abbr = ? ORDER BY lp DESC LIMIT 3000", -1, &abbrStmt, nil)
+        sqlite3_prepare_v2(handle, "SELECT word, py, lp FROM dict WHERE t9_abbr = ? ORDER BY lp DESC LIMIT 8000", -1, &t9Stmt, nil)
         sqlite3_prepare_v2(handle, "SELECT lp FROM glide_dict WHERE word = ? ORDER BY lp DESC LIMIT 1", -1, &wordExactStmt, nil)
         sqlite3_prepare_v2(handle, "SELECT word FROM en_dict WHERE lower >= ? AND lower < ? ORDER BY rank DESC LIMIT ?", -1, &enStmt, nil)
         sqlite3_prepare_v2(handle, "SELECT word FROM en_dict WHERE lower = ? LIMIT 1", -1, &enExactStmt, nil)
@@ -191,6 +196,8 @@ final class PinyinEngine {
         cacheOrder.removeAll(keepingCapacity: false)
         sysBigramCache.removeAll(keepingCapacity: false)
         sysBigramOrder.removeAll(keepingCapacity: false)
+        userLexicon.releaseMemory()
+        SupplementLexicon.shared.releaseMemory()
         if let db {
             sqlite3_db_release_memory(db)
         }
@@ -202,7 +209,7 @@ final class PinyinEngine {
         raw: String,
         settings: LingxiSettings,
         contextBeforeCursor: String? = nil,
-        limit: Int = 96
+        limit: Int = 128
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], correctedHint: String?) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ([], [], nil) }
@@ -219,13 +226,16 @@ final class PinyinEngine {
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
         let segs = segmenter.segmentations(raw: trimmed, scheme: effectiveScheme)
+        // 单音节查询自动放宽候选池至 420，确保 8105 规范字 + Unicode BMP 生僻字在展开面板中 100% 完整可查不截断
+        let isSingleSyllableQuery = segs.contains { $0.count == 1 }
+        let effectiveLimit = (isSingleSyllableQuery && limit >= 64) ? max(limit, 420) : limit
         var (bestSeg, out) = evaluateSegmentations(
             segs,
             isT9: false,
             settings: settings,
             contextMap: ctxMap,
             rawContext: contextBeforeCursor,
-            limit: limit
+            limit: effectiveLimit
         )
 
         let hasInvalid = bestSeg.contains { $0.kind == .invalid }
@@ -275,15 +285,15 @@ final class PinyinEngine {
             if !strongInitialHit {
                 let enCand = PinyinCandidate(word: exactEn, py: "", lp: 5.0, consumed: trimmed.count, isExact: true, source: .englishDirect)
                 out = [enCand] + out.filter { $0.word != exactEn }
-                return (bestSeg, Array(out.prefix(limit)), nil)
+                return (bestSeg, Array(out.prefix(effectiveLimit)), nil)
             }
         }
 
-        // 3. 智能 4 路容错 + 合法全拼换位/鼻音/末位邻键容错
+        // 3. 智能 4 路容错 + 合法全拼换位/鼻音/末位邻键容错（严格保护正常成句不被邻键误劫持，仅对 <=4 音节执行高速查表）
         var correctedHint: String?
         if settings.typoCorrectionEnabled && effectiveScheme == .quanpin && !trimmed.contains("'"),
            !lower.hasPrefix("v"),
-           (3...18).contains(trimmed.count) {
+           (3...16).contains(trimmed.count) {
             if hasInvalid || hasAwkwardPartial {
                 if let fix = attemptTypoFix(raw: lower, rawSeg: bestSeg, settings: settings, contextMap: ctxMap) {
                     let rawTopLP = out.first?.lp ?? -Double.infinity
@@ -298,12 +308,12 @@ final class PinyinEngine {
                         out = promoted + out.filter { !promotedSet.contains($0.word) }
                     }
                 }
-            } else if allComplete && bestSeg.count >= 2 {
+            } else if allComplete && (2...4).contains(bestSeg.count) && trimmed.count <= 14 {
                 let rawIsExact = out.first?.isExact ?? false
-                let rawTopLP = out.first?.lp ?? -20.0
-                let hasStrongExact = rawIsExact && rawTopLP > -11.5
+                let rawTopLP = out.first?.lp ?? -25.0
+                let hasStrongExact = rawIsExact && rawTopLP > -12.5
                 if !hasStrongExact {
-                    // 3a. 换位（meiyuo -> 没有）+ 前后鼻音单 g 误敲（shengme -> 什么, penyou -> 朋友）
+                    // 3a. 换位（meiyuo -> 没有）+ 前后鼻音单 g 误敲（shengme -> 什么, penyou -> 朋友）+ 平翘舌模糊兜底
                     if let strongFix = attemptCompleteSwapOrNasalFix(
                         raw: lower,
                         bestSeg: bestSeg,
@@ -312,7 +322,6 @@ final class PinyinEngine {
                         settings: settings,
                         contextMap: ctxMap
                     ) {
-                        correctedHint = PinyinSegmenter.displayPinyin(for: strongFix.seg)
                         let cand = PinyinCandidate(
                             word: strongFix.cand.word,
                             py: strongFix.cand.py,
@@ -321,7 +330,13 @@ final class PinyinEngine {
                             isExact: false,
                             source: strongFix.cand.source
                         )
-                        out = [cand] + out.filter { $0.word != cand.word }
+                        if strongFix.promoteToFirst {
+                            correctedHint = PinyinSegmenter.displayPinyin(for: strongFix.seg)
+                            out = [cand] + out.filter { $0.word != cand.word }
+                        } else if !out.prefix(2).contains(where: { $0.word == cand.word }) {
+                            out = out.filter { $0.word != cand.word }
+                            out.insert(cand, at: min(1, out.count))
+                        }
                     } else if bestSeg.count == 2 {
                         // 3b. 末位邻键高频词放第 2 位（tianqu -> [天区, 天气]，保护精确首词）
                         if let adjCand = attemptTailAdjacentFix(raw: lower, rawTopLP: rawTopLP, settings: settings, contextMap: ctxMap),
@@ -384,7 +399,7 @@ final class PinyinEngine {
             }
         }
 
-        return (bestSeg, Array(out.prefix(limit)), correctedHint)
+        return (bestSeg, Array(out.prefix(effectiveLimit)), correctedHint)
     }
 
     // MARK: - 引擎 3.0：中英数混输直出 & 点击任意音节局部单字反查
@@ -522,14 +537,15 @@ final class PinyinEngine {
         return (assembledTokens, outCands)
     }
 
-    /// 针对长句中用户点选的任意单个音节，快速返回其全部同音单字，用于「免退格回溯改字」。
+    /// 针对长句中用户点选的任意单个音节，快速返回其全部同音单字（含规范字与扩展生僻字），用于「免退格回溯改字」。
     func candidatesForSingleToken(
         _ token: PinyinToken,
         isT9: Bool,
         settings: LingxiSettings,
-        limit: Int = 48
+        limit: Int = 360
     ) -> [PinyinCandidate] {
         let single = lookup(tokens: [token], start: 0, end: 1, openEnd: false, isT9: isT9, settings: settings)
+            .filter { $0.word.count == 1 }
         return Array(single.prefix(limit))
     }
 
@@ -847,19 +863,21 @@ final class PinyinEngine {
         lockedSyllables: [String],
         settings: LingxiSettings,
         contextBeforeCursor: String? = nil,
-        limit: Int = 96
+        limit: Int = 128
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], leftSyllables: [String]) {
         let ctxMap = settings.bigramPredictionEnabled
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
         let segs = segmenter.t9Segmentations(digits: digits, lockedPrefixes: lockedSyllables)
+        let isSingleSyllableT9 = segs.contains { $0.count == 1 }
+        let effectiveLimit = (isSingleSyllableT9 && limit >= 64) ? max(limit, 420) : limit
         let (bestSeg, rawOut) = evaluateSegmentations(
             segs,
             isT9: true,
             settings: settings,
             contextMap: ctxMap,
             rawContext: contextBeforeCursor,
-            limit: limit
+            limit: effectiveLimit
         )
         var out = rawOut
         if settings.geoLocationBoostEnabled && digits.count >= 4 {
@@ -880,7 +898,7 @@ final class PinyinEngine {
             }
         }
         let leftSyls = segmenter.candidateSyllablesForT9Prefix(digits, lockedCount: lockedSyllables.count, tokens: bestSeg)
-        return (bestSeg, Array(out.prefix(limit)), leftSyls)
+        return (bestSeg, Array(out.prefix(effectiveLimit)), leftSyls)
     }
 
     // MARK: - 英文词表精确与前缀联想 (melt_eng)
@@ -1141,45 +1159,39 @@ final class PinyinEngine {
         rawTopLP: Double,
         settings: LingxiSettings,
         contextMap: [String: Double]
-    ) -> (cand: PinyinCandidate, seg: [PinyinToken])? {
+    ) -> (cand: PinyinCandidate, seg: [PinyinToken], promoteToFirst: Bool)? {
         let chars = Array(raw)
-        var vars: [String] = []
-        var seen = Set<String>()
-        func add(_ v: String) { if seen.insert(v).inserted { vars.append(v) } }
+        enum VariantKind {
+            case swapOrNasalOrFuzzy
+            case adjacentInitial
+        }
+        var vars: [(text: String, kind: VariantKind)] = []
+        var seen = Set<String>([raw])
+        func add(_ v: String, kind: VariantKind) {
+            if seen.insert(v).inserted {
+                vars.append((v, kind))
+            }
+        }
 
-        // 相邻字母换位（meiyuo -> meiyou）
+        // 1. 相邻字母换位（meiyuo -> meiyou）
         for idx in 0..<(chars.count - 1) where chars[idx] != chars[idx + 1] {
             var sw = chars
             sw.swapAt(idx, idx + 1)
-            add(String(sw))
+            add(String(sw), kind: .swapOrNasalOrFuzzy)
         }
-        // 前后鼻音单 g 误敲（shengme -> shenme, penyou -> pengyou）
+        // 2. 前后鼻音单 g 误敲（shengme -> shenme, penyou -> pengyou）
         for idx in 0..<(chars.count - 1) where "aei".contains(chars[idx]) && chars[idx + 1] == "n" {
             if idx + 2 < chars.count && chars[idx + 2] == "g" {
                 var dropG = chars
                 dropG.remove(at: idx + 2)
-                add(String(dropG))
+                add(String(dropG), kind: .swapOrNasalOrFuzzy)
             } else {
                 var addG = chars
                 addG.insert("g", at: idx + 2)
-                add(String(addG))
+                add(String(addG), kind: .swapOrNasalOrFuzzy)
             }
         }
-        // 音节首字母邻键替换（mihao -> nihao）：声母是错拼高发位，且音节边界已由 bestSeg 给出，
-        // 只替换每个音节的首字母可将变体量控制在 O(音节数 × 邻键数)，避免全字母表膨胀。
-        // 是否真正前置仍由下方 lp 阈值与上下文消歧把关，弱纠正不会冒泡。
-        var sylOffset = 0
-        for st in bestSeg.map(\.text) {
-            if let first = st.first, let reps = Self.adjacentKeys[first], !reps.isEmpty {
-                for rep in reps {
-                    var sub = chars
-                    sub[sylOffset] = rep
-                    add(String(sub))
-                }
-            }
-            sylOffset += st.count
-        }
-        // WowType fuzzy_fallback：模糊音未开时，对无精确词的硬拼输入尝试平翘舌/前后鼻音音节替换（如 yingai->应该, zidao->知道）
+        // 3. WowType fuzzy_fallback：模糊音未开时，对硬拼输入尝试平翘舌/前后鼻音音节替换（如 yingai->应该, zidao->知道）
         if settings.fuzzyFallbackEnabled {
             let sylTexts = bestSeg.map(\.text)
             for (sIdx, st) in sylTexts.enumerated() {
@@ -1201,24 +1213,75 @@ final class PinyinEngine {
                 for alt in alts {
                     var rep = sylTexts
                     rep[sIdx] = alt
-                    add(rep.joined())
+                    add(rep.joined(), kind: .swapOrNasalOrFuzzy)
                 }
+            }
+        }
+        // 4. 音节首字母邻键替换（mihao -> nihao）：仅在 <=3 音节时尝试，并严格校验原句得分，绝不劫持正常双词短语（如 tashuo/quna）！
+        if bestSeg.count <= 3 {
+            var sylOffset = 0
+            for st in bestSeg.map(\.text) {
+                if let first = st.first, let reps = Self.adjacentKeys[first], !reps.isEmpty {
+                    for rep in reps {
+                        var sub = chars
+                        sub[sylOffset] = rep
+                        add(String(sub), kind: .adjacentInitial)
+                    }
+                }
+                sylOffset += st.count
             }
         }
 
-        var best: (cand: PinyinCandidate, seg: [PinyinToken])?
-        for v in vars {
-            let vSegs = segmenter.segmentations(raw: v, scheme: .quanpin).filter { $0.allSatisfy { $0.kind == .complete } }
+        // 零 Beam-Search 直接整词查表（提速 ~30x，消除多音节输入每键跑几十次动态规划的卡顿！）
+        let sylCount = Double(max(2, bestSeg.count))
+        let avgPerSylLP = rawTopLP / sylCount
+        var best: (cand: PinyinCandidate, seg: [PinyinToken], promoteToFirst: Bool, score: Double)?
+
+        for item in vars {
+            let vSegs = segmenter.segmentations(raw: item.text, scheme: .quanpin).filter { $0.allSatisfy { $0.kind == .complete } }
             guard !vSegs.isEmpty else { continue }
-            let (vSeg, vOut) = evaluateSegmentations(vSegs, isT9: false, settings: settings, contextMap: contextMap, limit: 2)
-            guard let top = vOut.first, top.isExact, top.word.count >= 2, top.lp > -11.0 else { continue }
-            if !rawIsExact || top.lp > rawTopLP + 3.5 {
-                if best == nil || top.lp > best!.cand.lp {
-                    best = (top, vSeg)
+            for vSeg in vSegs where vSeg.count <= maxPhraseLen {
+                let exactHits = lookup(tokens: vSeg, start: 0, end: vSeg.count, openEnd: false, isT9: false, settings: settings)
+                guard let rawTop = exactHits.first, rawTop.isExact, rawTop.word.count >= 2 else { continue }
+                let ctxBonus = (contextMap[rawTop.word] ?? 0.0) * Self.contextBigramWeight
+                let effLP = rawTop.lp + ctxBonus
+                guard effLP > -11.0 else { continue }
+
+                let adjusted = PinyinCandidate(
+                    word: rawTop.word,
+                    py: rawTop.py,
+                    lp: effLP,
+                    consumed: raw.count,
+                    isExact: false,
+                    source: rawTop.source
+                )
+
+                switch item.kind {
+                case .swapOrNasalOrFuzzy:
+                    // 原输入若已拼成自然高分短语（如「他说」「去哪」avgPerSylLP > -9.3），不强抢首位，仅对真正错拼（美哟/生么/自到）置顶
+                    let shouldPromote = (!rawIsExact && avgPerSylLP < -9.3) || (effLP > rawTopLP + 4.2)
+                    let acceptSecondary = !rawIsExact && effLP > -9.2 && avgPerSylLP < -8.4
+                    if shouldPromote || acceptSecondary {
+                        let rankScore = effLP + (shouldPromote ? 2.0 : 0.0)
+                        if best == nil || rankScore > best!.score {
+                            best = (adjusted, vSeg, shouldPromote, rankScore)
+                        }
+                    }
+                case .adjacentInitial:
+                    // 邻键首字母替换（如 mihao -> 你好）门槛更严：原句必须是低分生硬单字拼接（avgPerSylLP < -10.1）且目标为超高频词才置顶；
+                    // 否则仅温和放入第 2 候选位，彻底杜绝正常聊天短语被邻键词覆盖！
+                    let shouldPromote = !rawIsExact && avgPerSylLP < -10.1 && effLP > -9.5
+                    let acceptSecondary = !rawIsExact && avgPerSylLP < -9.4 && effLP > -8.8
+                    if shouldPromote || acceptSecondary {
+                        let rankScore = effLP + (shouldPromote ? 1.5 : -0.5)
+                        if best == nil || rankScore > best!.score {
+                            best = (adjusted, vSeg, shouldPromote, rankScore)
+                        }
+                    }
                 }
             }
         }
-        return best
+        return best.map { ($0.cand, $0.seg, $0.promoteToFirst) }
     }
 
     private func attemptTailAdjacentFix(
@@ -1236,11 +1299,15 @@ final class PinyinEngine {
                 sub[pos] = rep
                 let vSegs = segmenter.segmentations(raw: String(sub), scheme: .quanpin)
                     .filter { $0.allSatisfy { $0.kind == .complete } }
-                guard !vSegs.isEmpty else { continue }
-                let (_, vOut) = evaluateSegmentations(vSegs, isT9: false, settings: settings, contextMap: contextMap, limit: 2)
-                if let top = vOut.first, top.isExact, top.word.count >= 2, top.lp > rawTopLP + 2.5 {
-                    if best == nil || top.lp > best!.lp {
-                        best = PinyinCandidate(word: top.word, py: top.py, lp: top.lp, consumed: raw.count, isExact: false, source: top.source)
+                for vSeg in vSegs where vSeg.count <= maxPhraseLen {
+                    let hits = lookup(tokens: vSeg, start: 0, end: vSeg.count, openEnd: false, isT9: false, settings: settings)
+                    if let top = hits.first, top.isExact, top.word.count >= 2 {
+                        let effLP = top.lp + (contextMap[top.word] ?? 0.0) * Self.contextBigramWeight
+                        if effLP > rawTopLP + 2.8 && effLP > -10.8 {
+                            if best == nil || effLP > best!.lp {
+                                best = PinyinCandidate(word: top.word, py: top.py, lp: effLP, consumed: raw.count, isExact: false, source: top.source)
+                            }
+                        }
                     }
                 }
             }
@@ -1629,6 +1696,41 @@ final class PinyinEngine {
                     let lp = sqlite3_column_double(stmt, 2)
                     let boost = userBoostByKey["\(word)|\(py)"] ?? 0.0
                     consider(word: word, py: py, baseLP: lp + boost, isUser: boost > 0)
+                }
+            }
+        }
+
+        // 合并轻量补充词包：现代口语热词 + 四字成语 + Unicode BMP 全量扩展生僻单字（如 幵/龘/人名古籍字）
+        for abbr in abbrs {
+            for item in SupplementLexicon.shared.phrases(forAbbr: abbr, isT9: isT9, nearDatabaseURL: dbURL) {
+                let boost = userBoostByKey["\(item.word)|\(item.py)"] ?? 0.0
+                consider(word: item.word, py: item.py, baseLP: item.lp + boost, isUser: boost > 0)
+            }
+        }
+        if span.count == 1 {
+            let tok = span[0]
+            for syl in PinyinSyllables.all {
+                let match = isT9
+                    ? matchT9Token(tok, syllable: syl, allowPrefix: false)
+                    : match26Token(tok, syllable: syl, allowPrefix: false, fuzzy: settings.fuzzy)
+                guard match.matched && match.exact else { continue }
+                // 纯单声母简拼（如仅敲下 'y' 或 T9 '9' 且并非完整音节）不展开上千生僻单字；敲定完整音节（如 yi / jian / da / 94 / 5426）时 100% 完整返回！
+                if tok.kind == .partial && tok.lockedSyllable == nil && syl != tok.text {
+                    if isT9 && (segmenter.sylToT9[syl] ?? PinyinSegmenter.t9Code(for: syl)) != tok.text {
+                        continue
+                    } else if !isT9 {
+                        continue
+                    }
+                }
+                let rareStr = SupplementLexicon.shared.rareCharacters(forSyllable: syl, nearDatabaseURL: dbURL)
+                guard !rareStr.isEmpty else { continue }
+                var idx = 0
+                for ch in rareStr {
+                    let w = String(ch)
+                    let boost = userBoostByKey["\(w)|\(syl)"] ?? 0.0
+                    let baseLP = (boost > 0) ? (-10.5 + boost) : (-22.0 - Double(idx) * 0.008)
+                    consider(word: w, py: syl, baseLP: baseLP, isUser: boost > 0)
+                    idx += 1
                 }
             }
         }
