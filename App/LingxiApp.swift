@@ -21,6 +21,13 @@ struct LingxiApp: App {
                         appState.requestedTab = 2
                     case "permissions":
                         appState.showPermissionsCenter = true
+                    case "voice-warmup":
+                        Task {
+                            let res = await BackgroundVoiceEngine.shared.warmUp()
+                            await MainActor.run {
+                                appState.voiceEngineBannerMessage = res.message
+                            }
+                        }
                     case "voice-translate":
                         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
                         let autoStart = comps?.queryItems?.contains(where: { $0.name == "autostart" && $0.value == "1" }) == true

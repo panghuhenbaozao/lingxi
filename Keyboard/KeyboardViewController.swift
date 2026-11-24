@@ -6,7 +6,7 @@ private final class LingxiInputRootView: UIView, UIInputViewAudioFeedback {
     var enableInputClicksWhenVisible: Bool { true }
 }
 
-final class KeyboardViewController: UIInputViewController {
+final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeObserver {
     private static let toolbarHeight: CGFloat = 50
     /// 顶部栏实际高度：默认 50，可由设置页候选栏高度调节（44-64）
     private var effectiveToolbarHeight: CGFloat { CGFloat(settings.candidateBarHeight) }
@@ -16,6 +16,8 @@ final class KeyboardViewController: UIInputViewController {
         case numbers
         case clipboard
         case ai
+        case voice
+        case screenshot
         case quickSettings
         case editPad
     }
@@ -53,8 +55,15 @@ final class KeyboardViewController: UIInputViewController {
     private let expandedCandidates = ExpandedCandidatesView()
     private let clipboardPanel = ClipboardPanelView()
     private let aiPanel = AIAssistantPanelView()
+    private let voicePanel = VoiceInputPanelView()
+    private let screenshotPanel = ScreenshotVisionPanelView()
     private let quickSettingsPanel = QuickSettingsSheetView()
     private let editPadPanel = TextEditingPadView()
+
+    // 自动截屏检测（PHPhotoLibraryChangeObserver + 剪贴板图片变更）
+    private var isObservingPhotoLibrary = false
+    private var lastHandledScreenshotAssetID: String?
+    private var lastHandledPasteboardImageChangeCount: Int = -1
 
     // 中文/英文输入状态机
     private var activePanel: ActivePanel = .letters
@@ -141,6 +150,12 @@ final class KeyboardViewController: UIInputViewController {
 
     // MARK: - 生命周期
 
+    deinit {
+        if isObservingPhotoLibrary {
+            PHPhotoLibrary.shared().unregisterChangeObserver(self)
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         settings = LingxiSettings.load(force: true)
@@ -191,6 +206,8 @@ final class KeyboardViewController: UIInputViewController {
         if activePanel == .ai {
             aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
         }
+        registerPhotoScreenshotObserverIfNeeded()
+        checkPasteboardScreenshotOnAppearIfNeeded()
         if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
             triggerSideloadBridgeSync(force: false)
         }
@@ -198,6 +215,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        voicePanel.stopAllRecording(runFinalTranslate: false)
         TypingStatsStore.shared.flush()
         flushTypingHabitSessionIfNeeded()
         TouchOffsetCalibrator.shared.flush()
@@ -459,6 +477,8 @@ final class KeyboardViewController: UIInputViewController {
             expandedCandidates,
             clipboardPanel,
             aiPanel,
+            voicePanel,
+            screenshotPanel,
             quickSettingsPanel,
             editPadPanel,
         ]
@@ -608,6 +628,14 @@ final class KeyboardViewController: UIInputViewController {
             } else {
                 bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 312)
             }
+        } else if activePanel == .screenshot {
+            if screenshotPanel.isExpandedReadingHeight {
+                bodyH = isCompactLandscape ? max(baseH, 218) : max(baseH, 380)
+            } else {
+                bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 316)
+            }
+        } else if activePanel == .voice {
+            bodyH = isCompactLandscape ? max(baseH, 194) : max(baseH, 296)
         } else if activePanel == .clipboard {
             bodyH = isCompactLandscape ? max(baseH, 184) : max(baseH, 268)
         } else {
@@ -658,6 +686,101 @@ final class KeyboardViewController: UIInputViewController {
         return ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - 键盘内自动截屏监听（PHPhotoLibraryChangeObserver + 剪贴板图片变更）与键盘内语音/识图入口
+
+    private func registerPhotoScreenshotObserverIfNeeded() {
+        guard hasFullAccess, !isObservingPhotoLibrary else { return }
+        let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard st == .authorized || st == .limited else { return }
+        // 记录当前最新截屏 ID，防止刚打开键盘时把几小时前的旧截屏误判为新截屏
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        opts.fetchLimit = 1
+        opts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
+        if let latest = PHAsset.fetchAssets(with: .image, options: opts).firstObject {
+            lastHandledScreenshotAssetID = latest.localIdentifier
+        }
+        PHPhotoLibrary.shared().register(self)
+        isObservingPhotoLibrary = true
+    }
+
+    private func checkPasteboardScreenshotOnAppearIfNeeded() {
+        guard hasFullAccess, settings.autoAnalyzeNewScreenshot else { return }
+        let pb = UIPasteboard.general
+        guard pb.hasImages else { return }
+        let count = pb.changeCount
+        guard count != lastHandledPasteboardImageChangeCount else { return }
+        lastHandledPasteboardImageChangeCount = count
+        guard let img = pb.image,
+              let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else { return }
+        // 用户通过快捷指令「灵犀截屏识图」截屏并拷贝回剪贴板后切回聊天框：键盘内自动弹出识图面板并直接开始 AI 识别！
+        switchToPanel(.screenshot, autoPrepareScreenshot: false)
+        screenshotPanel.presentDetectedScreenshot(
+            image: img,
+            jpegData: jpeg,
+            sourceLabel: "自动捕获剪贴板截屏",
+            assetID: nil,
+            fromPasteboard: true,
+            theme: resolvedTheme,
+            settings: settings,
+            hasFullAccess: hasFullAccess,
+            autoStart: true
+        )
+    }
+
+    func photoLibraryDidChange(_ changeInstance: PHChange) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let opts = PHFetchOptions()
+            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            opts.fetchLimit = 1
+            opts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
+            guard let latest = PHAsset.fetchAssets(with: .image, options: opts).firstObject,
+                  let created = latest.creationDate,
+                  Date().timeIntervalSince(created) <= 25 else {
+                return
+            }
+            let assetID = latest.localIdentifier
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.hasFullAccess,
+                      self.settings.autoAnalyzeNewScreenshot,
+                      assetID != self.lastHandledScreenshotAssetID else { return }
+                self.lastHandledScreenshotAssetID = assetID
+
+                let req = PHImageRequestOptions()
+                req.deliveryMode = .highQualityFormat
+                req.isSynchronous = false
+                req.isNetworkAccessAllowed = true
+                req.resizeMode = .fast
+                PHImageManager.default().requestImage(
+                    for: latest,
+                    targetSize: CGSize(width: 1280, height: 1280),
+                    contentMode: .aspectFit,
+                    options: req
+                ) { [weak self] img, info in
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    guard !degraded, let self, let img,
+                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else { return }
+                    DispatchQueue.main.async {
+                        self.switchToPanel(.screenshot, autoPrepareScreenshot: false)
+                        self.screenshotPanel.presentDetectedScreenshot(
+                            image: img,
+                            jpegData: jpeg,
+                            sourceLabel: "刚刚自动捕获的新截屏",
+                            assetID: assetID,
+                            fromPasteboard: false,
+                            theme: self.resolvedTheme,
+                            settings: self.settings,
+                            hasFullAccess: self.hasFullAccess,
+                            autoStart: true
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private func openHostScreenshotWorkbench(deleteAssetID: String? = nil) {
         let urlStr: String
         if let assetID = deleteAssetID, !assetID.isEmpty,
@@ -667,17 +790,17 @@ final class KeyboardViewController: UIInputViewController {
             urlStr = "lingxi://screenshot-ai?auto=1"
         }
         guard let url = URL(string: urlStr) else { return }
+        openURLFromExtension(url) { _ in }
+    }
+
+    private func triggerAutoScreenshotShortcut() {
+        // 调用 iOS 苹果快捷指令「灵犀截屏识图」（2步：截屏 -> 拷贝至剪贴板），完成后切回聊天框键盘自动秒识并自动清空剪贴板！
+        let encoded = "灵犀截屏识图".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "shortcuts://run-shortcut?name=\(encoded)") else { return }
         openURLFromExtension(url) { [weak self] opened in
-            guard let self, !opened else { return }
-            self.switchToPanel(.ai)
-            self.aiPanel.prepare(
-                theme: self.resolvedTheme,
-                hasFullAccess: self.hasFullAccess,
-                beforeCursor: "",
-                clipboardText: nil,
-                preferredAction: nil,
-                preservedDraft: ""
-            )
+            if !opened {
+                self?.openHostScreenshotWorkbench(deleteAssetID: nil)
+            }
         }
     }
 
@@ -686,77 +809,8 @@ final class KeyboardViewController: UIInputViewController {
         if !AppGroup.isAvailable && hasFullAccess {
             _ = tryImportBridgeTokenFromPasteboardIfPresent()
         }
-        guard hasFullAccess else {
-            openHostPermissionsCenter()
-            return
-        }
-
-        // 1. 优先秒抓系统剪贴板中的最新截屏（搭配「快捷指令一键截屏拷贝」零跳转、传完秒清剪贴板）
-        if UIPasteboard.general.hasImages,
-           let img = UIPasteboard.general.image,
-           let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) {
-            switchToPanel(.ai)
-            aiPanel.runScreenshotVision(
-                imageData: jpeg,
-                sourceLabel: "剪贴板截屏",
-                assetLocalIdentifier: nil,
-                clearPasteboardAfterUpload: true,
-                autoDelete: settings.autoDeleteUploadedScreenshot,
-                theme: resolvedTheme,
-                hasFullAccess: hasFullAccess
-            )
-            return
-        }
-
-        // 2. 若已授相册权限，在键盘内直接读取最近 15 分钟内最新一张系统截屏，秒速上传 AI 识别并按设置自动删除
-        let photoStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        if photoStatus == .authorized || photoStatus == .limited {
-            let options = PHFetchOptions()
-            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            options.fetchLimit = 3
-            options.predicate = NSPredicate(
-                format: "(mediaSubtype & %d) != 0",
-                PHAssetMediaSubtype.photoScreenshot.rawValue
-            )
-            let fetched = PHAsset.fetchAssets(with: .image, options: options)
-            if let latest = fetched.firstObject,
-               let created = latest.creationDate,
-               Date().timeIntervalSince(created) <= 900 {
-                let reqOpts = PHImageRequestOptions()
-                reqOpts.deliveryMode = .highQualityFormat
-                reqOpts.isSynchronous = false
-                reqOpts.isNetworkAccessAllowed = true
-                reqOpts.resizeMode = .fast
-                let targetSize = CGSize(width: 1280, height: 1280)
-                let assetID = latest.localIdentifier
-                let autoDel = settings.autoDeleteUploadedScreenshot
-                switchToPanel(.ai)
-                PHImageManager.default().requestImage(
-                    for: latest,
-                    targetSize: targetSize,
-                    contentMode: .aspectFit,
-                    options: reqOpts
-                ) { [weak self] image, _ in
-                    guard let self, let image,
-                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: image) else { return }
-                    DispatchQueue.main.async {
-                        self.aiPanel.runScreenshotVision(
-                            imageData: jpeg,
-                            sourceLabel: "相册最新截屏",
-                            assetLocalIdentifier: assetID,
-                            clearPasteboardAfterUpload: false,
-                            autoDelete: autoDel,
-                            theme: self.resolvedTheme,
-                            hasFullAccess: self.hasFullAccess
-                        )
-                    }
-                }
-                return
-            }
-        }
-
-        // 3. 若暂无近期截屏或尚未开启相册权限，同步一键拉起主 App「截屏识图工作台」（支持授权、读屏、AI识别与上传后自动删图）
-        openHostScreenshotWorkbench(deleteAssetID: nil)
+        // 彻底留在键盘内完成截屏预览、AI 识图、自动删图与插入上屏，绝不强跳主 App！
+        switchToPanel(activePanel == .screenshot ? .letters : .screenshot)
     }
 
     private func openHostPermissionsCenter() {
@@ -769,18 +823,25 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func handleOpenInKeyboardVoicePanel() {
+        commitRawIfNeeded()
+        if !AppGroup.isAvailable && hasFullAccess {
+            _ = tryImportBridgeTokenFromPasteboardIfPresent()
+        }
+        // 彻底留在键盘内完成语音识别与双语实时转换，绝不强跳主 App！
+        switchToPanel(activePanel == .voice ? .letters : .voice)
+    }
+
+    private func openHostVoiceWarmUp() {
+        guard let url = URL(string: "lingxi://voice-warmup") else { return }
+        openURLFromExtension(url) { _ in }
+    }
+
     private func openHostVoiceTranslator() {
         guard let url = URL(string: "lingxi://voice-translate?autostart=1") else { return }
         openURLFromExtension(url) { [weak self] opened in
             guard let self, !opened else { return }
-            if self.isTranslateMode {
-                self.translateErrorText = self.hasFullAccess
-                    ? "请切到桌面打开「灵犀输入法 App → 语音互译」使用实时双语语音转换"
-                    : "需开启「允许完全访问」后点顶栏「🎙️语音」（右下角灰色麦是苹果自带切换键）"
-                self.refreshToolbar()
-            } else {
-                self.openAIPanel(preferredAction: nil, explicitClipboard: nil)
-            }
+            self.switchToPanel(.voice)
         }
     }
 
@@ -900,7 +961,7 @@ final class KeyboardViewController: UIInputViewController {
                     self.refreshToolbar()
                 }
             case .openVoiceTranslator:
-                self.openHostVoiceTranslator()
+                self.handleOpenInKeyboardVoicePanel()
             case .clearTranslateSource:
                 self.cancelLiveTranslation()
                 self.clearAllComposing()
@@ -1006,6 +1067,60 @@ final class KeyboardViewController: UIInputViewController {
         }
         aiPanel.onClose = { [weak self] in
             self?.aiPromptDraft = nil
+            self?.switchToPanel(.letters)
+        }
+
+        voicePanel.onInsertText = { [weak self] text in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.exitTransientAIAndTranslateModes()
+            self.insertDirectlyIntoHost(text)
+            self.switchToPanel(.letters)
+        }
+        voicePanel.onWarmUpHostVoiceEngine = { [weak self] in
+            self?.openHostVoiceWarmUp()
+        }
+        voicePanel.onOpenFullVoiceWorkbench = { [weak self] in
+            self?.openHostVoiceTranslator()
+        }
+        voicePanel.onOpenPermissions = { [weak self] in
+            self?.openHostPermissionsCenter()
+        }
+        voicePanel.onClose = { [weak self] in
+            self?.switchToPanel(.letters)
+        }
+
+        screenshotPanel.onInsertText = { [weak self] text in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.exitTransientAIAndTranslateModes()
+            self.insertDirectlyIntoHost(text)
+            self.switchToPanel(.letters)
+        }
+        screenshotPanel.onSettingsChanged = { [weak self] updated in
+            self?.settings = updated
+            self?.triggerSideloadBridgeSync(force: true)
+        }
+        screenshotPanel.onReadingHeightChanged = { [weak self] _ in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.updatePreferredHeight()
+                self.view.layoutIfNeeded()
+            }
+        }
+        screenshotPanel.onTriggerAutoScreenshotShortcut = { [weak self] in
+            self?.triggerAutoScreenshotShortcut()
+        }
+        screenshotPanel.onOpenPermissions = { [weak self] in
+            self?.openHostPermissionsCenter()
+        }
+        screenshotPanel.onOpenHostDeleteAsset = { [weak self] assetID in
+            self?.openHostScreenshotWorkbench(deleteAssetID: assetID)
+        }
+        screenshotPanel.onOpenHostWorkbench = { [weak self] in
+            self?.openHostScreenshotWorkbench(deleteAssetID: nil)
+        }
+        screenshotPanel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
         }
 
@@ -1437,7 +1552,7 @@ final class KeyboardViewController: UIInputViewController {
         case .openScreenshotAI:
             handleOpenScreenshotAI()
         case .openVoiceTranslator:
-            openHostVoiceTranslator()
+            handleOpenInKeyboardVoicePanel()
         case .cycleTranslateTarget:
             cycleTranslateTargetLanguage()
         case .toggleTranslateTone:
@@ -2078,6 +2193,36 @@ final class KeyboardViewController: UIInputViewController {
             currentCorrectedHint = nil
             uModeDisplayBuffer = uRes.displayBuffer
             merged = uRes.candidates
+            let hadUModeHits = !merged.isEmpty
+            // 修复「点 u 不显示字母 / 输 u 开头英文无候选」Bug：
+            // 始终保留原文与英文前缀直出候选（如 u / ui / url / user / update），同时完整保留拆字/笔画命中置顶！
+            var seenU = Set(merged.map(\.word))
+            if seenU.insert(rawComposing).inserted {
+                merged.insert(
+                    PinyinCandidate(
+                        word: rawComposing,
+                        py: "",
+                        lp: hadUModeHits ? -5.0 : 0.0,
+                        consumed: rawComposing.count,
+                        isExact: true,
+                        source: .englishDirect
+                    ),
+                    at: hadUModeHits ? min(1, merged.count) : 0
+                )
+            }
+            if settings.smartEnglishCandidate {
+                for (idx, ew) in engine.queryEnglish(prefix: rawComposing, limit: 6).enumerated()
+                where seenU.insert(ew).inserted {
+                    merged.append(PinyinCandidate(
+                        word: ew,
+                        py: "",
+                        lp: -2.0 - Double(idx) * 0.1,
+                        consumed: rawComposing.count,
+                        isExact: ew.lowercased() == rawComposing.lowercased(),
+                        source: .englishDirect
+                    ))
+                }
+            }
         } else if isUsingT9Layout {
             let res = engine.queryT9(
                 digits: rawComposing,
@@ -3003,7 +3148,10 @@ final class KeyboardViewController: UIInputViewController {
 
     // MARK: - 面板切换与主题刷新
 
-    private func switchToPanel(_ target: ActivePanel) {
+    private func switchToPanel(_ target: ActivePanel, autoPrepareScreenshot: Bool = true) {
+        if activePanel == .voice && target != .voice {
+            voicePanel.stopAllRecording(runFinalTranslate: false)
+        }
         activePanel = target
         isCandidatesExpanded = false
         updatePreferredHeight()
@@ -3028,6 +3176,17 @@ final class KeyboardViewController: UIInputViewController {
             numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
         case .editPad:
             editPadPanel.apply(theme: resolvedTheme)
+        case .voice:
+            voicePanel.prepare(theme: resolvedTheme, hasFullAccess: hasFullAccess)
+        case .screenshot:
+            if autoPrepareScreenshot {
+                screenshotPanel.prepare(
+                    theme: resolvedTheme,
+                    settings: settings,
+                    hasFullAccess: hasFullAccess,
+                    autoAnalyzeLatest: true
+                )
+            }
         case .letters, .ai:
             break
         }
@@ -3042,6 +3201,8 @@ final class KeyboardViewController: UIInputViewController {
         numberPad.isHidden = (activePanel != .numbers)
         clipboardPanel.isHidden = (activePanel != .clipboard)
         aiPanel.isHidden = (activePanel != .ai)
+        voicePanel.isHidden = (activePanel != .voice)
+        screenshotPanel.isHidden = (activePanel != .screenshot)
         quickSettingsPanel.isHidden = (activePanel != .quickSettings)
         editPadPanel.isHidden = (activePanel != .editPad)
     }
@@ -3075,6 +3236,10 @@ final class KeyboardViewController: UIInputViewController {
             )
         } else if activePanel == .ai {
             aiPanel.applyTheme(resolvedTheme)
+        } else if activePanel == .voice {
+            voicePanel.applyTheme(resolvedTheme)
+        } else if activePanel == .screenshot {
+            screenshotPanel.applyTheme(resolvedTheme)
         }
         refreshUI()
     }

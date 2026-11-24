@@ -356,10 +356,10 @@ struct ScreenshotVisionView: View {
 
     private var quickTipCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("⚡ 真·一键截屏识图技巧", systemImage: "bolt.fill")
+            Label("⚡ 键盘内真·一键自动截屏识图（零相册残留）", systemImage: "bolt.fill")
                 .font(.caption.bold())
                 .foregroundStyle(Color(Design.Palette.accent))
-            Text("1. 开启系统「设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下 → 截屏」，聊到一半轻敲手机背面即刻截屏；\n2. 紧接着点灵犀键盘顶栏「📷 识图」，键盘直接抓取最新截屏上传 AI 生成回复，上传完成后自动删除原截屏！")
+            Text("方案 1（系统监听 · 零配置）：授予相册读写权限后，在微信/抖音按「电源+音量上」或「轻点背面两下」截屏，键盘 1 秒内自动弹起识图面板并上传分析；\n方案 2（键盘内点「⚡截屏」零相册残留）：打开苹果「快捷指令」新建名为「灵犀截屏识图」的 2 步指令（① 截屏 ② 拷贝至剪贴板），以后在键盘内点「⚡截屏」即自动截屏识图并在传完后秒清剪贴板！")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

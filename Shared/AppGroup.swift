@@ -8,6 +8,8 @@ enum AppGroupNotifications {
     static let statsChanged = "com.lingxi.ime.statsChanged"
     static let aiConfigChanged = "com.lingxi.ime.aiConfigChanged"
     static let permissionsChanged = "com.lingxi.ime.permissionsChanged"
+    static let voiceCommand = "com.lingxi.ime.voiceCommand"
+    static let voiceState = "com.lingxi.ime.voiceState"
 
     static func post(_ name: String) {
         let center = CFNotificationCenterGetDarwinNotifyCenter()

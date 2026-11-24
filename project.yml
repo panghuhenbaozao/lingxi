@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "5.5.0"
+    MARKETING_VERSION: "5.6.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
@@ -49,6 +49,8 @@ targets:
         NSSpeechRecognitionUsageDescription: 用于语音输入并通过灵犀 AI 智能去除口水词与润色
         NSMicrophoneUsageDescription: 用于语音输入转写
         NSLocationWhenInUseUsageDescription: 用于实时感知您当前所在城市、区县与周边地标（路名、商圈、车站、小区），自动提升本地地名打字命中率并辅助 AI 语境理解，位置数据 100% 留存本机绝不上云
+        UIBackgroundModes:
+          - audio
         CFBundleURLTypes:
           - CFBundleURLName: com.lingxi.ime.auth
             CFBundleURLSchemes:
@@ -103,6 +105,8 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LingxiAppGroup: group.com.lingxi.ime
         NSPhotoLibraryUsageDescription: 用于键盘一键抓取最新截屏发送给 AI 识别，并在上传完成后自动删除原截屏
+        NSMicrophoneUsageDescription: 用于在键盘内直接进行语音输入与实时双语转换
+        NSSpeechRecognitionUsageDescription: 用于在键盘内实时将语音转为文字与双语翻译
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSAllowsArbitraryLoads: true

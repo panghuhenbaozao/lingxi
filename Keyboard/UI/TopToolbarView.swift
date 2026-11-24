@@ -123,6 +123,7 @@ final class TopToolbarView: UIView {
 
     private var theme: ResolvedTheme?
     private var hasCandidates = false
+    private var hasComposingBar = false
     private var isAIPromptMode = false
     private var isTranslateBarActive = false
     private var hasFullAccess = false
@@ -510,7 +511,7 @@ final class TopToolbarView: UIView {
         pasteTargetView.frame = CGRect(x: 2, y: 2, width: 4, height: 4)
         bottomHairline.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
 
-        if hasCandidates {
+        if hasComposingBar {
             let showComposing = !(composingLabel.text ?? "").isEmpty || !composingChipContainer.isHidden
             composingScrollView.isHidden = !showComposing
             if showComposing {
@@ -719,12 +720,15 @@ final class TopToolbarView: UIView {
         self.activeEditingSyllableIdx = activeSyllableIndex
         applyToolbarConfiguration()
         self.hasCandidates = !candidates.isEmpty
+        let hasTypedComposing = !composingDisplay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || composingSyllables.count >= 2
+        // 关键修复：即使候选词暂时为空（例如刚敲下 u 或输入 u 开头的英文/拆字），也必须展示组词条，绝不隐藏已输入的字母！
+        self.hasComposingBar = hasCandidates || hasTypedComposing
         self.currentBannerState = bannerState
         self.hasFullAccess = hasFullAccess
         self.isAIPromptMode = (aiPromptDraft != nil)
         self.isTranslateBarActive = (translateState != nil)
-        self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
-        self.activeInlineCommand = (!hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && hasFullAccess) ? inlineAICommand : nil
+        self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
+        self.activeInlineCommand = (!hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && hasFullAccess) ? inlineAICommand : nil
 
         let desiredLayoutTitle = layoutMode == .qwerty26 ? "九键" : "26键"
         if layoutButton.title(for: .normal) != desiredLayoutTitle {
@@ -744,10 +748,11 @@ final class TopToolbarView: UIView {
         } else {
             composingChipContainer.isHidden = true
             composingLabel.isHidden = false
-            composingLabel.text = showComposingStrip ? composingDisplay : ""
+            // 若仅有字母但无候选（如单敲 u），强制展示字母串，绝不让用户看不见自己敲的字母
+            composingLabel.text = (showComposingStrip || !hasCandidates) ? composingDisplay : ""
         }
         candidateBar.isHidden = !hasCandidates
-        idleContainer.isHidden = hasCandidates
+        idleContainer.isHidden = hasComposingBar
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
         if let cmd = activeInlineCommand {

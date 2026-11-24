@@ -323,6 +323,7 @@ struct LingxiSettings: Codable, Equatable {
     var geoLocationBoostEnabled: Bool = true
     var aiGeoContextEnabled: Bool = true
     var autoDeleteUploadedScreenshot: Bool = true
+    var autoAnalyzeNewScreenshot: Bool = true
     var customSwipeUpMap: [String: String] = [:]
     var customSwipeDownMap: [String: String] = [:]
 
@@ -359,7 +360,7 @@ struct LingxiSettings: Codable, Equatable {
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled, typingStatsDefaultMigratedV52
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
-        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, customSwipeUpMap, customSwipeDownMap
+        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, autoAnalyzeNewScreenshot, customSwipeUpMap, customSwipeDownMap
     }
 
     init() {}
@@ -435,6 +436,7 @@ struct LingxiSettings: Codable, Equatable {
         geoLocationBoostEnabled = try c.decodeIfPresent(Bool.self, forKey: .geoLocationBoostEnabled) ?? d.geoLocationBoostEnabled
         aiGeoContextEnabled = try c.decodeIfPresent(Bool.self, forKey: .aiGeoContextEnabled) ?? d.aiGeoContextEnabled
         autoDeleteUploadedScreenshot = try c.decodeIfPresent(Bool.self, forKey: .autoDeleteUploadedScreenshot) ?? d.autoDeleteUploadedScreenshot
+        autoAnalyzeNewScreenshot = try c.decodeIfPresent(Bool.self, forKey: .autoAnalyzeNewScreenshot) ?? d.autoAnalyzeNewScreenshot
         customSwipeUpMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeUpMap) ?? d.customSwipeUpMap
         customSwipeDownMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeDownMap) ?? d.customSwipeDownMap
     }

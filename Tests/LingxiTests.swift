@@ -2244,4 +2244,39 @@ final class LingxiTests: XCTestCase {
             XCTAssertFalse(p.systemInstruction.isEmpty)
         }
     }
+
+    func testV560VoiceIPCBridgeAutoScreenshotAndUModeDisplay() throws {
+        // 1. VoiceIPCCommand / VoiceIPCState 编解码与心跳保鲜校验
+        let cmd = VoiceIPCCommand(action: .start, modeRaw: VoiceTranslateMode.zhToEn.rawValue)
+        let cmdData = try JSONEncoder().encode(cmd)
+        let decodedCmd = try JSONDecoder().decode(VoiceIPCCommand.self, from: cmdData)
+        XCTAssertEqual(decodedCmd.action, .start)
+        XCTAssertEqual(decodedCmd.modeRaw, VoiceTranslateMode.zhToEn.rawValue)
+
+        var st = VoiceIPCState(
+            engineWarm: true,
+            isRecording: true,
+            isTranslating: false,
+            modeRaw: VoiceTranslateMode.enToZh.rawValue,
+            transcript: "Hello world",
+            translatedText: "你好世界",
+            audioLevel: 0.42,
+            statusText: "录音中",
+            updatedAt: Date().timeIntervalSince1970
+        )
+        XCTAssertTrue(st.isHeartbeatFresh)
+        st.updatedAt = Date().timeIntervalSince1970 - 30.0
+        XCTAssertFalse(st.isHeartbeatFresh, "超时心跳应判定为后台语音引擎已休眠")
+
+        // 2. 自动截屏识图开关默认开启且旧版 JSON 向后兼容
+        XCTAssertTrue(LingxiSettings().autoAnalyzeNewScreenshot)
+        let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data("{}".utf8))
+        XCTAssertTrue(legacy.autoAnalyzeNewScreenshot)
+
+        // 3. 点按 u 键：queryUMode("u") 必须返回可读 displayBuffer，不丢失字母反馈
+        let eng = PinyinEngine()
+        let singleU = eng.queryUMode(raw: "u", limit: 12)
+        XCTAssertFalse(singleU.displayBuffer.isEmpty, "单敲 u 必须返回清晰提示与字母回显")
+        XCTAssertTrue(singleU.displayBuffer.hasPrefix("u"))
+    }
 }

@@ -4,6 +4,7 @@ import UIKit
 /// 极简首页工作台（v5.2）：一屏看清状态、今日字数统计与纯净试打区，告别重复入口与演示噪音。
 struct HomeTestView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var bgVoice = BackgroundVoiceEngine.shared
     @Environment(\.colorScheme) private var colorScheme
     var onSelectTab: ((Int) -> Void)? = nil
 
@@ -147,14 +148,32 @@ struct HomeTestView: View {
                 }
             } else {
                 HStack(spacing: 8) {
-                    actionPill("一键权限中心", icon: "checkmark.shield.fill", filled: false) {
+                    actionPill("一键权限", icon: "checkmark.shield.fill", filled: false) {
                         appState.showPermissionsCenter = true
                     }
-                    actionPill("截屏识图 · 传后自动删", icon: "camera.viewfinder", filled: false) {
-                        appState.screenshotAutoAnalyze = false
-                        appState.showScreenshotVision = true
+                    actionPill(
+                        bgVoice.isWarm ? "键盘语音已就绪" : "激活键盘内语音",
+                        icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
+                        filled: !bgVoice.isWarm
+                    ) {
+                        if bgVoice.isWarm {
+                            bgVoice.shutdown()
+                            appState.voiceEngineBannerMessage = "已关闭后台语音保活"
+                        } else {
+                            Task {
+                                let res = await bgVoice.warmUp()
+                                appState.voiceEngineBannerMessage = res.message
+                            }
+                        }
                     }
                 }
+            }
+
+            if let voiceMsg = appState.voiceEngineBannerMessage {
+                Text(voiceMsg)
+                    .font(.caption2)
+                    .foregroundStyle(voiceMsg.hasPrefix("✓") ? Color(Design.Palette.success) : Color.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             // 仅当检测到免费侧载被系统剥离 App Group 时展示一键同步（含 AI 密钥、外观、设置与字数）
