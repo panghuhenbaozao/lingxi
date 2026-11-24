@@ -7,7 +7,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case translate
     case screenshot
     case voice
-    case emoji
+    case symbols
     case clipboard
     case layout
     case editPad
@@ -20,7 +20,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "实时翻译"
         case .screenshot: return "截屏识图"
         case .voice: return "语音互译"
-        case .emoji: return "表情符号"
+        case .symbols: return "表情符号"
         case .clipboard: return "剪贴板"
         case .layout: return "九键/26键切换"
         case .editPad: return "专业编辑台"
@@ -34,7 +34,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .translate: return "character.bubble"
         case .screenshot: return "camera.viewfinder"
         case .voice: return "mic.fill"
-        case .emoji: return "face.smiling"
+        case .symbols: return "face.smiling"
         case .clipboard: return "doc.on.clipboard"
         case .layout: return "rectangle.grid.3x2"
         case .editPad: return "cursorarrow.and.square.on.square.dashed"

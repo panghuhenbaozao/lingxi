@@ -1330,12 +1330,19 @@ final class PinyinEngine {
         var extendedFull: [PinyinCandidate] = []
         var bestSeg = segs[0]
         var bestScore = -Double.infinity
+        let hasSingleSyllableSeg = segs.contains { $0.count == 1 && $0[0].kind != .invalid }
 
         for tokens in segs {
             let n = tokens.count
-            let full = (n <= maxPhraseLen)
+            var full = (n <= maxPhraseLen)
                 ? lookup(tokens: tokens, start: 0, end: n, openEnd: true, isT9: isT9, settings: settings)
                 : []
+            // 关键防淹没机制：当输入本身是一个合法单音节（如 T9 `94`=yi/xi、`944`=zhi、`9826`=xuan）时，
+            // 纯单键简拼切分（如 `[9,4]`、`[9,4,4]`）仅保留前 20 个超高频常用短语（如「一个」「这个」「喜欢」），
+            // 严禁数千条低频简拼双字/三字词涌入 exactFull 把单音节常用字/生僻字（如 壹/薏/栀/祉/痔/煊）挤出候选池！
+            if hasSingleSyllableSeg && n >= 2 && tokens.allSatisfy({ $0.kind == .partial && $0.raw.count == 1 }) {
+                full = Array(full.filter { $0.isExact && $0.lp > -11.8 }.prefix(20))
+            }
             let sents = (n > 1)
                 ? decodeSentenceBeam(tokens: tokens, isT9: isT9, settings: settings, contextMap: contextMap, maxAlts: 2)
                 : []

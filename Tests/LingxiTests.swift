@@ -542,8 +542,8 @@ final class LingxiTests: XCTestCase {
         let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data(legacyJSON.utf8))
         XCTAssertEqual(legacy.toolbarLayout.count, ToolbarButtonID.allCases.count)
         XCTAssertEqual(legacy.toolbarLayout.map({ $0.buttonID }), ToolbarButtonID.allCases)
-        // v5.5 极简默认：AI/译/截屏识图/语音/剪贴板/设置/撤销可见，编辑面板/九键切换默认隐藏
-        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .screenshot, .voice, .clipboard, .settings, .undo]
+        // v5.8 极简默认：AI/译/截屏识图/语音/表情符号/剪贴板/设置/撤销可见，编辑面板/九键切换默认隐藏
+        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .screenshot, .voice, .symbols, .clipboard, .settings, .undo]
         let visibleByDefault = Set(legacy.toolbarLayout.filter(\.isVisible).map(\.buttonID))
         XCTAssertEqual(visibleByDefault, expectedVisible)
         XCTAssertTrue(legacy.showComposingStrip)
@@ -2373,9 +2373,13 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(t9XuanWords.contains("煊"), "T9 九宫格 9826(xuan) 必须包含 煊")
         XCTAssertTrue(t9XuanWords.contains("瑄"), "T9 九宫格 9826(xuan) 必须包含 瑄")
 
-        let t9YiZhiWords = Set(engine.queryT9(digits: "94", lockedSyllables: [], settings: settings).candidates.map(\.word))
-        for ch in ["壹", "薏", "栀", "祉", "痔"] {
-            XCTAssertTrue(t9YiZhiWords.contains(ch), "T9 九宫格 94(yi/zhi) 必须包含 \(ch)")
+        let t9YiWords = Set(engine.queryT9(digits: "94", lockedSyllables: [], settings: settings).candidates.map(\.word))
+        for ch in ["壹", "薏", "祎", "翊"] {
+            XCTAssertTrue(t9YiWords.contains(ch), "T9 九宫格 94(yi) 必须包含 \(ch)，不得被简拼双字词淹没")
+        }
+        let t9ZhiWords = Set(engine.queryT9(digits: "944", lockedSyllables: [], settings: settings).candidates.map(\.word))
+        for ch in ["栀", "祉", "痔", "栉"] {
+            XCTAssertTrue(t9ZhiWords.contains(ch), "T9 九宫格 944(zhi) 必须包含 \(ch)，不得被简拼三字词淹没")
         }
         let t9DaWords = Set(engine.queryT9(digits: "32", lockedSyllables: [], settings: settings).candidates.map(\.word))
         XCTAssertTrue(t9DaWords.contains("龘"), "T9 九宫格 32(da) 必须能打出 龘")
@@ -2410,8 +2414,8 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(seg.validNextLetters(for: "z", scheme: .quanpin).contains("d"))
 
         // 6. 顶栏新增表情符号入口及旧版配置向后兼容
-        XCTAssertTrue(ToolbarButtonID.allCases.contains(.emoji))
+        XCTAssertTrue(ToolbarButtonID.allCases.contains(.symbols))
         let legacyDecoded = try JSONDecoder().decode(LingxiSettings.self, from: Data("{\"toolbarLayout\":[{\"buttonID\":\"ai\",\"isVisible\":true,\"order\":0}]}".utf8))
-        XCTAssertTrue(legacyDecoded.toolbarLayout.contains(where: { $0.buttonID == .emoji && $0.isVisible }))
+        XCTAssertTrue(legacyDecoded.toolbarLayout.contains(where: { $0.buttonID == .symbols && $0.isVisible }))
     }
 }

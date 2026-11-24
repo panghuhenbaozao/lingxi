@@ -496,7 +496,7 @@ final class TopToolbarView: UIView {
         case .translate: return translateButton
         case .screenshot: return screenshotButton
         case .voice: return voiceButton
-        case .emoji: return emojiButton
+        case .symbols: return emojiButton
         case .clipboard: return clipboardButton
         case .layout: return layoutButton
         case .editPad: return editPadButton
