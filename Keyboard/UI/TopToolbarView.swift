@@ -22,6 +22,8 @@ final class TopToolbarView: UIView {
         case toggleAI
         case toggleTranslateMode
         case openScreenshotAI
+        case analyzeDetectedScreenshot
+        case dismissDetectedScreenshot
         case openVoiceTranslator
         case cycleTranslateTarget
         case toggleTranslateTone
@@ -92,6 +94,13 @@ final class TopToolbarView: UIView {
     private let inlineAICommandBar = UIView()
     private let inlineAICommandBtn = ActionClosureButton(type: .system)
     private var activeInlineCommand: InlineAICommandMatch?
+
+    // 截屏轻提示胶囊（默认不强行弹板不打断打字，也绝不自动弹删图框：点「✨ 识图」即刻识别，点「×」或继续打字即消）
+    private let screenshotNoticeBar = UIView()
+    private let screenshotNoticeLabel = UILabel()
+    private let screenshotAnalyzeBtn = ActionClosureButton(type: .system)
+    private let screenshotDismissBtn = ActionClosureButton(type: .system)
+    private var activeScreenshotNoticeLabel: String?
 
     // 剪贴板 / 短信验证码全栏独占接管胶囊（Full-Bar Takeover）
     private let bannerContainer = UIView()
@@ -315,6 +324,35 @@ final class TopToolbarView: UIView {
             self.onAction?(.executeInlineAICommand(command: match.command, replaceCount: match.fullMatchCount))
         }
         inlineAICommandBar.addSubview(inlineAICommandBtn)
+
+        // 截屏轻提示条（无打扰：发现刚截的屏时温和提示，点「✨ 识图」立即识别，点「×」关闭）
+        screenshotNoticeBar.isHidden = true
+        screenshotNoticeBar.layer.cornerRadius = 17
+        screenshotNoticeBar.layer.cornerCurve = .continuous
+        screenshotNoticeBar.layer.borderWidth = 0.5
+        idleContainer.addSubview(screenshotNoticeBar)
+
+        screenshotNoticeLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        screenshotNoticeLabel.lineBreakMode = .byTruncatingTail
+        screenshotNoticeBar.addSubview(screenshotNoticeLabel)
+
+        screenshotAnalyzeBtn.setTitle("✨ 识图", for: .normal)
+        screenshotAnalyzeBtn.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+        screenshotAnalyzeBtn.layer.cornerRadius = 13
+        screenshotAnalyzeBtn.layer.cornerCurve = .continuous
+        screenshotAnalyzeBtn.contentEdgeInsets = UIEdgeInsets(top: 4, left: 11, bottom: 4, right: 11)
+        screenshotAnalyzeBtn.actionHandler = { [weak self] in
+            self?.onAction?(.analyzeDetectedScreenshot)
+        }
+        screenshotNoticeBar.addSubview(screenshotAnalyzeBtn)
+
+        let shotXCfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .bold)
+        screenshotDismissBtn.setImage(UIImage(systemName: "xmark", withConfiguration: shotXCfg), for: .normal)
+        screenshotDismissBtn.accessibilityLabel = "关闭截屏提示"
+        screenshotDismissBtn.actionHandler = { [weak self] in
+            self?.onAction?(.dismissDetectedScreenshot)
+        }
+        screenshotNoticeBar.addSubview(screenshotDismissBtn)
 
         // 全栏接管胶囊容器（复制内容 / 短信验证码到来时整栏替换显示）
         bannerContainer.isHidden = true
@@ -574,6 +612,23 @@ final class TopToolbarView: UIView {
             inlineAICommandBtn.frame = CGRect(x: 12, y: pillY, width: max(80, bounds.width - 24), height: pillH)
         }
 
+        if !screenshotNoticeBar.isHidden {
+            let sH: CGFloat = min(34, bounds.height - 10)
+            screenshotNoticeBar.frame = CGRect(
+                x: 10,
+                y: (bounds.height - sH) / 2,
+                width: max(0, bounds.width - 20),
+                height: sH
+            )
+            let xW: CGFloat = 28
+            let actW: CGFloat = 68
+            let btnH: CGFloat = max(24, sH - 8)
+            let btnY: CGFloat = (sH - btnH) / 2
+            screenshotDismissBtn.frame = CGRect(x: screenshotNoticeBar.bounds.width - xW - 4, y: btnY, width: xW, height: btnH)
+            screenshotAnalyzeBtn.frame = CGRect(x: screenshotDismissBtn.frame.minX - actW - 4, y: btnY, width: actW, height: btnH)
+            screenshotNoticeLabel.frame = CGRect(x: 12, y: 0, width: max(40, screenshotAnalyzeBtn.frame.minX - 18), height: sH)
+        }
+
         // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
         let bannerH: CGFloat = min(36, bounds.height - 10)
         bannerContainer.frame = CGRect(
@@ -641,6 +696,13 @@ final class TopToolbarView: UIView {
 
         bannerContainer.backgroundColor = theme.keyFill
         bannerContainer.layer.borderColor = theme.candidateHighlight.withAlphaComponent(0.28).cgColor
+
+        screenshotNoticeBar.backgroundColor = theme.keyFill
+        screenshotNoticeBar.layer.borderColor = theme.accentFill.withAlphaComponent(0.32).cgColor
+        screenshotNoticeLabel.textColor = theme.keyText
+        screenshotAnalyzeBtn.backgroundColor = theme.accentFill
+        screenshotAnalyzeBtn.setTitleColor(theme.accentText, for: .normal)
+        screenshotDismissBtn.tintColor = theme.keyHintText
 
         aiPromptBar.backgroundColor = theme.accentFill.withAlphaComponent(0.10)
         aiPromptLabel.textColor = theme.keyText
@@ -713,7 +775,8 @@ final class TopToolbarView: UIView {
         hasFullAccess: Bool,
         toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
         showComposingStrip: Bool = true,
-        isIdlePredictionMode: Bool = false
+        isIdlePredictionMode: Bool = false,
+        screenshotDetectedLabel: String? = nil
     ) {
         self.toolbarLayout = toolbarLayout
         self.showComposingStrip = showComposingStrip
@@ -729,6 +792,10 @@ final class TopToolbarView: UIView {
         self.isTranslateBarActive = (translateState != nil)
         self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
         self.activeInlineCommand = (!hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && hasFullAccess) ? inlineAICommand : nil
+        self.activeScreenshotNoticeLabel = (!hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && activeInlineCommand == nil) ? screenshotDetectedLabel : nil
+        if let shotText = self.activeScreenshotNoticeLabel {
+            screenshotNoticeLabel.text = shotText
+        }
 
         let desiredLayoutTitle = layoutMode == .qwerty26 ? "九键" : "26键"
         if layoutButton.title(for: .normal) != desiredLayoutTitle {
@@ -774,9 +841,11 @@ final class TopToolbarView: UIView {
     private func updateIdleOverlayVisibility() {
         let isBannerTakeoverActive = (currentBannerState != .hidden)
         let isInlineAIActive = (activeInlineCommand != nil)
+        let isScreenshotNoticeActive = (activeScreenshotNoticeLabel != nil)
         inlineAICommandBar.isHidden = !isInlineAIActive
         selectionMagicScroll.isHidden = !isSelectionMagicActive
-        let hideStandardIdle = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive
+        screenshotNoticeBar.isHidden = !isScreenshotNoticeActive
+        let hideStandardIdle = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive || isScreenshotNoticeActive
         leftClusterStack.isHidden = hideStandardIdle
         rightClusterStack.isHidden = hideStandardIdle
         idleScrollView.isHidden = hideStandardIdle

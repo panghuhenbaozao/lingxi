@@ -136,13 +136,23 @@ struct HomeTestView: View {
                     }
                 }
             } else if !appState.isKeyboardFullAccessConfirmed {
-                HStack(spacing: 10) {
-                    actionPill("一键开启全部权限", icon: "checkmark.shield", filled: false) {
+                HStack(spacing: 8) {
+                    actionPill("一键权限", icon: "checkmark.shield", filled: false) {
                         appState.showPermissionsCenter = true
                     }
-                    actionPill("开完全访问", icon: "lock.open.fill", filled: true) {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
+                    actionPill(
+                        bgVoice.isWarm ? "🟢 键盘语音在线" : "激活键盘语音",
+                        icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
+                        filled: !bgVoice.isWarm
+                    ) {
+                        if bgVoice.isWarm {
+                            bgVoice.shutdown()
+                            appState.voiceEngineBannerMessage = "已关闭后台语音保活"
+                        } else {
+                            Task {
+                                let res = await bgVoice.warmUp()
+                                appState.voiceEngineBannerMessage = res.message
+                            }
                         }
                     }
                 }
@@ -152,7 +162,7 @@ struct HomeTestView: View {
                         appState.showPermissionsCenter = true
                     }
                     actionPill(
-                        bgVoice.isWarm ? "键盘语音已就绪" : "激活键盘内语音",
+                        bgVoice.isWarm ? "🟢 键盘语音在线" : "激活键盘语音",
                         icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
                         filled: !bgVoice.isWarm
                     ) {

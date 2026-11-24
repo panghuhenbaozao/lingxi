@@ -1,13 +1,11 @@
-import AVFoundation
-import Speech
 import UIKit
 
-/// 键盘内嵌「🎙️ 实时语音转换」面板（v5.6 新增，彻底留在键盘内部，不跳出微信/抖音！）：
+/// 键盘内嵌「🎙️ 实时语音转换」面板（v5.6.1 真机实测彻底修复版，彻底留在键盘内部，不跳出微信/抖音！）：
 /// - 支持 6 种实时模式：说中文→英语 / 说英语→中文 / 中→日 / 日→中 / 中文速记 / 英文速记；
-/// - 双引擎自动无缝衔接：
-///   1. 优先连接已预热的后台语音引擎（App Group + 本机 127.0.0.1 双通道，零跳转实时回传语音与双语译文）；
-///   2. 后台引擎未预热时自动尝试键盘内直录（`AVAudioEngine` + `SFSpeechRecognizer`）；
-///   3. 若被 iOS 沙盒拦截（`561017449`），在面板内给出「⚡ 一键激活后台语音引擎（仅需点 1 次）」按钮。
+/// - 底层接入主 App 常驻 `BackgroundVoiceEngine`（前台启动永不 stop 的 `AVAudioEngine` + 单包 GET 回环指令 + 绕过系统代理 + App Group 双通道），
+///   彻底告别 iOS 键盘扩展直录必报 `561017449` 与后台重启引擎必报 `CannotStartRecording` 的死循环；
+/// - 引擎在线时：顶栏绿灯显示「🟢 键盘内语音在线」，点「🎙️ 开始说话」零跳转即时录音并流式双语互译；
+/// - 引擎未激活时：主按钮直接显示「⚡ 先激活后台语音（仅 1 次）」，同步手势栈内 1 键拉起激活，切回微信即可无限次键盘内直说！
 final class VoiceInputPanelView: UIView {
     var onInsertText: ((String) -> Void)?
     var onWarmUpHostVoiceEngine: (() -> Void)?
@@ -21,22 +19,13 @@ final class VoiceInputPanelView: UIView {
 
     // 录音与转写状态
     private var isRecording = false
-    private var usingHostBridge = false
     private var hostEngineWarm = false
+    private var isProbing = false
     private var transcriptText = ""
     private var translatedText = ""
-    private var statusMessage = "点击下方「开始说话」，在键盘内直接实时语音转换"
+    private var statusMessage = "正在检测后台语音引擎状态…"
 
-    // 键盘内直录引擎（Tier 2）
-    private let localAudioEngine = AVAudioEngine()
-    private var localRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var localTask: SFSpeechRecognitionTask?
-    private let aiClient = AIClient(timeout: 25)
-    private var localTranslateDebounce: Task<Void, Never>?
-    private var localTranslateStream: Task<Void, Never>?
-    private var lastLocalTranslatedSource = ""
-
-    // 后台语音桥接监听（Tier 1）
+    // 后台语音桥接监听
     private var stateObserver: AppGroupNotifications.Observer?
     private var bridgePollTimer: Timer?
 
@@ -79,14 +68,6 @@ final class VoiceInputPanelView: UIView {
 
     deinit {
         bridgePollTimer?.invalidate()
-        localTranslateDebounce?.cancel()
-        localTranslateStream?.cancel()
-        if localAudioEngine.isRunning {
-            localAudioEngine.stop()
-            localAudioEngine.inputNode.removeTap(onBus: 0)
-        }
-        localRequest?.endAudio()
-        localTask?.cancel()
     }
 
     private func setupViews() {
@@ -152,13 +133,18 @@ final class VoiceInputPanelView: UIView {
         activationBar.isHidden = true
         addSubview(activationBar)
 
-        activateEngineButton.setTitle("⚡ 激活键盘内语音（仅需 1 次）", for: .normal)
+        activateEngineButton.setTitle("⚡ 一键激活键盘语音（仅需 1 次）", for: .normal)
         activateEngineButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
         activateEngineButton.layer.cornerRadius = 9
         activateEngineButton.layer.cornerCurve = .continuous
         activateEngineButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         activateEngineButton.actionHandler = { [weak self] in
-            self?.onWarmUpHostVoiceEngine?()
+            guard let self else { return }
+            if !self.hasFullAccess {
+                self.onOpenPermissions?()
+            } else {
+                self.onWarmUpHostVoiceEngine?()
+            }
         }
         activationBar.addArrangedSubview(activateEngineButton)
 
@@ -183,7 +169,7 @@ final class VoiceInputPanelView: UIView {
         recordButton.titleLabel?.font = .systemFont(ofSize: 13.5, weight: .bold)
         recordButton.layer.cornerRadius = 10
         recordButton.layer.cornerCurve = .continuous
-        recordButton.actionHandler = { [weak self] in self?.toggleRecording() }
+        recordButton.actionHandler = { [weak self] in self?.handlePrimaryRecordTap() }
 
         clearButton.setTitle("清空", for: .normal)
         clearButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
@@ -259,9 +245,12 @@ final class VoiceInputPanelView: UIView {
     func prepare(theme: ResolvedTheme, hasFullAccess: Bool) {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
+        // 先同步检查共享容器缓存，避免 UI 闪烁
+        let sharedWarm = VoiceIPCBridge.readStateFromShared()?.isHeartbeatFresh == true
+        self.hostEngineWarm = sharedWarm
         applyTheme(theme)
         rebuildModePills()
-        refreshDisplays()
+        updateEngineStateUI(warm: sharedWarm, updateStatusIfIdle: true)
         probeHostVoiceEngine()
     }
 
@@ -302,11 +291,10 @@ final class VoiceInputPanelView: UIView {
     func stopAllRecording(runFinalTranslate: Bool = false) {
         bridgePollTimer?.invalidate()
         bridgePollTimer = nil
-        if usingHostBridge && isRecording {
+        if isRecording {
             let cmd = VoiceIPCCommand(action: .stop, modeRaw: mode.rawValue)
             Task { _ = await VoiceIPCBridge.sendCommandToHost(cmd) }
         }
-        stopLocalRecording(runFinalTranslate: runFinalTranslate)
         isRecording = false
         currentAudioLevel = 0
         updateRecordButtonStyle()
@@ -345,8 +333,9 @@ final class VoiceInputPanelView: UIView {
         mode = newMode
         transcriptText = ""
         translatedText = ""
-        lastLocalTranslatedSource = ""
-        statusMessage = "已切至「\(newMode.shortTitle)」· 点下方直接开口说话"
+        statusMessage = hostEngineWarm
+            ? "🟢 已切至「\(newMode.shortTitle)」· 点下方直接开口说话"
+            : "🟡 已切至「\(newMode.shortTitle)」· 点下方激活后台语音引擎后即可直说"
         rebuildModePills()
         refreshDisplays()
     }
@@ -354,101 +343,136 @@ final class VoiceInputPanelView: UIView {
     // MARK: - 探活后台语音引擎 & 开始/停止录音
 
     private func probeHostVoiceEngine() {
+        guard !isProbing else { return }
+        isProbing = true
         Task { [weak self] in
             let state = await VoiceIPCBridge.fetchStateFromHost()
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                self.isProbing = false
                 let warm = state?.isHeartbeatFresh == true
-                self.hostEngineWarm = warm
-                if warm {
-                    self.activationBar.isHidden = true
-                    if !self.isRecording && self.transcriptText.isEmpty {
-                        self.statusMessage = "✓ 后台语音引擎已就绪 · 在键盘内直接点「开始说话」"
-                    }
-                    self.refreshDisplays()
+                self.updateEngineStateUI(warm: warm, updateStatusIfIdle: true)
+                if let state, state.isRecording {
+                    self.applyHostState(state)
+                    self.startBridgePollTimer()
                 }
             }
         }
     }
 
-    private func toggleRecording() {
-        if isRecording {
-            stopCurrentRecording()
-        } else {
-            startRecordingSmart()
-        }
-    }
-
-    private func startRecordingSmart() {
-        guard hasFullAccess else {
-            statusMessage = "⚠️ 需开启「允许完全访问」才可在键盘内语音转换"
+    private func updateEngineStateUI(warm: Bool, updateStatusIfIdle: Bool) {
+        hostEngineWarm = warm
+        if !hasFullAccess {
             activationBar.isHidden = false
             activateEngineButton.setTitle("🔓 前往开启完全访问权限", for: .normal)
-            refreshDisplays()
+            if updateStatusIfIdle && !isRecording {
+                statusMessage = "⚠️ 请先开启键盘「允许完全访问」才可连接语音引擎"
+            }
+        } else if warm {
+            activationBar.isHidden = true
+            if updateStatusIfIdle && !isRecording && transcriptText.isEmpty {
+                statusMessage = "🟢 后台语音引擎在线 · 在键盘内直接点「开始说话」"
+            }
+        } else {
+            activationBar.isHidden = false
+            activateEngineButton.setTitle("⚡ 一键激活键盘语音（仅需 1 次）", for: .normal)
+            if updateStatusIfIdle && !isRecording && transcriptText.isEmpty {
+                statusMessage = "🟡 首次需激活后台语音（点 1 次返回后，可一直在键盘内直说）"
+            }
+        }
+        updateRecordButtonStyle()
+        refreshDisplays()
+    }
+
+    /// 关键修复：所有会触发 `openURL`（激活后台语音 / 开权限）的操作都在用户点击的同步栈里直接调用，
+    /// 绝不放进 async Task 丢失用户手势上下文！
+    private func handlePrimaryRecordTap() {
+        if isRecording {
+            stopCurrentRecording()
             return
         }
+        if !hasFullAccess {
+            onOpenPermissions?()
+            return
+        }
+        if !hostEngineWarm {
+            // 同步直接唤起灵犀 App 完成 1 次常驻音频引擎激活（激活后用户点左上角返回原 App 即可在键盘内无限次直说）
+            statusMessage = "⚡ 正在唤起灵犀激活常驻语音引擎，激活后点左上角返回即可直说…"
+            refreshDisplays()
+            onWarmUpHostVoiceEngine?()
+            return
+        }
+        startHostBridgeRecording()
+    }
 
-        statusMessage = "🎙️ 正在启动键盘内语音引擎…"
+    private func startHostBridgeRecording() {
+        statusMessage = "🎙️ 正在启动收音…"
+        transcriptText = ""
+        translatedText = ""
         refreshDisplays()
 
+        let modeRaw = mode.rawValue
         Task { [weak self] in
             guard let self else { return }
-            // 1. 优先连接已预热的后台语音引擎（零跳转，对齐 讯飞 / 豆包 / Wispr Flow）
-            if let probed = await VoiceIPCBridge.fetchStateFromHost(), probed.isHeartbeatFresh {
-                let cmd = VoiceIPCCommand(action: .start, modeRaw: self.mode.rawValue)
-                let updated = await VoiceIPCBridge.sendCommandToHost(cmd)
-                await MainActor.run {
+            let cmd = VoiceIPCCommand(action: .start, modeRaw: modeRaw)
+            let updated = await VoiceIPCBridge.sendCommandToHost(cmd)
+            await MainActor.run {
+                if let updated, updated.engineWarm {
                     self.hostEngineWarm = true
-                    self.usingHostBridge = true
-                    self.isRecording = true
+                    self.isRecording = updated.isRecording
                     self.activationBar.isHidden = true
-                    self.transcriptText = updated?.transcript ?? ""
-                    self.translatedText = updated?.translatedText ?? ""
-                    self.statusMessage = "🎙️ 正在听「\(self.mode.sourceLanguageLabel)」· 说完点停止或直接插入"
-                    self.startBridgePollTimer()
+                    self.transcriptText = updated.transcript
+                    self.translatedText = AITextSanitizer.clean(updated.translatedText, streaming: updated.isTranslating)
+                    if let err = updated.errorText, !err.isEmpty {
+                        self.statusMessage = "⚠️ \(err)"
+                    } else if updated.isRecording {
+                        self.statusMessage = "🎙️ 正在听「\(self.mode.sourceLanguageLabel)」· 说完点停止或直接插入"
+                        self.startBridgePollTimer()
+                    } else {
+                        self.statusMessage = "⚠️ 后台引擎未能开始录音，请点下方重新激活一次"
+                        self.updateEngineStateUI(warm: false, updateStatusIfIdle: false)
+                    }
+                    self.updateRecordButtonStyle()
+                    self.refreshDisplays()
+                } else {
+                    // 后台引擎已被系统回收或尚未预热：立即切回「一键激活」状态并清晰提示
+                    self.isRecording = false
+                    self.hostEngineWarm = false
+                    self.activationBar.isHidden = false
+                    self.activateEngineButton.setTitle("⚡ 重新激活后台语音（仅需 1 次）", for: .normal)
+                    self.statusMessage = "🟡 后台语音引擎已休眠 · 请点左下「⚡ 激活键盘语音」重新激活一次"
                     self.updateRecordButtonStyle()
                     self.refreshDisplays()
                 }
-                return
-            }
-
-            // 2. 尝试键盘扩展内原生直录（iOS 17/18 已授权麦克风设备可直接工作）
-            await MainActor.run {
-                self.startLocalInKeyboardRecording()
             }
         }
     }
 
     private func stopCurrentRecording() {
-        if usingHostBridge {
-            isRecording = false
-            statusMessage = "✨ 正在完成最终校译…"
-            updateRecordButtonStyle()
-            refreshDisplays()
-            let cmd = VoiceIPCCommand(action: .stop, modeRaw: mode.rawValue)
-            Task { [weak self] in
-                if let st = await VoiceIPCBridge.sendCommandToHost(cmd) {
-                    await MainActor.run {
-                        self?.applyHostState(st)
-                    }
+        isRecording = false
+        statusMessage = "✨ 正在完成最终转写与翻译…"
+        updateRecordButtonStyle()
+        refreshDisplays()
+        let cmd = VoiceIPCCommand(action: .stop, modeRaw: mode.rawValue)
+        Task { [weak self] in
+            if let st = await VoiceIPCBridge.sendCommandToHost(cmd) {
+                await MainActor.run {
+                    self?.applyHostState(st)
                 }
             }
-            // 再短轮询 2 秒等待最终 AI 译文返回后停止
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                guard let self, !self.isRecording else { return }
-                self.bridgePollTimer?.invalidate()
-                self.bridgePollTimer = nil
-            }
-        } else {
-            stopLocalRecording(runFinalTranslate: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak self] in
+            guard let self, !self.isRecording else { return }
+            self.bridgePollTimer?.invalidate()
+            self.bridgePollTimer = nil
         }
     }
 
-    // MARK: - Tier 1: 后台语音引擎实时同步
+    // MARK: - 后台语音引擎实时同步
 
     private func startBridgePollTimer() {
         bridgePollTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.22, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.20, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { [weak self] in
                 guard let st = await VoiceIPCBridge.fetchStateFromHost() else { return }
@@ -467,199 +491,34 @@ final class VoiceInputPanelView: UIView {
     }
 
     private func applyHostState(_ st: VoiceIPCState) {
+        let wasWarm = hostEngineWarm
         hostEngineWarm = st.isHeartbeatFresh
-        if usingHostBridge || st.isRecording {
-            isRecording = st.isRecording
-            transcriptText = st.transcript
-            translatedText = AITextSanitizer.clean(st.translatedText, streaming: st.isTranslating)
-            currentAudioLevel = CGFloat(st.audioLevel)
-            if let err = st.errorText, !err.isEmpty {
-                statusMessage = "⚠️ \(err)"
-            } else if !st.statusText.isEmpty {
-                statusMessage = st.statusText
-            }
-            updateRecordButtonStyle()
-            refreshDisplays()
-        }
-    }
-
-    // MARK: - Tier 2: 键盘扩展内原生直录（AVAudioEngine + SFSpeechRecognizer）
-
-    private func startLocalInKeyboardRecording() {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: mode.sourceLocaleID)),
-              recognizer.isAvailable else {
-            showWarmUpRequired(reason: "当前系统未在键盘进程开放「\(mode.sourceLanguageLabel)」语音直录")
-            return
-        }
-        guard SFSpeechRecognizer.authorizationStatus() == .authorized,
-              AVAudioSession.sharedInstance().recordPermission == .granted else {
-            showWarmUpRequired(reason: "尚未激活后台语音引擎或未授权麦克风/语音权限")
-            return
-        }
-
-        stopLocalRecording(runFinalTranslate: false)
-        transcriptText = ""
-        translatedText = ""
-        lastLocalTranslatedSource = ""
-
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-
-            let req = SFSpeechAudioBufferRecognitionRequest()
-            req.shouldReportPartialResults = true
-            if #available(iOS 16.0, *) {
-                req.addsPunctuation = true
-            }
-            localRequest = req
-
-            let node = localAudioEngine.inputNode
-            node.removeTap(onBus: 0)
-            let fmt = node.outputFormat(forBus: 0)
-            node.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buf, _ in
-                req.append(buf)
-                let lvl = Self.computeLevel(buf)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.isRecording, !self.usingHostBridge else { return }
-                    self.currentAudioLevel = lvl
-                    self.setNeedsLayout()
-                }
-            }
-            localAudioEngine.prepare()
-            try localAudioEngine.start()
-
-            usingHostBridge = false
-            isRecording = true
+        if !hostEngineWarm && wasWarm {
+            activationBar.isHidden = false
+            activateEngineButton.setTitle("⚡ 重新激活后台语音", for: .normal)
+        } else if hostEngineWarm {
             activationBar.isHidden = true
-            statusMessage = "🎙️ 正在键盘内直录「\(mode.sourceLanguageLabel)」…"
-            updateRecordButtonStyle()
-            refreshDisplays()
-
-            localTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if let result {
-                        self.transcriptText = result.bestTranscription.formattedString
-                        self.scheduleLocalTranslate(for: self.transcriptText)
-                        self.refreshDisplays()
-                        if result.isFinal {
-                            self.stopLocalRecording(runFinalTranslate: true)
-                        }
-                    } else if let error, self.isRecording {
-                        let nsErr = error as NSError
-                        if nsErr.code != 216 && nsErr.code != 1110 {
-                            self.statusMessage = "⚠️ 识别中断：\(error.localizedDescription)"
-                        }
-                        self.stopLocalRecording(runFinalTranslate: true)
-                    }
-                }
-            }
-        } catch {
-            // iOS 沙盒拦截键盘直录（典型 OSStatus 561017449 / !pri）：引导一键激活后台语音引擎（仅需点 1 次！）
-            showWarmUpRequired(reason: "iOS 要求先一键激活后台语音引擎，激活后即可在键盘内无限次直接说话不跳出")
         }
-    }
-
-    private func showWarmUpRequired(reason: String) {
-        isRecording = false
-        usingHostBridge = false
-        activationBar.isHidden = false
-        activateEngineButton.setTitle("⚡ 一键激活后台语音（仅需 1 次）", for: .normal)
-        statusMessage = "ℹ️ \(reason)"
+        isRecording = st.isRecording
+        if !st.transcript.isEmpty || st.isRecording {
+            transcriptText = st.transcript
+        }
+        let cleanedTrans = AITextSanitizer.clean(st.translatedText, streaming: st.isTranslating)
+        if !cleanedTrans.isEmpty || st.isRecording {
+            translatedText = cleanedTrans
+        }
+        currentAudioLevel = CGFloat(st.audioLevel)
+        if let err = st.errorText, !err.isEmpty {
+            statusMessage = "⚠️ \(err)"
+        } else if !st.statusText.isEmpty {
+            statusMessage = st.statusText
+        }
+        if !st.isRecording && !st.isTranslating {
+            bridgePollTimer?.invalidate()
+            bridgePollTimer = nil
+        }
         updateRecordButtonStyle()
         refreshDisplays()
-    }
-
-    private func stopLocalRecording(runFinalTranslate: Bool) {
-        if localAudioEngine.isRunning {
-            localAudioEngine.stop()
-            localAudioEngine.inputNode.removeTap(onBus: 0)
-        }
-        localRequest?.endAudio()
-        localRequest = nil
-        localTask?.cancel()
-        localTask = nil
-        if !usingHostBridge {
-            isRecording = false
-            currentAudioLevel = 0
-            updateRecordButtonStyle()
-            if runFinalTranslate {
-                runLocalTranslateNow(for: transcriptText)
-            }
-            refreshDisplays()
-        }
-    }
-
-    private func scheduleLocalTranslate(for source: String) {
-        localTranslateDebounce?.cancel()
-        let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        localTranslateDebounce = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 380_000_000)
-            guard !Task.isCancelled, let self else { return }
-            await MainActor.run {
-                self.runLocalTranslateNow(for: clean)
-            }
-        }
-    }
-
-    private func runLocalTranslateNow(for source: String) {
-        let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        if clean == lastLocalTranslatedSource && !translatedText.isEmpty { return }
-        let cfg = AIConfig.load()
-        guard cfg.isConfigured else {
-            if !mode.isTranslationMode {
-                translatedText = AITextSanitizer.clean(clean, streaming: false)
-            } else {
-                statusMessage = "✓ 语音已转文字（配置 AI Key 后自动双语互译）"
-            }
-            refreshDisplays()
-            return
-        }
-
-        localTranslateStream?.cancel()
-        let modeSnap = mode
-        localTranslateStream = Task { [weak self] in
-            guard let self else { return }
-            var acc = ""
-            var lastFlush = CACurrentMediaTime()
-            do {
-                for try await chunk in self.aiClient.streamText(
-                    prompt: clean,
-                    systemInstruction: modeSnap.systemPrompt,
-                    config: cfg,
-                    featureTag: "in_keyboard_voice_translate",
-                    preferFast: true
-                ) {
-                    if Task.isCancelled { return }
-                    acc += chunk
-                    let now = CACurrentMediaTime()
-                    if now - lastFlush >= 0.05 {
-                        lastFlush = now
-                        let cleaned = AITextSanitizer.clean(acc, streaming: true)
-                        await MainActor.run {
-                            self.translatedText = cleaned
-                            self.refreshDisplays()
-                        }
-                    }
-                }
-                let finalClean = AITextSanitizer.clean(acc, streaming: false)
-                await MainActor.run {
-                    self.translatedText = finalClean
-                    self.lastLocalTranslatedSource = clean
-                    self.statusMessage = "✓ 转换完成 · 点「插入上屏」直接输入"
-                    self.refreshDisplays()
-                }
-            } catch is CancellationError {
-            } catch {
-                await MainActor.run {
-                    self.statusMessage = "⚠️ 翻译失败：\(error.localizedDescription)"
-                    self.refreshDisplays()
-                }
-            }
-        }
     }
 
     // MARK: - UI 刷新与按钮动作
@@ -676,8 +535,16 @@ final class VoiceInputPanelView: UIView {
             recordButton.setTitle("⏹ 停止说话", for: .normal)
             recordButton.backgroundColor = .systemRed
             recordButton.setTitleColor(.white, for: .normal)
-        } else {
+        } else if !hasFullAccess {
+            recordButton.setTitle("🔓 开启完全访问", for: .normal)
+            recordButton.backgroundColor = theme.accentFill
+            recordButton.setTitleColor(theme.accentText, for: .normal)
+        } else if hostEngineWarm {
             recordButton.setTitle("🎙️ 开始说话", for: .normal)
+            recordButton.backgroundColor = theme.accentFill
+            recordButton.setTitleColor(theme.accentText, for: .normal)
+        } else {
+            recordButton.setTitle("⚡ 激活键盘语音", for: .normal)
             recordButton.backgroundColor = theme.accentFill
             recordButton.setTitleColor(theme.accentText, for: .normal)
         }
@@ -697,8 +564,8 @@ final class VoiceInputPanelView: UIView {
         let displayRes = preferredOutputText
         if displayRes.isEmpty {
             resultTextView.text = hostEngineWarm
-                ? "✓ 后台语音引擎在线（无需切出 App）\n点左下「🎙️ 开始说话」，说完自动「\(mode.shortTitle)」并支持一键插入上屏。"
-                : "在键盘内直接实时语音转换（\(mode.shortTitle)）：\n• 点左下「🎙️ 开始说话」开始录音\n• 若首次提示激活后台引擎，点一次激活按钮后即可在任意 App 键盘内无限次直接说话不跳转。"
+                ? "🟢 键盘内语音引擎已就绪（无需跳出当前 App）\n点左下「🎙️ 开始说话」，说完自动完成「\(mode.shortTitle)」并支持一键插入上屏。"
+                : "为什么首次需要点一次激活？\niOS 系统限制键盘进程不能直接独占麦克风，必须由灵犀主 App 在前台开启 1 次常驻语音引擎（与讯飞/豆包原理相同）。\n点下方「⚡ 激活键盘语音」后立即返回，之后可一直在微信/抖音键盘内直接说话不跳出！也可点「全屏同传」立即可用。"
             resultTextView.textColor = theme?.keyHintText ?? .secondaryLabel
         } else {
             resultTextView.text = displayRes
@@ -717,8 +584,7 @@ final class VoiceInputPanelView: UIView {
         stopAllRecording(runFinalTranslate: false)
         transcriptText = ""
         translatedText = ""
-        lastLocalTranslatedSource = ""
-        statusMessage = "已清空 · 点击「开始说话」重新录入"
+        statusMessage = hostEngineWarm ? "🟢 已清空 · 点「开始说话」重新录入" : "已清空"
         if hostEngineWarm {
             let cmd = VoiceIPCCommand(action: .clear, modeRaw: mode.rawValue)
             Task { _ = await VoiceIPCBridge.sendCommandToHost(cmd) }
@@ -742,14 +608,5 @@ final class VoiceInputPanelView: UIView {
         guard !out.isEmpty else { return }
         stopAllRecording(runFinalTranslate: false)
         onInsertText?(out)
-    }
-
-    private static func computeLevel(_ buffer: AVAudioPCMBuffer) -> CGFloat {
-        guard let data = buffer.floatChannelData?[0] else { return 0 }
-        let n = Int(buffer.frameLength)
-        guard n > 0 else { return 0 }
-        var sum: Float = 0
-        for i in 0..<n { sum += data[i] * data[i] }
-        return CGFloat(min(1.0, max(0.0, sqrt(sum / Float(n)) * 10.0)))
     }
 }

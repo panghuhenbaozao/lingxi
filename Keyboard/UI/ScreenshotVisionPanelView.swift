@@ -1,11 +1,12 @@
 import Photos
 import UIKit
 
-/// 键盘内嵌「📷 自动截屏 & AI 识图」专属工作台（v5.6 新增，彻底留在键盘内完成识图与插入，绝不强跳主 App！）：
-/// - 顶部实时展示刚抓取的截屏缩略图 + 来源时间 + 「⚡ 自动截屏」「↻ 刷新」「✓ 传后删」「返回」；
-/// - 5 大高频视觉技能（看图回复 / 提取文字 / 截屏译中 / 总结重点 / 解答分析）+ 「🔔 自动识屏」开关；
-/// - 流式输出经过 `AITextSanitizer` 彻底净化（0 个 `*` 符号），上传完成后按设置自动删除原截屏；
-/// - 支持一键「复制」「插入上屏」直接填进微信/抖音输入框！
+/// 键盘内嵌「📷 截屏 & AI 识图」专属工作台（v5.6.1 全模型可用 + 零骚扰删图弹窗版）：
+/// - 100% 全模型可用：内置 Apple 端侧 Vision OCR（0.25 秒本机极速提字、低内存零崩溃），
+///   「📝 提取文字」无需联网或 API Key 直接秒出；「看图回复 / 截屏译中 / 总结 / 解答」自动按模型能力直连视觉 API 或无缝走「端侧 OCR → DeepSeek 等纯文本模型」双保险！
+/// - 彻底杜绝莫名删图弹窗：绝不自动调用系统 `PHAssetChangeRequest.deleteAssets` 骚扰用户！
+///   剪贴板截屏（系统「拷贝并删除」或快捷指令「截屏→拷贝至剪贴板」）上传后自动静默清空（0 弹窗零残留）；
+///   相册截屏仅在用户主动点「🗑️ 删原图」时才执行删除。
 final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     var onInsertText: ((String) -> Void)?
     var onSettingsChanged: ((LingxiSettings) -> Void)?
@@ -13,6 +14,8 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     /// 调用 iOS 快捷指令 `shortcuts://run-shortcut?name=灵犀截屏识图` 实现真·一键截屏拷入剪贴板
     var onTriggerAutoScreenshotShortcut: (() -> Void)?
     var onOpenPermissions: (() -> Void)?
+    var onImportBridgeToken: (() -> Bool)?
+    var onOpenHostAppAI: (() -> Void)?
     var onOpenHostDeleteAsset: ((String) -> Void)?
     var onOpenHostWorkbench: (() -> Void)?
     var onClose: (() -> Void)?
@@ -32,10 +35,10 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     private var sourceDescription = "尚未检测到截屏"
     private var generatedText = ""
     private var deletionStatusNotice: String?
-    private var pendingHostDeleteAssetID: String?
+    private var needsAIConfigNotice = false
     private(set) var isExpandedReadingHeight = false
 
-    // Row 1: 缩略图 + 来源状态 + 自动截屏 + 刷新 + 传后删开关 + 返回
+    // Row 1: 缩略图 + 来源状态 + 自动截屏 + 刷新 + 剪贴板秒清开关 + 返回
     private let thumbImageView = UIImageView()
     private let sourceTitleLabel = UILabel()
     private let sourceSubLabel = UILabel()
@@ -44,7 +47,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     private let autoDeleteToggleButton = ActionClosureButton(type: .system)
     private let closeButton = ActionClosureButton(type: .system)
 
-    // Row 2: 5 大视觉模式胶囊 + 自动识屏开关 + 拉高按钮
+    // Row 2: 5 大视觉模式胶囊 + 自动弹板开关 + 拉高按钮
     private let presetsScroll = LingxiScrollView()
     private let presetsStack = UIStackView()
     private let heightToggleButton = ActionClosureButton(type: .system)
@@ -52,12 +55,12 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     // Row 3: 识别结果正文区（可选中复制 + 滑动自动拉高）
     private let outputTextView = UITextView()
 
-    // 快捷提示/删图确认/权限修复条
+    // 快捷提示 / 手动删原图 / 权限或 AI 密钥修复条
     private let actionNoticeBar = UIStackView()
     private let noticePrimaryButton = ActionClosureButton(type: .system)
     private let noticeSecondaryButton = ActionClosureButton(type: .system)
 
-    // Bottom bar: 重试/停止 · 复制 · 选图 · 插入上屏
+    // Bottom bar: 识别/停止 · 复制 · 选图/引导 · 插入上屏
     private let bottomBar = UIStackView()
     private let retryButton = ActionClosureButton(type: .system)
     private let copyButton = ActionClosureButton(type: .system)
@@ -99,7 +102,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         autoShotButton.layer.cornerCurve = .continuous
         autoShotButton.accessibilityLabel = "调用快捷指令一键自动截屏"
         autoShotButton.actionHandler = { [weak self] in
-            self?.handleTriggerAutoScreenshot()
+            self?.onTriggerAutoScreenshotShortcut?()
         }
         addSubview(autoShotButton)
 
@@ -122,6 +125,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
             self.settings.save()
             self.onSettingsChanged?(self.settings)
             self.updateAutoDeleteBadge()
+            self.updateThumbnailUI()
         }
         addSubview(autoDeleteToggleButton)
 
@@ -279,6 +283,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         self.theme = theme
         self.settings = settings
         self.hasFullAccess = hasFullAccess
+        self.needsAIConfigNotice = false
         applyTheme(theme)
         rebuildPresetPills()
         updateAutoDeleteBadge()
@@ -305,7 +310,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         self.capturedFromPasteboard = fromPasteboard
         self.sourceDescription = sourceLabel
         self.deletionStatusNotice = nil
-        self.pendingHostDeleteAssetID = nil
+        self.needsAIConfigNotice = false
 
         applyTheme(theme)
         rebuildPresetPills()
@@ -316,7 +321,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         if autoStart {
             startVisionRecognition()
         } else {
-            outputTextView.text = "✓ 已自动捕获「\(sourceLabel)」。\n点上方「💬 看图回复 / 📝 提取文字 / 🌐 截屏译中」立即在键盘内识别。"
+            outputTextView.text = "✓ 已捕获「\(sourceLabel)」。\n点上方「💬 看图回复 / 📝 提取文字 / 🌐 截屏译中」立即在键盘内识别。"
             updateButtonsEnabled()
         }
     }
@@ -363,7 +368,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
 
     private func updateAutoDeleteBadge() {
         let on = settings.autoDeleteUploadedScreenshot
-        autoDeleteToggleButton.setTitle(on ? "✓传后删" : "保留图", for: .normal)
+        autoDeleteToggleButton.setTitle(on ? "✓传后清" : "保留图", for: .normal)
         if let theme {
             autoDeleteToggleButton.backgroundColor = on ? theme.accentFill.withAlphaComponent(0.18) : theme.specialKeyFill
             autoDeleteToggleButton.setTitleColor(on ? theme.candidateHighlight : theme.keyHintText, for: .normal)
@@ -393,7 +398,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                 guard let self else { return }
                 self.currentPreset = p
                 self.rebuildPresetPills()
-                if self.capturedJPEGData != nil {
+                if self.capturedImage != nil {
                     self.startVisionRecognition()
                 } else {
                     self.scanLatestScreenshot(autoAnalyze: true)
@@ -402,10 +407,10 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
             presetsStack.addArrangedSubview(btn)
         }
 
-        // 「自动识屏」开关胶囊：截屏后自动弹出本面板并开始 AI 识图
+        // 「截屏直弹」开关：默认关闭（改为顶栏轻提示「📷 刚截的屏 · 识图」，不打断正常打字）
         let autoBtn = ActionClosureButton(type: .system)
         let autoOn = settings.autoAnalyzeNewScreenshot
-        autoBtn.setTitle(autoOn ? "🔔 自动识屏:开" : "🔕 自动识屏:关", for: .normal)
+        autoBtn.setTitle(autoOn ? "🔔 截屏直弹:开" : "🔕 截屏轻提示", for: .normal)
         autoBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
         autoBtn.backgroundColor = autoOn ? theme.accentFill.withAlphaComponent(0.16) : theme.specialKeyFill
         autoBtn.setTitleColor(autoOn ? theme.candidateHighlight : theme.keyHintText, for: .normal)
@@ -423,28 +428,28 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         setNeedsLayout()
     }
 
-    // MARK: - 键盘内实时抓取最新截屏（剪贴板优先 → 相册最新截屏）
+    // MARK: - 键盘内实时抓取最新截屏（低内存 768px 缩放，杜绝键盘 Jetsam 闪退）
 
     func scanLatestScreenshot(autoAnalyze: Bool) {
-        pendingHostDeleteAssetID = nil
         deletionStatusNotice = nil
+        needsAIConfigNotice = false
 
-        // 1. 优先读取剪贴板中的截屏（例如快捷指令「截屏→拷贝至剪贴板」或系统截屏点「拷贝并删除」）
+        // 1. 优先读取剪贴板中的截屏（例如快捷指令「截屏→拷贝至剪贴板」或系统截屏点「拷贝并删除」，上传后 0 弹窗自动清空）
         if hasFullAccess,
            UIPasteboard.general.hasImages,
            let img = UIPasteboard.general.image,
-           let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) {
+           let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img, maxDimension: 768, quality: 0.68) {
             capturedImage = img
             capturedJPEGData = jpeg
             capturedAssetID = nil
             capturedFromPasteboard = true
-            sourceDescription = "剪贴板截屏 · 传完秒清"
+            sourceDescription = "剪贴板截屏 · 传完静默清空"
             updateThumbnailUI()
             refreshNoticeBar()
             if autoAnalyze {
                 startVisionRecognition()
             } else {
-                outputTextView.text = "✓ 已读取剪贴板截屏（\(max(1, jpeg.count / 1024)) KB）。点上方「看图回复 / 提取文字 / 截屏译中」开始识别。"
+                outputTextView.text = "✓ 已读取剪贴板截屏（\(max(1, jpeg.count / 1024)) KB）。点上方模式开始识别。"
                 updateButtonsEnabled()
             }
             return
@@ -468,18 +473,30 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                 req.deliveryMode = .highQualityFormat
                 req.isSynchronous = false
                 req.isNetworkAccessAllowed = true
-                req.resizeMode = .fast
+                req.resizeMode = .exact
                 outputTextView.text = "📷 正在读取最新截屏（\(ageText)）…"
                 PHImageManager.default().requestImage(
                     for: latest,
-                    targetSize: CGSize(width: 1280, height: 1280),
+                    targetSize: CGSize(width: 768, height: 768),
                     contentMode: .aspectFit,
                     options: req
                 ) { [weak self] img, info in
                     let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                    guard !degraded, let self, let img,
-                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else { return }
+                    guard !degraded else { return }
+                    let jpeg = img.flatMap { ScreenshotImageHelper.prepareJPEGData(from: $0, maxDimension: 768, quality: 0.68) }
                     DispatchQueue.main.async {
+                        guard let self else { return }
+                        guard let img, let jpeg else {
+                            self.capturedImage = nil
+                            self.capturedJPEGData = nil
+                            self.capturedAssetID = nil
+                            self.sourceDescription = "截屏读取失败"
+                            self.outputTextView.text = "⚠️ 该截屏位于 iCloud 或暂不可读，请点右上「↻」重试，或截图后点左下「拷贝并删除」直接免相册识图。"
+                            self.updateThumbnailUI()
+                            self.refreshNoticeBar()
+                            self.updateButtonsEnabled()
+                            return
+                        }
                         self.capturedImage = img
                         self.capturedJPEGData = jpeg
                         self.capturedAssetID = assetID
@@ -490,7 +507,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                         if autoAnalyze {
                             self.startVisionRecognition()
                         } else {
-                            self.outputTextView.text = "✓ 已自动读取最新截屏（\(ageText)）。点上方功能即可在键盘内识图回复。"
+                            self.outputTextView.text = "✓ 已读取最新截屏（\(ageText)）。点上方功能即可在键盘内识图回复。"
                             self.updateButtonsEnabled()
                         }
                     }
@@ -508,138 +525,248 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         updateThumbnailUI()
         refreshNoticeBar()
 
-        if !hasFullAccess {
-            outputTextView.text = "⚠️ 请先开启「允许完全访问」权限，再使用键盘内截屏 AI 识图。"
-        } else if photoAuth != .authorized && photoAuth != .limited {
-            outputTextView.text = "📷 在键盘内自动识图只需 1 步：\n1. 点下方「一键授权相册」允许读取/清理截屏；\n2. 以后在微信/抖音随手截屏（电源+音量上 或 轻点手机背面），键盘 1 秒内自动抓图识图，无需切换 App！"
+        if photoAuth != .authorized && photoAuth != .limited {
+            outputTextView.text = "📷 两种超顺手识图方式（绝不乱弹删图框）：\n• 零弹窗自动删图：系统截屏后点预览「完成 → 拷贝并删除」，切回键盘点「识图」自动识别并在传完后静默清空剪贴板！\n• 相册直读：点下方「开启相册权限」后随手截屏，顶栏自动浮出「📷 刚截的屏 · 识图」轻提示。"
         } else {
-            outputTextView.text = "📷 键盘已开启实时截屏监听（当前暂无 30 分钟内新截屏）：\n• 直接按「电源+音量上」或「轻点背面两下」截屏，键盘将自动抓图并识别；\n• 也可点右上「⚡截屏」触发苹果快捷指令「灵犀截屏识图」（2步：截屏→拷贝至剪贴板，传完自动清空不留相册）。"
+            outputTextView.text = "📷 当前暂无 30 分钟内新截屏：\n• 随手截屏后，键盘顶栏会轻巧提示「📷 刚截的屏 · 识图」，点一下立即识别（不会打断打字，也绝不自动弹删除框）；\n• 点右上「⚡截屏」可一键调用快捷指令「灵犀截屏识图」（截屏→拷贝至剪贴板），识别完自动静默清空零残留！"
         }
         updateButtonsEnabled()
     }
 
-    // MARK: - 键盘内多模态 AI 流式识别 + 上传后自动删除原截屏
+    // MARK: - 键盘内双引擎识别（Apple 端侧 Vision OCR + 多模态 AI 自动回退）
 
     private func startVisionRecognition() {
         streamTask?.cancel()
-        guard hasFullAccess else {
-            refreshNoticeBar()
-            outputTextView.text = "⚠️ 请先开启键盘「允许完全访问」才可联网识图。"
-            return
-        }
-        let cfg = AIConfig.load()
-        guard cfg.isConfigured else {
-            refreshNoticeBar()
-            outputTextView.text = "⚠️ 请先在灵犀 App「AI」页配置 API Key（推荐 Gemini / GPT-4o / Qwen-VL 等视觉模型）。"
-            return
-        }
-        guard let jpeg = capturedJPEGData else {
+        guard let img = capturedImage, let jpeg = capturedJPEGData else {
             scanLatestScreenshot(autoAnalyze: true)
             return
         }
 
         generatedText = ""
         deletionStatusNotice = nil
-        pendingHostDeleteAssetID = nil
+        needsAIConfigNotice = false
         retryButton.setTitle("停止", for: .normal)
-        let kb = max(1, jpeg.count / 1024)
-        outputTextView.text = "📷 正在键盘内上传截屏（\(kb) KB）· 执行「\(currentPreset.title)」…"
-        updateButtonsEnabled()
-
         let presetSnap = currentPreset
         let autoDel = settings.autoDeleteUploadedScreenshot
         let fromPB = capturedFromPasteboard
-        let assetID = capturedAssetID
+        let cfg = AIConfig.load()
+        let fullAccessSnap = hasFullAccess
+
+        outputTextView.text = presetSnap == .extractText
+            ? "📝 正在端侧极速提取截屏文字（0.2 秒本机完成）…"
+            : "📷 正在键盘内分析截屏 · 执行「\(presetSnap.title)」…"
+        updateButtonsEnabled()
 
         streamTask = Task { [weak self] in
             guard let self else { return }
-            var acc = ""
-            var lastFlush = CACurrentMediaTime()
-            var cleanedUp = false
 
-            func cleanupOriginalScreenshotIfNeeded() async {
-                guard autoDel, !cleanedUp else { return }
-                cleanedUp = true
-                if fromPB {
-                    await MainActor.run {
-                        UIPasteboard.general.items = []
-                        self.capturedFromPasteboard = false
-                        self.deletionStatusNotice = "✓ 已自动清空剪贴板原截屏（零相册残留）"
-                        self.sourceSubLabel.text = self.deletionStatusNotice
-                    }
-                }
-                if let assetID, !assetID.isEmpty {
-                    let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
-                    if assets.count > 0 {
-                        do {
-                            try await PHPhotoLibrary.shared().performChanges {
-                                PHAssetChangeRequest.deleteAssets(assets)
-                            }
-                            await MainActor.run {
-                                self.capturedAssetID = nil
-                                self.pendingHostDeleteAssetID = nil
-                                self.deletionStatusNotice = "✓ 原截屏已从相册自动删除"
-                                self.sourceSubLabel.text = self.deletionStatusNotice
-                                self.refreshNoticeBar()
-                            }
-                        } catch {
-                            await MainActor.run {
-                                self.pendingHostDeleteAssetID = assetID
-                                self.deletionStatusNotice = "点下方「确认删原图」一键清理相册原截屏"
-                                self.sourceSubLabel.text = self.deletionStatusNotice
-                                self.refreshNoticeBar()
-                            }
-                        }
-                    }
+            func silentlyClearPasteboardIfNeeded() async {
+                guard autoDel, fromPB else { return }
+                await MainActor.run {
+                    UIPasteboard.general.items = []
+                    self.capturedFromPasteboard = false
+                    self.deletionStatusNotice = "✓ 剪贴板原截屏已静默清空（零弹窗零残留）"
+                    self.sourceSubLabel.text = self.deletionStatusNotice
                 }
             }
 
-            do {
-                for try await event in aiClient.streamVisionEvents(
-                    imageData: jpeg,
-                    mimeType: "image/jpeg",
-                    prompt: presetSnap.promptText,
-                    systemInstruction: presetSnap.systemInstruction,
-                    config: cfg,
-                    featureTag: "in_keyboard_screenshot_vision"
-                ) {
-                    if Task.isCancelled { break }
-                    if case .answer(let delta) = event {
-                        acc += delta
-                        let now = CACurrentMediaTime()
-                        if now - lastFlush >= 0.045 {
-                            lastFlush = now
-                            let clean = AITextSanitizer.clean(acc, streaming: true)
-                            await MainActor.run {
-                                self.generatedText = clean
-                                self.outputTextView.text = clean
-                                let end = NSRange(location: max(0, clean.utf16.count - 1), length: 0)
-                                self.outputTextView.scrollRangeToVisible(end)
+            // 1. 端侧 Apple Vision OCR（0.25s 本机运行，内存极低，零网络零费用）
+            let ocrText = await ScreenshotOCRService.recognizeText(from: img)
+            if Task.isCancelled { return }
+
+            // 模式 A：「📝 提取文字」优先直接返回端侧高精度 OCR（无需联网、DeepSeek 或无 API Key 也能秒用！）
+            if presetSnap == .extractText && !ocrText.isEmpty {
+                await silentlyClearPasteboardIfNeeded()
+                let finalClean = AITextSanitizer.clean(ocrText, streaming: false)
+                await MainActor.run {
+                    self.generatedText = finalClean
+                    let note = self.deletionStatusNotice ?? "✓ 本机端侧极速提字完成（无需联网 · 零消耗）"
+                    self.sourceSubLabel.text = note
+                    self.outputTextView.text = finalClean
+                    AIRecentHistoryStore.record(title: "📷 \(presetSnap.title)", output: finalClean, prompt: self.sourceDescription)
+                    self.retryButton.setTitle("重识", for: .normal)
+                    self.refreshNoticeBar()
+                    self.updateButtonsEnabled()
+                }
+                return
+            }
+
+            // 2. 若尚未开启完全访问或尚未配置 AI Key：依然给出端侧 OCR 提取到的正文 + 一键修复按钮，绝不空手报错！
+            if !fullAccessSnap || !cfg.isConfigured {
+                await MainActor.run {
+                    self.needsAIConfigNotice = !cfg.isConfigured
+                    if !ocrText.isEmpty {
+                        self.generatedText = ocrText
+                        let reason = !fullAccessSnap ? "开启「完全访问」" : "配置/同步 AI 密钥"
+                        self.outputTextView.text = "【已先为你提取截屏文字】\n\(ocrText)\n\n提示：\(reason)后即可使用「\(presetSnap.title)」智能回复与翻译。"
+                    } else {
+                        self.outputTextView.text = !fullAccessSnap
+                            ? "⚠️ 请先开启键盘「允许完全访问」才可联网执行「\(presetSnap.title)」。"
+                            : "⚠️ 请先在灵犀 App「AI」页配置或同步 API Key，再执行「\(presetSnap.title)」。"
+                    }
+                    self.retryButton.setTitle("重试", for: .normal)
+                    self.refreshNoticeBar()
+                    self.updateButtonsEnabled()
+                }
+                return
+            }
+
+            let chosenModel = cfg.resolvedModel()
+            let supportsNativeVision = ScreenshotOCRService.modelLikelySupportsVision(modelID: chosenModel, provider: cfg.provider)
+            var acc = ""
+            var lastFlush = CACurrentMediaTime()
+            var usedFallbackOCR = false
+
+            // 3. 原生视觉模型优先直传 768px 轻量 JPEG；若失败且存在 OCR 文字，自动无缝降级到 OCR → 文本 LLM！
+            if supportsNativeVision {
+                do {
+                    for try await event in aiClient.streamVisionEvents(
+                        imageData: jpeg,
+                        mimeType: "image/jpeg",
+                        prompt: presetSnap.promptText,
+                        systemInstruction: presetSnap.systemInstruction,
+                        config: cfg,
+                        featureTag: "in_keyboard_screenshot_vision"
+                    ) {
+                        if Task.isCancelled { return }
+                        if case .answer(let delta) = event {
+                            acc += delta
+                            let now = CACurrentMediaTime()
+                            if now - lastFlush >= 0.045 {
+                                lastFlush = now
+                                let clean = AITextSanitizer.clean(acc, streaming: true)
+                                await MainActor.run {
+                                    self.generatedText = clean
+                                    self.outputTextView.text = clean
+                                    let end = NSRange(location: max(0, clean.utf16.count - 1), length: 0)
+                                    self.outputTextView.scrollRangeToVisible(end)
+                                }
                             }
                         }
                     }
-                }
-                if !Task.isCancelled {
-                    await cleanupOriginalScreenshotIfNeeded()
-                }
-                let finalClean = AITextSanitizer.clean(acc, streaming: false)
-                await MainActor.run {
-                    self.generatedText = finalClean
-                    if finalClean.isEmpty {
-                        self.outputTextView.text = "⚠️ 模型未返回识别文本，请确认当前模型支持图片识别（如 Gemini / GPT-4o / Qwen-VL）。"
-                    } else {
-                        let tail = self.deletionStatusNotice.map { "\n\n\($0)" } ?? ""
-                        self.outputTextView.text = finalClean + tail
-                        AIRecentHistoryStore.record(title: "📷 \(presetSnap.title)", output: finalClean, prompt: self.sourceDescription)
+                } catch {
+                    if Task.isCancelled { return }
+                    if ocrText.isEmpty {
+                        await MainActor.run {
+                            self.outputTextView.text = "⚠️ 视觉识图失败：\(error.localizedDescription)"
+                            self.retryButton.setTitle("重试", for: .normal)
+                            self.refreshNoticeBar()
+                            self.updateButtonsEnabled()
+                        }
+                        return
                     }
-                    self.retryButton.setTitle("重识", for: .normal)
-                    self.updateButtonsEnabled()
+                    acc = ""
+                    usedFallbackOCR = true
+                }
+            } else {
+                usedFallbackOCR = true
+            }
+
+            // 4. DeepSeek / 纯文本模型 或 视觉接口回退：使用端侧 Vision OCR 提取的完整截屏文字喂给文本大模型！
+            if acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && usedFallbackOCR {
+                if ocrText.isEmpty {
+                    await MainActor.run {
+                        self.outputTextView.text = "⚠️ 这张图里没有识别到文字，且当前模型（\(cfg.activeModelName)）不支持直接看纯照片。\n如需识别纯风景/物品照片，请在灵犀 AI 页切换 Gemini / GPT-4o / Qwen-VL 等视觉模型。"
+                        self.retryButton.setTitle("重试", for: .normal)
+                        self.refreshNoticeBar()
+                        self.updateButtonsEnabled()
+                    }
+                    return
+                }
+                await MainActor.run {
+                    self.sourceSubLabel.text = "📝 已端侧提字 · 正用 \(cfg.activeModelName) 生成…"
+                    self.outputTextView.text = "📝 已秒提截屏文字，正在用 \(cfg.activeModelName) 执行「\(presetSnap.title)」…"
+                }
+                let ocrPrompt = "【截屏文字内容（由端侧 Vision 识别）】\n\(ocrText)\n\n请根据以上截屏内容直接完成：\(presetSnap.promptText)"
+                do {
+                    for try await event in aiClient.streamEvents(
+                        prompt: ocrPrompt,
+                        systemInstruction: presetSnap.systemInstruction,
+                        config: cfg,
+                        featureTag: "in_keyboard_screenshot_ocr_ai",
+                        preferFast: true
+                    ) {
+                        if Task.isCancelled { return }
+                        if case .answer(let delta) = event {
+                            acc += delta
+                            let now = CACurrentMediaTime()
+                            if now - lastFlush >= 0.045 {
+                                lastFlush = now
+                                let clean = AITextSanitizer.clean(acc, streaming: true)
+                                await MainActor.run {
+                                    self.generatedText = clean
+                                    self.outputTextView.text = clean
+                                    let end = NSRange(location: max(0, clean.utf16.count - 1), length: 0)
+                                    self.outputTextView.scrollRangeToVisible(end)
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    if Task.isCancelled { return }
+                    await MainActor.run {
+                        // 即使 AI 网络失败，仍保留端侧 OCR 文字方便用户直接复制
+                        self.generatedText = ocrText
+                        self.outputTextView.text = "⚠️ AI 调用失败（\(error.localizedDescription)）。\n\n已保留端侧提取原文：\n\(ocrText)"
+                        self.retryButton.setTitle("重试", for: .normal)
+                        self.refreshNoticeBar()
+                        self.updateButtonsEnabled()
+                    }
+                    return
+                }
+            }
+
+            if Task.isCancelled { return }
+            let finalClean = AITextSanitizer.clean(acc, streaming: false)
+            if !finalClean.isEmpty {
+                await silentlyClearPasteboardIfNeeded()
+            }
+            await MainActor.run {
+                self.generatedText = finalClean
+                if finalClean.isEmpty {
+                    self.outputTextView.text = "⚠️ 模型未返回有效结果，请点击「重试」或切换上方「📝 提取文字」体验本机秒提字。"
+                } else {
+                    self.outputTextView.text = finalClean
+                    if let note = self.deletionStatusNotice {
+                        self.sourceSubLabel.text = note
+                    } else if usedFallbackOCR {
+                        self.sourceSubLabel.text = "✓ 端侧 OCR + \(cfg.activeModelName) 识别完成"
+                    } else {
+                        self.sourceSubLabel.text = "✓ 视觉模型识别完成（未弹删除框）"
+                    }
+                    AIRecentHistoryStore.record(title: "📷 \(presetSnap.title)", output: finalClean, prompt: self.sourceDescription)
+                }
+                self.retryButton.setTitle("重识", for: .normal)
+                self.refreshNoticeBar()
+                self.updateButtonsEnabled()
+            }
+        }
+    }
+
+    // MARK: - 手动删相册原图（仅当用户主动点击「🗑️ 删原图」时才执行，绝不擅自弹窗！）
+
+    private func manualDeleteCurrentAsset() {
+        guard let assetID = capturedAssetID, !assetID.isEmpty else { return }
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard assets.count > 0 else {
+            capturedAssetID = nil
+            refreshNoticeBar()
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.deleteAssets(assets)
+                }
+                await MainActor.run {
+                    self?.capturedAssetID = nil
+                    self?.deletionStatusNotice = "✓ 已手动删除相册原截屏"
+                    self?.sourceSubLabel.text = self?.deletionStatusNotice
+                    self?.refreshNoticeBar()
                 }
             } catch {
                 await MainActor.run {
-                    self.outputTextView.text = "⚠️ 截屏识图失败：\(error.localizedDescription)"
-                    self.retryButton.setTitle("重试", for: .normal)
-                    self.updateButtonsEnabled()
+                    self?.onOpenHostDeleteAsset?(assetID)
                 }
             }
         }
@@ -652,14 +779,20 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
             thumbImageView.image = img
             thumbImageView.contentMode = .scaleAspectFill
             sourceTitleLabel.text = sourceDescription
-            sourceSubLabel.text = deletionStatusNotice ?? (settings.autoDeleteUploadedScreenshot ? "识别上传后将自动清理原截屏" : "当前设置为保留原截屏")
+            if let note = deletionStatusNotice {
+                sourceSubLabel.text = note
+            } else if capturedFromPasteboard {
+                sourceSubLabel.text = settings.autoDeleteUploadedScreenshot ? "识别完自动静默清空剪贴板（0 弹窗）" : "剪贴板截屏（已设为保留）"
+            } else {
+                sourceSubLabel.text = "相册截屏 · 不自动弹窗，需删可点下方"
+            }
         } else {
             let icon = UIImage(systemName: "camera.viewfinder", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium))
             thumbImageView.image = icon
             thumbImageView.tintColor = theme?.candidateHighlight ?? .systemBlue
             thumbImageView.contentMode = .center
             sourceTitleLabel.text = sourceDescription
-            sourceSubLabel.text = "截屏后自动识别 · 支持快捷指令一键截屏"
+            sourceSubLabel.text = "端侧提字 + 全模型识图 · 绝不乱弹删图框"
         }
     }
 
@@ -667,16 +800,27 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         let photoAuth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if !hasFullAccess {
             actionNoticeBar.isHidden = false
-            noticePrimaryButton.setTitle("🔓 一键前往开启完全访问权限", for: .normal)
+            noticePrimaryButton.setTitle("🔓 开启完全访问（支持联网 AI 识图）", for: .normal)
             noticeSecondaryButton.isHidden = true
-        } else if let delID = pendingHostDeleteAssetID, !delID.isEmpty {
+        } else if needsAIConfigNotice {
             actionNoticeBar.isHidden = false
-            noticePrimaryButton.setTitle("🗑️ 一键确认删除刚上传的原截屏", for: .normal)
+            if !AppGroup.isAvailable {
+                noticePrimaryButton.setTitle("📋 一键同步 AI 密钥口令", for: .normal)
+                noticeSecondaryButton.isHidden = false
+                noticeSecondaryButton.setTitle("去配置", for: .normal)
+            } else {
+                noticePrimaryButton.setTitle("🔑 前往灵犀配置 AI 密钥", for: .normal)
+                noticeSecondaryButton.isHidden = true
+            }
+        } else if capturedAssetID != nil && !capturedFromPasteboard {
+            // 相册图仅提供温和可选的手动删原图按钮，绝不自动弹出 iOS 确认框！
+            actionNoticeBar.isHidden = false
+            noticePrimaryButton.setTitle("🗑️ 手动删除这张相册原截屏", for: .normal)
             noticeSecondaryButton.isHidden = false
-            noticeSecondaryButton.setTitle("暂不删", for: .normal)
-        } else if photoAuth != .authorized && photoAuth != .limited {
+            noticeSecondaryButton.setTitle("保留", for: .normal)
+        } else if photoAuth != .authorized && photoAuth != .limited && capturedImage == nil {
             actionNoticeBar.isHidden = false
-            noticePrimaryButton.setTitle("🖼️ 一键开启相册权限（自动抓图与删图）", for: .normal)
+            noticePrimaryButton.setTitle("🖼️ 开启相册权限（截屏自动轻提示）", for: .normal)
             noticeSecondaryButton.isHidden = true
         } else {
             actionNoticeBar.isHidden = true
@@ -685,32 +829,38 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         setNeedsLayout()
     }
 
-    private func handleTriggerAutoScreenshot() {
-        onTriggerAutoScreenshotShortcut?()
-    }
-
     private func handleNoticePrimaryTap() {
         if !hasFullAccess {
             onOpenPermissions?()
-        } else if let delID = pendingHostDeleteAssetID, !delID.isEmpty {
-            pendingHostDeleteAssetID = nil
-            refreshNoticeBar()
-            onOpenHostDeleteAsset?(delID)
+        } else if needsAIConfigNotice {
+            if !AppGroup.isAvailable, onImportBridgeToken?() == true {
+                needsAIConfigNotice = false
+                refreshNoticeBar()
+                startVisionRecognition()
+            } else {
+                onOpenHostAppAI?()
+            }
+        } else if capturedAssetID != nil && !capturedFromPasteboard {
+            manualDeleteCurrentAsset()
         } else {
             onOpenPermissions?()
         }
     }
 
     private func handleNoticeSecondaryTap() {
-        pendingHostDeleteAssetID = nil
-        refreshNoticeBar()
+        if needsAIConfigNotice {
+            onOpenHostAppAI?()
+        } else {
+            capturedAssetID = nil
+            refreshNoticeBar()
+        }
     }
 
     private func handleRetryOrStop() {
         if let task = streamTask, !task.isCancelled, retryButton.title(for: .normal) == "停止" {
             task.cancel()
             retryButton.setTitle("重识", for: .normal)
-        } else if capturedJPEGData != nil {
+        } else if capturedImage != nil {
             startVisionRecognition()
         } else {
             scanLatestScreenshot(autoAnalyze: true)

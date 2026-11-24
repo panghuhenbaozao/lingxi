@@ -60,10 +60,21 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private let quickSettingsPanel = QuickSettingsSheetView()
     private let editPadPanel = TextEditingPadView()
 
-    // 自动截屏检测（PHPhotoLibraryChangeObserver + 剪贴板图片变更）
+    private struct PendingDetectedScreenshot {
+        let image: UIImage
+        let jpegData: Data
+        let sourceLabel: String
+        let assetID: String?
+        let fromPasteboard: Bool
+        let detectedAt: Date
+    }
+
+    // 截屏检测（PHPhotoLibraryChangeObserver + 剪贴板图片变更：默认仅顶栏轻提示，绝不强行抢占键盘或乱弹删图框）
     private var isObservingPhotoLibrary = false
     private var lastHandledScreenshotAssetID: String?
     private var lastHandledPasteboardImageChangeCount: Int = -1
+    private var pendingDetectedScreenshot: PendingDetectedScreenshot?
+    private var awaitingShortcutScreenshot = false
 
     // 中文/英文输入状态机
     private var activePanel: ActivePanel = .letters
@@ -705,27 +716,43 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func checkPasteboardScreenshotOnAppearIfNeeded() {
-        guard hasFullAccess, settings.autoAnalyzeNewScreenshot else { return }
+        guard hasFullAccess else { return }
         let pb = UIPasteboard.general
         guard pb.hasImages else { return }
         let count = pb.changeCount
         guard count != lastHandledPasteboardImageChangeCount else { return }
         lastHandledPasteboardImageChangeCount = count
         guard let img = pb.image,
-              let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else { return }
-        // 用户通过快捷指令「灵犀截屏识图」截屏并拷贝回剪贴板后切回聊天框：键盘内自动弹出识图面板并直接开始 AI 识别！
-        switchToPanel(.screenshot, autoPrepareScreenshot: false)
-        screenshotPanel.presentDetectedScreenshot(
-            image: img,
-            jpegData: jpeg,
-            sourceLabel: "自动捕获剪贴板截屏",
-            assetID: nil,
-            fromPasteboard: true,
-            theme: resolvedTheme,
-            settings: settings,
-            hasFullAccess: hasFullAccess,
-            autoStart: true
-        )
+              let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img, maxDimension: 768, quality: 0.68) else { return }
+
+        let shouldAutoOpen = awaitingShortcutScreenshot || settings.autoAnalyzeNewScreenshot
+        awaitingShortcutScreenshot = false
+        if shouldAutoOpen {
+            pendingDetectedScreenshot = nil
+            switchToPanel(.screenshot, autoPrepareScreenshot: false)
+            screenshotPanel.presentDetectedScreenshot(
+                image: img,
+                jpegData: jpeg,
+                sourceLabel: "剪贴板截屏 · 传完静默清空",
+                assetID: nil,
+                fromPasteboard: true,
+                theme: resolvedTheme,
+                settings: settings,
+                hasFullAccess: hasFullAccess,
+                autoStart: true
+            )
+        } else {
+            // 默认无打扰轻提示：在顶栏浮出「📷 剪贴板截屏 · ✨ 识图」，点一下即识，继续打字自动消失
+            pendingDetectedScreenshot = PendingDetectedScreenshot(
+                image: img,
+                jpegData: jpeg,
+                sourceLabel: "剪贴板截屏 · 传完静默清空",
+                assetID: nil,
+                fromPasteboard: true,
+                detectedAt: Date()
+            )
+            refreshToolbar()
+        }
     }
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -737,14 +764,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             opts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
             guard let latest = PHAsset.fetchAssets(with: .image, options: opts).firstObject,
                   let created = latest.creationDate,
-                  Date().timeIntervalSince(created) <= 25 else {
+                  Date().timeIntervalSince(created) <= 20 else {
                 return
             }
             let assetID = latest.localIdentifier
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       self.hasFullAccess,
-                      self.settings.autoAnalyzeNewScreenshot,
                       assetID != self.lastHandledScreenshotAssetID else { return }
                 self.lastHandledScreenshotAssetID = assetID
 
@@ -752,29 +778,43 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 req.deliveryMode = .highQualityFormat
                 req.isSynchronous = false
                 req.isNetworkAccessAllowed = true
-                req.resizeMode = .fast
+                req.resizeMode = .exact
                 PHImageManager.default().requestImage(
                     for: latest,
-                    targetSize: CGSize(width: 1280, height: 1280),
+                    targetSize: CGSize(width: 768, height: 768),
                     contentMode: .aspectFit,
                     options: req
                 ) { [weak self] img, info in
                     let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
                     guard !degraded, let self, let img,
-                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else { return }
+                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img, maxDimension: 768, quality: 0.68) else { return }
                     DispatchQueue.main.async {
-                        self.switchToPanel(.screenshot, autoPrepareScreenshot: false)
-                        self.screenshotPanel.presentDetectedScreenshot(
-                            image: img,
-                            jpegData: jpeg,
-                            sourceLabel: "刚刚自动捕获的新截屏",
-                            assetID: assetID,
-                            fromPasteboard: false,
-                            theme: self.resolvedTheme,
-                            settings: self.settings,
-                            hasFullAccess: self.hasFullAccess,
-                            autoStart: true
-                        )
+                        if self.settings.autoAnalyzeNewScreenshot {
+                            self.pendingDetectedScreenshot = nil
+                            self.switchToPanel(.screenshot, autoPrepareScreenshot: false)
+                            self.screenshotPanel.presentDetectedScreenshot(
+                                image: img,
+                                jpegData: jpeg,
+                                sourceLabel: "刚刚捕获的新截屏",
+                                assetID: assetID,
+                                fromPasteboard: false,
+                                theme: self.resolvedTheme,
+                                settings: self.settings,
+                                hasFullAccess: self.hasFullAccess,
+                                autoStart: true
+                            )
+                        } else {
+                            // 关键改进：截屏后绝不强行劫持键盘，更绝不自动弹删除确认框！仅在顶栏温和提示，想识图点一下就行
+                            self.pendingDetectedScreenshot = PendingDetectedScreenshot(
+                                image: img,
+                                jpegData: jpeg,
+                                sourceLabel: "刚刚捕获的新截屏",
+                                assetID: assetID,
+                                fromPasteboard: false,
+                                detectedAt: Date()
+                            )
+                            self.refreshToolbar()
+                        }
                     }
                 }
             }
@@ -794,11 +834,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func triggerAutoScreenshotShortcut() {
-        // 调用 iOS 苹果快捷指令「灵犀截屏识图」（2步：截屏 -> 拷贝至剪贴板），完成后切回聊天框键盘自动秒识并自动清空剪贴板！
+        // 调用 iOS 苹果快捷指令「灵犀截屏识图」（2步：截屏 -> 拷贝至剪贴板），完成后切回聊天框键盘自动秒识并静默清空剪贴板！
+        awaitingShortcutScreenshot = true
         let encoded = "灵犀截屏识图".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "shortcuts://run-shortcut?name=\(encoded)") else { return }
         openURLFromExtension(url) { [weak self] opened in
             if !opened {
+                self?.awaitingShortcutScreenshot = false
                 self?.openHostScreenshotWorkbench(deleteAssetID: nil)
             }
         }
@@ -1113,6 +1155,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
         screenshotPanel.onOpenPermissions = { [weak self] in
             self?.openHostPermissionsCenter()
+        }
+        screenshotPanel.onImportBridgeToken = { [weak self] in
+            self?.tryImportBridgeTokenFromPasteboardIfPresent() ?? false
+        }
+        screenshotPanel.onOpenHostAppAI = { [weak self] in
+            guard let url = URL(string: "lingxi://ai-settings") else { return }
+            self?.openURLFromExtension(url) { _ in }
         }
         screenshotPanel.onOpenHostDeleteAsset = { [weak self] assetID in
             self?.openHostScreenshotWorkbench(deleteAssetID: assetID)
@@ -1551,6 +1600,27 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             toggleTranslateMode()
         case .openScreenshotAI:
             handleOpenScreenshotAI()
+        case .analyzeDetectedScreenshot:
+            if let pending = pendingDetectedScreenshot {
+                pendingDetectedScreenshot = nil
+                switchToPanel(.screenshot, autoPrepareScreenshot: false)
+                screenshotPanel.presentDetectedScreenshot(
+                    image: pending.image,
+                    jpegData: pending.jpegData,
+                    sourceLabel: pending.sourceLabel,
+                    assetID: pending.assetID,
+                    fromPasteboard: pending.fromPasteboard,
+                    theme: resolvedTheme,
+                    settings: settings,
+                    hasFullAccess: hasFullAccess,
+                    autoStart: true
+                )
+            } else {
+                handleOpenScreenshotAI()
+            }
+        case .dismissDetectedScreenshot:
+            pendingDetectedScreenshot = nil
+            refreshToolbar()
         case .openVoiceTranslator:
             handleOpenInKeyboardVoicePanel()
         case .cycleTranslateTarget:
@@ -3309,6 +3379,15 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         liveDockView.update(mode: currentLiveDockMode())
         updatePreferredHeight()
 
+        if isActivelyComposing {
+            pendingDetectedScreenshot = nil
+        } else if let pending = pendingDetectedScreenshot, Date().timeIntervalSince(pending.detectedAt) > 45 {
+            pendingDetectedScreenshot = nil
+        }
+        let screenshotPillLabel: String? = (!isActivelyComposing && activePanel == .letters)
+            ? pendingDetectedScreenshot.map { $0.fromPasteboard ? "📷 剪贴板截屏" : "📷 刚截的屏" }
+            : nil
+
         let isIdlePredictionMode = !isActivelyComposing && !effectiveCandidates.isEmpty
         toolbarView.update(
             composingDisplay: composingDisplay,
@@ -3327,7 +3406,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             hasFullAccess: hasFullAccess,
             toolbarLayout: settings.toolbarLayout,
             showComposingStrip: settings.showComposingStrip,
-            isIdlePredictionMode: isIdlePredictionMode
+            isIdlePredictionMode: isIdlePredictionMode,
+            screenshotDetectedLabel: screenshotPillLabel
         )
     }
 

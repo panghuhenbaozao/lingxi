@@ -98,10 +98,10 @@ struct ScreenshotVisionView: View {
                         .font(.title3)
                         .foregroundStyle(Color(Design.Palette.accent))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("上传 AI 后自动删除原截屏")
+                        Text("上传 AI 后自动清理原截屏")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Color(Design.Palette.ink))
-                        Text("发给 AI 识别完成后自动清理原截屏，相册零垃圾残留")
+                        Text("剪贴板截屏（系统「拷贝并删除」/快捷指令）0 弹窗自动清空；相册图仅在主动点识图后询问确认，绝不在日常截屏时骚扰弹窗")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -502,20 +502,18 @@ struct ScreenshotVisionView: View {
             return
         }
         let cfg = appState.aiConfig
-        guard cfg.isConfigured else {
-            statusIsError = true
-            statusBanner = "尚未配置 AI API Key，请先在「AI」页填写 Key（推荐 Gemini / GPT-4o / Qwen-VL 等视觉模型）。"
-            return
-        }
+        let custom = customQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isPureExtractText = custom.isEmpty && selectedPreset == .extractText
 
         streamTask?.cancel()
         isAnalyzing = true
         resultText = ""
         statusIsError = false
         let kb = max(1, jpeg.count / 1024)
-        statusBanner = "正在上传截屏（\(kb) KB）并调用 \(cfg.activeModelName) 识图…"
+        statusBanner = isPureExtractText
+            ? "正在通过 Apple 端侧 Vision 极速提取文字…"
+            : "正在分析截屏（\(kb) KB）· \(cfg.activeModelName)…"
 
-        let custom = customQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = custom.isEmpty ? selectedPreset.promptText : custom
         let sys = custom.isEmpty ? selectedPreset.systemInstruction : "你是视觉 AI 助手，请结合截屏内容直接给出清晰实用的纯文本回答。"
         let autoDelete = appState.settings.autoDeleteUploadedScreenshot
@@ -523,63 +521,156 @@ struct ScreenshotVisionView: View {
         let clearPasteboard = imageFromPasteboard
 
         streamTask = Task {
-            var acc = ""
-            var lastFlush = CACurrentMediaTime()
-            do {
-                for try await event in aiClient.streamVisionEvents(
-                    imageData: jpeg,
-                    mimeType: "image/jpeg",
-                    prompt: prompt,
-                    systemInstruction: sys,
-                    config: cfg,
-                    featureTag: "screenshot_vision"
-                ) {
-                    if Task.isCancelled { return }
-                    if case .answer(let delta) = event {
-                        acc += delta
-                        let now = CACurrentMediaTime()
-                        if now - lastFlush >= 0.045 {
-                            lastFlush = now
-                            let clean = AITextSanitizer.clean(acc, streaming: true)
-                            await MainActor.run { self.resultText = clean }
-                        }
-                    }
-                }
-                if Task.isCancelled { return }
-                let finalClean = AITextSanitizer.clean(acc, streaming: false)
+            let ocrText = await ScreenshotOCRService.recognizeText(from: img)
+            if Task.isCancelled { return }
+
+            // 1. 「📝 提取文字」优先走本机 Apple Vision OCR（0.25s 秒出，无需联网/视觉模型）
+            if isPureExtractText && !ocrText.isEmpty {
+                let finalClean = AITextSanitizer.clean(ocrText, streaming: false)
                 await MainActor.run {
                     self.resultText = finalClean
                     self.isAnalyzing = false
-                    if finalClean.isEmpty {
-                        self.statusIsError = true
-                        self.statusBanner = "模型未返回有效文本，请确认当前模型支持图片识别。"
-                    } else {
-                        UIPasteboard.general.string = finalClean
-                        _ = ClipboardStore.record(finalClean)
-                        AIRecentHistoryStore.record(title: "📷 截屏识图", output: finalClean, prompt: prompt)
-                        self.statusIsError = false
-                        self.statusBanner = "✓ 识别完成并已自动复制纯净结果！切回聊天 App 点键盘顶栏即可发送"
+                    UIPasteboard.general.string = finalClean
+                    _ = ClipboardStore.record(finalClean)
+                    AIRecentHistoryStore.record(title: "📷 提取文字", output: finalClean, prompt: prompt)
+                    self.statusIsError = false
+                    self.statusBanner = "✓ 本机端侧极速提字完成并已复制！切回聊天 App 点顶栏即可粘贴"
+                    if autoDelete && clearPasteboard {
+                        self.deletedOriginalNotice = "✓ 剪贴板原截屏已替换清理，零弹窗零残留"
                     }
                 }
+                return
+            }
 
-                // 上传识别完成后自动清理原截屏
-                if autoDelete {
-                    if clearPasteboard {
-                        await MainActor.run {
-                            self.deletedOriginalNotice = "✓ 剪贴板中的原截屏已替换清理，零残留"
-                        }
-                    }
-                    if let assetID = assetIDToDelete, !assetID.isEmpty {
-                        await deleteAssetByID(assetID)
-                    }
-                }
-            } catch is CancellationError {
-                await MainActor.run { self.isAnalyzing = false }
-            } catch {
+            guard cfg.isConfigured else {
                 await MainActor.run {
                     self.isAnalyzing = false
                     self.statusIsError = true
-                    self.statusBanner = "识图失败：\(error.localizedDescription)"
+                    if !ocrText.isEmpty {
+                        self.resultText = ocrText
+                        self.statusBanner = "已先为你本机提取截屏文字；填写 AI Key 后可执行回复/翻译/总结。"
+                    } else {
+                        self.statusBanner = "尚未配置 AI API Key，请先在「AI」页填写 Key。"
+                    }
+                }
+                return
+            }
+
+            var acc = ""
+            var lastFlush = CACurrentMediaTime()
+            let supportsNativeVision = ScreenshotOCRService.modelLikelySupportsVision(modelID: cfg.resolvedModel(), provider: cfg.provider)
+            var needsOCRFallback = !supportsNativeVision
+
+            if supportsNativeVision {
+                do {
+                    for try await event in aiClient.streamVisionEvents(
+                        imageData: jpeg,
+                        mimeType: "image/jpeg",
+                        prompt: prompt,
+                        systemInstruction: sys,
+                        config: cfg,
+                        featureTag: "screenshot_vision"
+                    ) {
+                        if Task.isCancelled { return }
+                        if case .answer(let delta) = event {
+                            acc += delta
+                            let now = CACurrentMediaTime()
+                            if now - lastFlush >= 0.045 {
+                                lastFlush = now
+                                let clean = AITextSanitizer.clean(acc, streaming: true)
+                                await MainActor.run { self.resultText = clean }
+                            }
+                        }
+                    }
+                } catch is CancellationError {
+                    await MainActor.run { self.isAnalyzing = false }
+                    return
+                } catch {
+                    if ocrText.isEmpty {
+                        await MainActor.run {
+                            self.isAnalyzing = false
+                            self.statusIsError = true
+                            self.statusBanner = "识图失败：\(error.localizedDescription)"
+                        }
+                        return
+                    }
+                    acc = ""
+                    needsOCRFallback = true
+                }
+            }
+
+            // 2. 纯文本模型（如 DeepSeek）或视觉接口异常时，自动回退「端侧 OCR 文字 → 文本 LLM」
+            if acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && needsOCRFallback {
+                if ocrText.isEmpty {
+                    await MainActor.run {
+                        self.isAnalyzing = false
+                        self.statusIsError = true
+                        self.statusBanner = "未在图中识别到文字，且当前模型（\(cfg.activeModelName)）不支持直接看纯照片；请切换 Gemini / GPT-4o / Qwen-VL。"
+                    }
+                    return
+                }
+                await MainActor.run {
+                    self.statusBanner = "已本机提取截屏文字，正在用 \(cfg.activeModelName) 生成回答…"
+                }
+                let ocrPrompt = "【截屏文字内容（端侧 OCR 识别）】\n\(ocrText)\n\n请根据以上内容完成：\(prompt)"
+                do {
+                    for try await event in aiClient.streamEvents(
+                        prompt: ocrPrompt,
+                        systemInstruction: sys,
+                        config: cfg,
+                        featureTag: "screenshot_vision_ocr_fallback",
+                        preferFast: true
+                    ) {
+                        if Task.isCancelled { return }
+                        if case .answer(let delta) = event {
+                            acc += delta
+                            let now = CACurrentMediaTime()
+                            if now - lastFlush >= 0.045 {
+                                lastFlush = now
+                                let clean = AITextSanitizer.clean(acc, streaming: true)
+                                await MainActor.run { self.resultText = clean }
+                            }
+                        }
+                    }
+                } catch is CancellationError {
+                    await MainActor.run { self.isAnalyzing = false }
+                    return
+                } catch {
+                    await MainActor.run {
+                        self.isAnalyzing = false
+                        self.statusIsError = true
+                        self.resultText = ocrText
+                        self.statusBanner = "AI 请求失败（\(error.localizedDescription)），已保留端侧提取原文。"
+                    }
+                    return
+                }
+            }
+
+            if Task.isCancelled { return }
+            let finalClean = AITextSanitizer.clean(acc, streaming: false)
+            await MainActor.run {
+                self.resultText = finalClean
+                self.isAnalyzing = false
+                if finalClean.isEmpty {
+                    self.statusIsError = true
+                    self.statusBanner = "模型未返回有效文本，请重试或切换「📝 提取文字」。"
+                } else {
+                    UIPasteboard.general.string = finalClean
+                    _ = ClipboardStore.record(finalClean)
+                    AIRecentHistoryStore.record(title: "📷 截屏识图", output: finalClean, prompt: prompt)
+                    self.statusIsError = false
+                    self.statusBanner = "✓ 识别完成并已自动复制纯净结果！切回聊天 App 点键盘顶栏即可发送"
+                }
+            }
+
+            // 仅在真正产出结果且用户开启开关时处理清理（剪贴板零弹窗，相册图由用户在本工作台内主动确认）
+            if autoDelete && !finalClean.isEmpty {
+                if clearPasteboard {
+                    await MainActor.run {
+                        self.deletedOriginalNotice = "✓ 剪贴板中的原截屏已替换清理，零弹窗零残留"
+                    }
+                } else if let assetID = assetIDToDelete, !assetID.isEmpty {
+                    await deleteAssetByID(assetID)
                 }
             }
         }

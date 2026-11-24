@@ -56,25 +56,28 @@ enum ScreenshotVisionPreset: String, CaseIterable, Identifiable {
 
 #if canImport(UIKit)
 enum ScreenshotImageHelper {
-    /// 将截屏等比缩放到合理边长并压缩为轻量 JPEG，兼顾文字清晰度与移动网络秒传体验（< 300KB）。
-    static func prepareJPEGData(from image: UIImage, maxDimension: CGFloat = 1280, quality: CGFloat = 0.78) -> Data? {
-        let size = image.size
-        guard size.width > 1, size.height > 1 else { return nil }
-        let longest = max(size.width, size.height)
-        let targetImage: UIImage
-        if longest > maxDimension {
-            let scale = maxDimension / longest
-            let newSize = CGSize(width: floor(size.width * scale), height: floor(size.height * scale))
-            let format = UIGraphicsImageRendererFormat.default()
-            format.scale = 1.0
-            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
-            targetImage = renderer.image { _ in
-                image.draw(in: CGRect(origin: .zero, size: newSize))
+    /// 将截屏等比缩放到 768px 轻量高清晰度并压缩为 JPEG（~60-110KB），
+    /// 在键盘扩展 50MB 严格内存红线下彻底杜绝 Jetsam 闪退与大图卡顿。
+    static func prepareJPEGData(from image: UIImage, maxDimension: CGFloat = 768, quality: CGFloat = 0.68) -> Data? {
+        autoreleasepool {
+            let size = image.size
+            guard size.width > 1, size.height > 1 else { return nil }
+            let longest = max(size.width, size.height)
+            let targetImage: UIImage
+            if longest > maxDimension {
+                let scale = maxDimension / longest
+                let newSize = CGSize(width: floor(size.width * scale), height: floor(size.height * scale))
+                let format = UIGraphicsImageRendererFormat.default()
+                format.scale = 1.0
+                let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+                targetImage = renderer.image { _ in
+                    image.draw(in: CGRect(origin: .zero, size: newSize))
+                }
+            } else {
+                targetImage = image
             }
-        } else {
-            targetImage = image
+            return targetImage.jpegData(compressionQuality: quality)
         }
-        return targetImage.jpegData(compressionQuality: quality)
     }
 }
 #endif

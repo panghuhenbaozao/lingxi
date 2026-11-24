@@ -22,7 +22,10 @@ struct LingxiApp: App {
                     case "permissions":
                         appState.showPermissionsCenter = true
                     case "voice-warmup":
+                        appState.requestedTab = 0
+                        appState.voiceEngineBannerMessage = "🎙️ 正在激活键盘内实时语音引擎…"
                         Task {
+                            try? await Task.sleep(nanoseconds: 150_000_000)
                             let res = await BackgroundVoiceEngine.shared.warmUp()
                             await MainActor.run {
                                 appState.voiceEngineBannerMessage = res.message

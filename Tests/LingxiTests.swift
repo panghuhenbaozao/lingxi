@@ -2268,15 +2268,31 @@ final class LingxiTests: XCTestCase {
         st.updatedAt = Date().timeIntervalSince1970 - 30.0
         XCTAssertFalse(st.isHeartbeatFresh, "超时心跳应判定为后台语音引擎已休眠")
 
-        // 2. 自动截屏识图开关默认开启且旧版 JSON 向后兼容
-        XCTAssertTrue(LingxiSettings().autoAnalyzeNewScreenshot)
+        // 2. 自动直弹截屏开关默认关闭（改为温和顶栏轻提示，绝不劫持日常截屏/乱弹删图框）且旧版 JSON 向后兼容
+        XCTAssertFalse(LingxiSettings().autoAnalyzeNewScreenshot)
         let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data("{}".utf8))
-        XCTAssertTrue(legacy.autoAnalyzeNewScreenshot)
+        XCTAssertFalse(legacy.autoAnalyzeNewScreenshot)
 
         // 3. 点按 u 键：queryUMode("u") 必须返回可读 displayBuffer，不丢失字母反馈
         let eng = PinyinEngine()
         let singleU = eng.queryUMode(raw: "u", limit: 12)
         XCTAssertFalse(singleU.displayBuffer.isEmpty, "单敲 u 必须返回清晰提示与字母回显")
         XCTAssertTrue(singleU.displayBuffer.hasPrefix("u"))
+    }
+
+    func testV561ScreenshotOCRVisionModelDetection() {
+        // 原生视觉多模态模型应返回 true
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "gemini-2.5-flash", provider: .gemini))
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "gpt-4o-mini", provider: .openAICompatible))
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "claude-sonnet-4-20250514", provider: .openAICompatible))
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "qwen2.5-vl-72b-instruct", provider: .openAICompatible))
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "glm-4v-flash", provider: .openAICompatible))
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "doubao-1-5-vision-pro", provider: .openAICompatible))
+
+        // 纯文本模型（如 DeepSeek）应返回 false，自动走端侧 Apple Vision OCR → 文本 LLM 链路
+        XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "deepseek-chat", provider: .openAICompatible))
+        XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "deepseek-reasoner", provider: .openAICompatible))
+        XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "qwen-plus", provider: .openAICompatible))
+        XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "glm-4-flash", provider: .openAICompatible))
     }
 }

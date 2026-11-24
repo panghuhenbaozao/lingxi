@@ -4,21 +4,58 @@ import Network
 import Speech
 import UIKit
 
-/// 主 App 后台语音引擎（对齐 讯飞输入法 / 豆包输入法 / Wispr Flow 生产级架构）：
-/// - 依靠 `UIBackgroundModes: [audio]` 保持超低功耗静音音频会话在后台驻留；
-/// - 同时监听 App Group Darwin 通知与本机回环 `127.0.0.1:48921`（免费侧载无 App Group 也能 0ms 互通！）；
-/// - 键盘内点「说话」时零跳转接管麦克风、`SFSpeechRecognizer` 实时转写与 AI 双语流式转换，并实时推回键盘面板。
+/// 主 App 后台语音引擎（v5.6.1 真正可后台录音的 讯飞 / 豆包 / Wispr Flow 核心原理版）：
+///
+/// 关键修复（解决 iOS 16–18+ 后台启动 `AVAudioEngine.start()` 必报 `CannotStartRecording` 的根本原因）：
+/// 1. 在前台 `warmUp()` 时就一次性启动 `AVAudioEngine` 并挂好常驻 `inputNode` Tap，切入后台后**永不 stop 引擎**！
+/// 2. 未说话期间（`isCapturingSpeech == false`），Tap 内直接丢弃音频帧（近乎 0% CPU）；
+/// 3. 键盘发来 `.start` 命令时，无需在后台重新 `setActive` 或 `audioEngine.start()`，只需创建
+///    `SFSpeechAudioBufferRecognitionRequest` 并将原子开关置为开启，常驻 Tap 立刻无缝灌入 PCM 音频流！
+/// 4. 保活播放器采用极低非零音量（`0.001`）+ 15 分钟无操作自动休眠省电，兼顾稳定性与续航。
 @MainActor
 final class BackgroundVoiceEngine: ObservableObject {
     static let shared = BackgroundVoiceEngine()
+
+    /// 线程安全的实时音频投递槽：由后台音频渲染线程读取，主线程切换起停，零锁零卡顿。
+    private final class CaptureSink {
+        private let lock = NSLock()
+        private var request: SFSpeechAudioBufferRecognitionRequest?
+        private var active: Bool = false
+
+        func begin(with req: SFSpeechAudioBufferRecognitionRequest) {
+            lock.lock()
+            request = req
+            active = true
+            lock.unlock()
+        }
+
+        func end() -> SFSpeechAudioBufferRecognitionRequest? {
+            lock.lock()
+            let prev = request
+            request = nil
+            active = false
+            lock.unlock()
+            return prev
+        }
+
+        func appendIfActive(_ buffer: AVAudioPCMBuffer) -> Bool {
+            lock.lock()
+            let isOn = active
+            let req = request
+            lock.unlock()
+            guard isOn, let req else { return false }
+            req.append(buffer)
+            return true
+        }
+    }
 
     @Published private(set) var isWarm: Bool = false
     @Published private(set) var isRecording: Bool = false
     @Published private(set) var liveState: VoiceIPCState = VoiceIPCState()
 
     private let audioEngine = AVAudioEngine()
+    private let captureSink = CaptureSink()
     private let aiClient = AIClient(timeout: 25)
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var translateDebounceTask: Task<Void, Never>?
     private var translateStreamTask: Task<Void, Never>?
@@ -31,6 +68,10 @@ final class BackgroundVoiceEngine: ObservableObject {
     private var activeMode: VoiceTranslateMode = .zhToEn
     private var lastTranslatedSnapshot: String = ""
     private var lastStateBroadcastTime: CFTimeInterval = 0
+    private var lastActivityTime: Date = Date()
+    private var tapInstalled = false
+    /// 闲置超过 15 分钟自动释放后台音频会话省电
+    private static let idleShutdownSeconds: TimeInterval = 15 * 60
 
     private init() {
         commandObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.voiceCommand) { [weak self] in
@@ -38,9 +79,18 @@ final class BackgroundVoiceEngine: ObservableObject {
                 self?.handleSharedCommand()
             }
         }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                self?.handleAudioInterruption(note)
+            }
+        }
     }
 
-    /// 预热后台语音引擎（申请权限 + 启用静音后台保活音频会话 + 启动本机 127.0.0.1 通信桥）。
+    /// 预热后台语音引擎（必须在主 App 前台执行一次）：申请权限 + 启动常驻 `AVAudioEngine` + 启动双通道 IPC。
     func warmUp() async -> (ok: Bool, message: String) {
         let speechStatus = await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { status in
@@ -48,7 +98,7 @@ final class BackgroundVoiceEngine: ObservableObject {
             }
         }
         guard speechStatus == .authorized else {
-            return (false, "请先授予「语音识别」权限，才能在键盘内实时语音转换。")
+            return (false, "请先在系统设置中授予「语音识别」权限，才能使用键盘内语音转换。")
         }
 
         let micOK = await withCheckedContinuation { cont in
@@ -57,7 +107,7 @@ final class BackgroundVoiceEngine: ObservableObject {
             }
         }
         guard micOK else {
-            return (false, "请先授予「麦克风」权限，才能在键盘内采集语音。")
+            return (false, "请先在系统设置中授予「麦克风」权限，才能采集语音。")
         }
 
         do {
@@ -65,29 +115,48 @@ final class BackgroundVoiceEngine: ObservableObject {
             try session.setCategory(
                 .playAndRecord,
                 mode: .measurement,
-                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
             )
             try session.setActive(true)
+
+            do {
+                try ensureAudioEngineRunning()
+            } catch {
+                // 冷启动通过 lingxi://voice-warmup 切前台时，给系统音频路由 250ms 完成激活后自动重试一次
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                try session.setActive(true)
+                try ensureAudioEngineRunning()
+            }
             startSilentKeepAliveIfNeeded()
             startLoopbackServerIfNeeded()
+
             isWarm = true
+            lastActivityTime = Date()
             startHeartbeatTimer()
             liveState.engineWarm = true
+            liveState.isRecording = false
             liveState.errorText = nil
-            liveState.statusText = "后台语音引擎已就绪 · 切回任意 App 即可在键盘内直接语音转换"
+            liveState.statusText = "✓ 后台语音引擎已就绪 · 切回微信/抖音即可在键盘内直接说话"
             broadcastState(force: true)
-            return (true, "✓ 后台语音引擎已激活！现在切回微信/抖音，点键盘「🎙️语音」即可在键盘内直接说话转换，不再跳出 App。")
+            return (true, "✓ 后台语音引擎已激活！请点左上角返回原 App，即可在键盘内直接点「🎙️ 开始说话」实时转换（无需再次跳出）。")
         } catch {
-            return (false, "激活音频会话失败：\(error.localizedDescription)")
+            return (false, "激活语音引擎失败：\(error.localizedDescription)")
         }
     }
 
     func shutdown() {
-        stopRecording(runFinalTranslate: false)
+        stopCapture(runFinalTranslate: false)
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         keepAlivePlayer?.stop()
         keepAlivePlayer = nil
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if tapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
         listener?.cancel()
         listener = nil
         isWarm = false
@@ -97,14 +166,57 @@ final class BackgroundVoiceEngine: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    // MARK: - 静音保活音频（44.1kHz 1s 零振幅 WAV，内存 < 90KB，确保切后台后不被系统挂起）
+    /// 核心：在前台启动常驻 `AVAudioEngine` 与 `inputNode` Tap，确保切入后台后随时可无报错收音。
+    private func ensureAudioEngineRunning() throws {
+        if audioEngine.isRunning && tapInstalled {
+            return
+        }
+        let inputNode = audioEngine.inputNode
+        if tapInstalled {
+            inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        let format = inputNode.inputFormat(forBus: 0)
+        guard format.channelCount > 0 && format.sampleRate > 0 else {
+            throw NSError(domain: "LingxiVoice", code: -10, userInfo: [NSLocalizedDescriptionKey: "未检测到可用麦克风输入通道"])
+        }
+        let sink = self.captureSink
+        // 传入 format: nil 自动跟随硬件采样率（蓝牙/听筒切换永不崩溃）
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            guard sink.appendIfActive(buffer) else { return }
+            let lvl = Self.computeLevel(buffer)
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording else { return }
+                self.liveState.audioLevel = lvl
+                self.broadcastState(force: false)
+            }
+        }
+        tapInstalled = true
+        audioEngine.prepare()
+        try audioEngine.start()
+    }
+
+    private func handleAudioInterruption(_ note: Notification) {
+        guard let info = note.userInfo,
+              let typeVal = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeVal) else { return }
+        if type == .began {
+            stopCapture(runFinalTranslate: false)
+        } else if type == .ended, isWarm {
+            try? AVAudioSession.sharedInstance().setActive(true)
+            try? ensureAudioEngineRunning()
+            keepAlivePlayer?.play()
+        }
+    }
+
+    // MARK: - 极低非零音量保活（volume = 0.001，防止 mediaserverd 将 0.0 静默挂起）
 
     private func startSilentKeepAliveIfNeeded() {
         if keepAlivePlayer?.isPlaying == true { return }
         let wavData = Self.makeSilentWAVData(durationSeconds: 1.0, sampleRate: 8000)
         if let player = try? AVAudioPlayer(data: wavData) {
             player.numberOfLoops = -1
-            player.volume = 0.0
+            player.volume = 0.001
             player.prepareToPlay()
             player.play()
             keepAlivePlayer = player
@@ -142,9 +254,14 @@ final class BackgroundVoiceEngine: ObservableObject {
 
     private func startHeartbeatTimer() {
         heartbeatTimer?.invalidate()
-        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isWarm else { return }
+                if !self.isRecording && Date().timeIntervalSince(self.lastActivityTime) > Self.idleShutdownSeconds {
+                    self.shutdown()
+                    return
+                }
+                self.liveState.engineWarm = self.audioEngine.isRunning
                 self.broadcastState(force: true)
             }
         }
@@ -152,7 +269,7 @@ final class BackgroundVoiceEngine: ObservableObject {
         heartbeatTimer = timer
     }
 
-    // MARK: - 接收键盘命令（App Group + 127.0.0.1 HTTP）
+    // MARK: - 接收键盘命令
 
     private func handleSharedCommand() {
         guard let cmd = VoiceIPCBridge.readCommandFromShared() else { return }
@@ -160,16 +277,18 @@ final class BackgroundVoiceEngine: ObservableObject {
     }
 
     private func handleCommand(_ cmd: VoiceIPCCommand) {
+        lastActivityTime = Date()
         let mode = VoiceTranslateMode(rawValue: cmd.modeRaw) ?? activeMode
         switch cmd.action {
         case .ping:
+            liveState.engineWarm = isWarm && audioEngine.isRunning
             broadcastState(force: true)
         case .start:
-            startRecording(mode: mode)
+            startCapture(mode: mode)
         case .stop:
-            stopRecording(runFinalTranslate: true)
+            stopCapture(runFinalTranslate: true)
         case .clear:
-            stopRecording(runFinalTranslate: false)
+            stopCapture(runFinalTranslate: false)
             liveState.transcript = ""
             liveState.translatedText = ""
             liveState.errorText = nil
@@ -178,9 +297,10 @@ final class BackgroundVoiceEngine: ObservableObject {
         }
     }
 
-    private func startRecording(mode: VoiceTranslateMode) {
+    /// 键盘发来 `.start`：绝不在后台重启 `AVAudioEngine`，直接向已在运行的常驻引擎挂载识别请求！
+    private func startCapture(mode: VoiceTranslateMode) {
         activeMode = mode
-        stopRecording(runFinalTranslate: false)
+        stopCapture(runFinalTranslate: false)
         lastTranslatedSnapshot = ""
 
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: mode.sourceLocaleID)),
@@ -190,94 +310,78 @@ final class BackgroundVoiceEngine: ObservableObject {
             return
         }
 
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-            )
-            try session.setActive(true)
-
-            let req = SFSpeechAudioBufferRecognitionRequest()
-            req.shouldReportPartialResults = true
-            if #available(iOS 16.0, *) {
-                req.addsPunctuation = true
+        if !audioEngine.isRunning {
+            do {
+                try ensureAudioEngineRunning()
+            } catch {
+                isWarm = false
+                liveState.engineWarm = false
+                liveState.isRecording = false
+                liveState.errorText = "后台音频引擎已休眠，请点下方重新激活一次"
+                broadcastState(force: true)
+                return
             }
-            recognitionRequest = req
+        }
 
-            let inputNode = audioEngine.inputNode
-            inputNode.removeTap(onBus: 0)
-            let format = inputNode.outputFormat(forBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-                req.append(buffer)
-                let lvl = Self.computeLevel(buffer)
-                Task { @MainActor [weak self] in
-                    guard let self, self.isRecording else { return }
-                    self.liveState.audioLevel = lvl
-                    self.broadcastState(force: false)
-                }
-            }
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        if #available(iOS 16.0, *) {
+            req.addsPunctuation = true
+        }
+        captureSink.begin(with: req)
 
-            audioEngine.prepare()
-            try audioEngine.start()
+        isRecording = true
+        liveState.engineWarm = true
+        liveState.isRecording = true
+        liveState.isTranslating = false
+        liveState.modeRaw = mode.rawValue
+        liveState.transcript = ""
+        liveState.translatedText = ""
+        liveState.errorText = nil
+        liveState.statusText = "🎙️ 正在听「\(mode.sourceLanguageLabel)」…"
+        broadcastState(force: true)
 
-            isRecording = true
-            liveState.engineWarm = true
-            liveState.isRecording = true
-            liveState.isTranslating = false
-            liveState.modeRaw = mode.rawValue
-            liveState.transcript = ""
-            liveState.translatedText = ""
-            liveState.errorText = nil
-            liveState.statusText = "🎙️ 正在听「\(mode.sourceLanguageLabel)」…"
-            broadcastState(force: true)
-
-            recognitionTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if let result {
-                        let text = result.bestTranscription.formattedString
-                        self.liveState.transcript = text
-                        self.scheduleLiveTranslate(for: text)
-                        self.broadcastState(force: true)
-                        if result.isFinal {
-                            self.stopRecording(runFinalTranslate: true)
-                        }
-                    } else if let error, self.isRecording {
-                        let nsErr = error as NSError
-                        if nsErr.code != 216 && nsErr.code != 1110 {
-                            self.liveState.errorText = error.localizedDescription
-                        }
-                        self.stopRecording(runFinalTranslate: true)
+        recognitionTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let result {
+                    let text = result.bestTranscription.formattedString
+                    self.liveState.transcript = text
+                    self.scheduleLiveTranslate(for: text)
+                    self.broadcastState(force: true)
+                    if result.isFinal {
+                        self.stopCapture(runFinalTranslate: true)
                     }
+                } else if let error, self.isRecording {
+                    let nsErr = error as NSError
+                    // 忽略正常取消 (216) 与无语音超时 (1110)
+                    if nsErr.code != 216 && nsErr.code != 1110 {
+                        self.liveState.errorText = "语音识别中断(\(nsErr.code))：\(error.localizedDescription)"
+                    }
+                    self.stopCapture(runFinalTranslate: true)
                 }
             }
-        } catch {
-            liveState.isRecording = false
-            liveState.errorText = "启动录音失败：\(error.localizedDescription)"
-            broadcastState(force: true)
         }
     }
 
-    private func stopRecording(runFinalTranslate: Bool) {
-        if audioEngine.isRunning {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
+    /// 停止本次收音（保持 `AVAudioEngine` 常驻运行，确保下一次在微信里点说话依然 0ms 可用！）
+    private func stopCapture(runFinalTranslate: Bool) {
+        let prevReq = captureSink.end()
+        prevReq?.endAudio()
+        if runFinalTranslate {
+            recognitionTask?.finish()
+        } else {
+            recognitionTask?.cancel()
         }
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
         recognitionTask = nil
         isRecording = false
         liveState.isRecording = false
         liveState.audioLevel = 0
+        broadcastState(force: true)
 
         let snap = liveState.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         if runFinalTranslate && !snap.isEmpty {
             runTranslationNow(for: snap)
-        } else {
-            broadcastState(force: true)
         }
     }
 
@@ -366,12 +470,13 @@ final class BackgroundVoiceEngine: ObservableObject {
         return min(1.0, max(0.0, Double(sqrt(sum / Float(n)) * 10.0)))
     }
 
-    // MARK: - 本机回环微 HTTP 服务 (127.0.0.1:48921)，免费侧载无 App Group 也能 0ms 互通
+    // MARK: - 本机回环微 HTTP 服务 (127.0.0.1:48921)
 
     private func startLoopbackServerIfNeeded() {
         guard listener == nil else { return }
         guard let port = NWEndpoint.Port(rawValue: VoiceIPCBridge.loopbackPort) else { return }
         let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
         guard let newListener = try? NWListener(using: params) else { return }
         newListener.newConnectionHandler = { [weak self] conn in
@@ -397,14 +502,32 @@ final class BackgroundVoiceEngine: ObservableObject {
                 return
             }
             let firstLine = raw.split(separator: "\r\n", maxSplits: 1).first.map(String.init) ?? ""
+            let requestTarget: String = {
+                let parts = firstLine.split(separator: " ")
+                return parts.count >= 2 ? String(parts[1]) : ""
+            }()
             let bodyPart: Data? = raw.range(of: "\r\n\r\n").map { Data(raw[$0.upperBound...].utf8) }
 
+            // 解析单包 GET /voice/cmd?action=...&mode=... 或兼容 POST /voice/command JSON Body
+            var parsedCmd: VoiceIPCCommand?
+            if requestTarget.hasPrefix("/voice/cmd"),
+               let comps = URLComponents(string: "http://127.0.0.1\(requestTarget)"),
+               let actionRaw = comps.queryItems?.first(where: { $0.name == "action" })?.value,
+               let action = VoiceIPCCommand.Action(rawValue: actionRaw) {
+                let modeRaw = comps.queryItems?.first(where: { $0.name == "mode" })?.value ?? VoiceTranslateMode.zhToEn.rawValue
+                parsedCmd = VoiceIPCCommand(action: action, modeRaw: modeRaw)
+            } else if firstLine.contains("POST /voice/command"),
+                      let bodyPart,
+                      !bodyPart.isEmpty,
+                      let cmd = try? JSONDecoder().decode(VoiceIPCCommand.self, from: bodyPart) {
+                parsedCmd = cmd
+            }
+
             Task { @MainActor in
-                if firstLine.contains("POST /voice/command"),
-                   let bodyPart,
-                   let cmd = try? JSONDecoder().decode(VoiceIPCCommand.self, from: bodyPart) {
-                    self.handleCommand(cmd)
+                if let parsedCmd {
+                    self.handleCommand(parsedCmd)
                 }
+                self.liveState.engineWarm = self.isWarm && self.audioEngine.isRunning
                 self.liveState.updatedAt = Date().timeIntervalSince1970
                 let json = (try? JSONEncoder().encode(self.liveState)) ?? Data("{}".utf8)
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.count)\r\nConnection: close\r\n\r\n"

@@ -323,7 +323,8 @@ struct LingxiSettings: Codable, Equatable {
     var geoLocationBoostEnabled: Bool = true
     var aiGeoContextEnabled: Bool = true
     var autoDeleteUploadedScreenshot: Bool = true
-    var autoAnalyzeNewScreenshot: Bool = true
+    /// 截屏后默认仅在顶栏弹出不打扰胶囊提示（绝不强抢键盘或私自弹删图框），用户可手动开启全自动识屏
+    var autoAnalyzeNewScreenshot: Bool = false
     var customSwipeUpMap: [String: String] = [:]
     var customSwipeDownMap: [String: String] = [:]
 
