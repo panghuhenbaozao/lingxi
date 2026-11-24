@@ -44,6 +44,7 @@ struct GeoLocationContext: Codable, Equatable {
     private static let fileName = "lingxi_geo_context.json"
     private static var cached: GeoLocationContext?
     private static var cachedMTime: Date?
+    private static var lastStatCheckTime: CFAbsoluteTime = 0
 
     init() {}
 
@@ -87,6 +88,11 @@ struct GeoLocationContext: Codable, Equatable {
     }
 
     static func load(force: Bool = false) -> GeoLocationContext {
+        let now = CFAbsoluteTimeGetCurrent()
+        if !force, let cached, now - lastStatCheckTime < 2.5 {
+            return cached
+        }
+        lastStatCheckTime = now
         let mtime = AppGroup.modificationDate(of: fileName)
         if !force, let cached, cachedMTime == mtime {
             return cached
@@ -102,6 +108,7 @@ struct GeoLocationContext: Codable, Equatable {
         let ok = AppGroup.writeJSON(self, to: Self.fileName, protected: true)
         Self.cached = self
         Self.cachedMTime = AppGroup.modificationDate(of: Self.fileName)
+        Self.lastStatCheckTime = CFAbsoluteTimeGetCurrent()
         return ok
     }
 
@@ -109,6 +116,7 @@ struct GeoLocationContext: Codable, Equatable {
         try? FileManager.default.removeItem(at: AppGroup.fileURL(fileName))
         cached = GeoLocationContext()
         cachedMTime = nil
+        lastStatCheckTime = 0
     }
 
     /// 在键盘打字热路径中，精准匹配当前城市/区县/街道与周边 POI：

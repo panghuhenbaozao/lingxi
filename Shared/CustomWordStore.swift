@@ -28,6 +28,7 @@ final class CustomWordStore {
     private static let fileName = "lingxi_custom_words.json"
     private static var cached: [CustomWordEntry]?
     private static var cachedMTime: Date?
+    private static var lastStatCheckTime: CFAbsoluteTime = 0
 
     static let defaults: [CustomWordEntry] = [
         CustomWordEntry(code: "mail", word: "hello@example.com"),
@@ -36,6 +37,11 @@ final class CustomWordStore {
     ]
 
     static func load(force: Bool = false) -> [CustomWordEntry] {
+        let now = CFAbsoluteTimeGetCurrent()
+        if !force, let cached, now - lastStatCheckTime < 2.5 {
+            return cached
+        }
+        lastStatCheckTime = now
         let mtime = AppGroup.modificationDate(of: fileName)
         if !force, let cached, cachedMTime == mtime {
             return cached
@@ -51,6 +57,7 @@ final class CustomWordStore {
         let ok = AppGroup.writeJSON(entries, to: fileName)
         cached = entries
         cachedMTime = AppGroup.modificationDate(of: fileName)
+        lastStatCheckTime = CFAbsoluteTimeGetCurrent()
         return ok
     }
 

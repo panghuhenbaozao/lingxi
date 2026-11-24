@@ -1,9 +1,10 @@
+import Photos
 import UIKit
 
-/// 极简高效键盘内嵌 AI 工作台（v5.4 升级）：
-/// - 顶部「可打字 + 可粘贴」输入框 + 6 项核心高频技能 + 🕒 历史记录 + ⤢ 阅读拉高；
-/// - 翻看长回答或打开历史记录时自动拉高键盘高度，正文支持长按自由选中任意片段，也支持一键复制全文与历史条目；
-/// - 底部清爽 4 键：重试/停止 · 复制 · 替换 · 插入。
+/// 极简高效键盘内嵌 AI 工作台（v5.5 升级）：
+/// - 顶部「可打字 + 可粘贴」输入框 + 「📷 截屏识图」+ 6 项核心高频技能 + 🕒 历史记录 + ⤢ 阅读拉高；
+/// - 全链路流式 45ms 节流刷新 + `AITextSanitizer` 自动净化 `*` / `**` / `###` Markdown 符号；
+/// - 支持键盘内直传最新截屏给 AI 多模态识别并在上传后自动清理原截屏。
 final class AIAssistantPanelView: UIView, UITextViewDelegate {
     var onInsertText: ((String) -> Void)?
     var onReplaceBeforeCursor: ((Int, String) -> Void)?
@@ -14,6 +15,10 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     var onOpenFullAccessSettings: ((@escaping (Bool) -> Void) -> Void)?
     var onOpenHostAppAI: ((@escaping (Bool) -> Void) -> Void)?
     var onImportBridgeToken: (() -> Bool)?
+    /// 键盘内触发一键截屏识图
+    var onTriggerScreenshotVision: (() -> Void)?
+    /// 唤起主 App 截屏识图工作台（可携带待删除截屏 assetID 完成系统删除确认）
+    var onOpenScreenshotWorkbench: ((String?) -> Void)?
     var onClose: (() -> Void)?
 
     private static let coreActions: [AIPresetAction] = [
@@ -37,6 +42,8 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     private var thinkingText = ""
     private var isThinkingExpanded = false
     private var showingHistory = false
+    private var pendingDeleteScreenshotAssetID: String?
+    private var screenshotStatusNotice: String?
     private(set) var isExpandedReadingHeight = false
 
     // Row 1: 顶部可打字 / 可粘贴输入框
@@ -811,6 +818,10 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             actionsStack.addArrangedSubview(btn)
         }
 
+        addPill(title: "📷 截屏识图", selected: false) { [weak self] in
+            self?.onTriggerScreenshotVision?()
+        }
+
         for action in Self.coreActions {
             let shortTitle: String
             switch action {
@@ -913,6 +924,11 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             if !AppGroup.isAvailable {
                 permissionSecondaryButton.setTitle("📋 导入同步口令", for: .normal)
             }
+        } else if pendingDeleteScreenshotAssetID != nil {
+            permissionBar.isHidden = false
+            permissionPrimaryButton.setTitle("🗑️ 一键彻底删除已上传的原截屏", for: .normal)
+            permissionSecondaryButton.isHidden = false
+            permissionSecondaryButton.setTitle("暂不删", for: .normal)
         } else {
             permissionBar.isHidden = true
             permissionSecondaryButton.isHidden = true
@@ -928,17 +944,26 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
                     self.outputTextView.text = "📱 iOS 限制无完全访问时自动跳转。\n请到桌面打开「设置」→「灵犀输入法」→「键盘」→ 打开「允许完全访问」，开启后切回即可正常使用 AI。"
                 }
             }
-        } else {
+        } else if !AIConfig.load().isConfigured {
             onOpenHostAppAI? { [weak self] opened in
                 guard let self else { return }
                 if !opened {
                     self.outputTextView.text = "✨ 请切到主屏幕打开「灵犀输入法 App → AI 智脑」填写 API Key；免费侧载填完后点「同步给键盘」再切回即可。"
                 }
             }
+        } else if let assetID = pendingDeleteScreenshotAssetID {
+            pendingDeleteScreenshotAssetID = nil
+            refreshPermissionBarVisibility()
+            onOpenScreenshotWorkbench?(assetID)
         }
     }
 
     private func handlePermissionSecondaryTap() {
+        if pendingDeleteScreenshotAssetID != nil {
+            pendingDeleteScreenshotAssetID = nil
+            refreshPermissionBarVisibility()
+            return
+        }
         let ok = onImportBridgeToken?() ?? false
         if ok {
             let cfg = AIConfig.load()
@@ -977,6 +1002,154 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         thoughtToggleButton.setTitle("💭 思考过程 (\(thinkingText.count)字) \(arrow)", for: .normal)
     }
 
+    /// 键盘内直接对刚截取/复制的截屏执行多模态 AI 识别，上传后按设置自动删除原截屏。
+    func runScreenshotVision(
+        imageData: Data,
+        sourceLabel: String,
+        assetLocalIdentifier: String?,
+        clearPasteboardAfterUpload: Bool,
+        autoDelete: Bool,
+        customPrompt: String? = nil,
+        theme: ResolvedTheme,
+        hasFullAccess: Bool
+    ) {
+        self.theme = theme
+        self.hasFullAccess = hasFullAccess
+        self.showingHistory = false
+        self.pendingDeleteScreenshotAssetID = nil
+        self.screenshotStatusNotice = nil
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+
+        let cleanCustom = (customPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let preset: ScreenshotVisionPreset = .smartReply
+        let effectivePrompt = cleanCustom.isEmpty ? preset.promptText : cleanCustom
+        let effectiveSys = cleanCustom.isEmpty
+            ? preset.systemInstruction
+            : "你是内嵌在 iOS 输入法中的视觉 AI 助手。请结合截图画面精准回答用户问题，只输出干净自然、可直接复制发送的纯文本。"
+        self.inputDraftText = cleanCustom.isEmpty ? "📷 截屏识图（\(sourceLabel)）" : cleanCustom
+        self.hostReplaceCount = 0
+
+        reloadPinnedPrompts()
+        applyTheme(theme)
+        rebuildActionButtons(theme: theme)
+        refreshInputBoxDisplay()
+
+        guard hasFullAccess else {
+            showIdleGuidance()
+            return
+        }
+        let config = AIConfig.load()
+        guard config.isConfigured else {
+            showIdleGuidance()
+            return
+        }
+
+        streamTask?.cancel()
+        permissionBar.isHidden = true
+        generatedText = ""
+        thinkingText = ""
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        let kbSize = max(1, imageData.count / 1024)
+        outputTextView.text = "📷 正在上传截屏（\(kbSize) KB · \(sourceLabel)）并调用 AI 识别…"
+        stopOrRetryButton.setTitle("停止", for: .normal)
+        updateActionButtonsEnabled()
+
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                var accumulatedAnswer = ""
+                var lastRenderAt = CACurrentMediaTime()
+                var cleanupTriggered = false
+
+                func performPostUploadCleanupIfNeeded() async {
+                    guard autoDelete, !cleanupTriggered else { return }
+                    cleanupTriggered = true
+                    if clearPasteboardAfterUpload {
+                        await MainActor.run {
+                            UIPasteboard.general.items = []
+                            self.screenshotStatusNotice = "✓ 已上传识别并自动清空剪贴板原截屏"
+                        }
+                    }
+                    if let assetID = assetLocalIdentifier, !assetID.isEmpty {
+                        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                        if assets.count > 0 {
+                            do {
+                                try await PHPhotoLibrary.shared().performChanges {
+                                    PHAssetChangeRequest.deleteAssets(assets)
+                                }
+                                await MainActor.run {
+                                    self.pendingDeleteScreenshotAssetID = nil
+                                    self.screenshotStatusNotice = "✓ 已上传识别并自动删除相册原截屏"
+                                    self.refreshPermissionBarVisibility()
+                                }
+                            } catch {
+                                // iOS 键盘扩展沙盒不允许直接弹出系统删除相册确认框时，一键交由主 App 完成删除
+                                await MainActor.run {
+                                    self.pendingDeleteScreenshotAssetID = assetID
+                                    self.screenshotStatusNotice = "ℹ️ 已上传识别完成，点下方按钮一键彻底删除相册原截屏"
+                                    self.refreshPermissionBarVisibility()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for try await event in client.streamVisionEvents(
+                    imageData: imageData,
+                    mimeType: "image/jpeg",
+                    prompt: effectivePrompt,
+                    systemInstruction: effectiveSys,
+                    config: config,
+                    featureTag: "screenshot_vision"
+                ) {
+                    if Task.isCancelled { break }
+                    if case .answer(let delta) = event {
+                        accumulatedAnswer += delta
+                        let now = CACurrentMediaTime()
+                        if now - lastRenderAt >= 0.045 {
+                            lastRenderAt = now
+                            let cleanStream = AITextSanitizer.clean(accumulatedAnswer, streaming: true)
+                            await MainActor.run {
+                                self.generatedText = cleanStream
+                                self.outputTextView.text = cleanStream
+                                let end = NSRange(location: max(0, cleanStream.utf16.count - 1), length: 0)
+                                self.outputTextView.scrollRangeToVisible(end)
+                            }
+                        }
+                    }
+                }
+                if !Task.isCancelled {
+                    await performPostUploadCleanupIfNeeded()
+                }
+                let finalClean = AITextSanitizer.clean(accumulatedAnswer, streaming: false)
+                await MainActor.run {
+                    self.generatedText = finalClean
+                    if finalClean.isEmpty {
+                        self.outputTextView.text = "⚠️ 当前模型未返回图片识别内容，请确认所选模型支持视觉识图（如 Gemini Flash / GPT-4o / Qwen-VL）。"
+                    } else {
+                        let suffix = self.screenshotStatusNotice.map { "\n\n\($0)" } ?? ""
+                        self.outputTextView.text = finalClean + suffix
+                        AIRecentHistoryStore.record(
+                            title: "📷 截屏识图",
+                            output: finalClean,
+                            prompt: self.inputDraftText
+                        )
+                    }
+                    self.stopOrRetryButton.setTitle("重试", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            } catch {
+                await MainActor.run {
+                    self.outputTextView.text = "⚠️ 截屏识图失败：\(error.localizedDescription)\n提示：请确保当前 AI 模型支持图片识别。"
+                    self.stopOrRetryButton.setTitle("重试", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            }
+        }
+    }
+
     private func streamPrompt(
         prompt: String,
         systemInstruction: String,
@@ -998,6 +1171,8 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         }
 
         showingHistory = false
+        pendingDeleteScreenshotAssetID = nil
+        screenshotStatusNotice = nil
         historyScroll.isHidden = true
         outputTextView.isHidden = false
         if let theme { applyTheme(theme) }
@@ -1018,6 +1193,8 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             do {
                 var accumulatedAnswer = ""
                 var accumulatedThought = ""
+                var lastAnswerFlush = CACurrentMediaTime()
+                var lastThoughtFlush = CACurrentMediaTime()
                 for try await event in client.streamEvents(
                     prompt: prompt,
                     systemInstruction: systemInstruction,
@@ -1027,36 +1204,52 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
                     preferDeep: preferDeep
                 ) {
                     if Task.isCancelled { break }
+                    let now = CACurrentMediaTime()
                     switch event {
                     case .thought(let delta):
                         accumulatedThought += delta
-                        if config.showThinkingProcess {
+                        if config.showThinkingProcess && (now - lastThoughtFlush >= 0.08) {
+                            lastThoughtFlush = now
+                            let snapThought = AITextSanitizer.clean(accumulatedThought, streaming: true)
                             await MainActor.run {
-                                self.thinkingText = accumulatedThought
+                                self.thinkingText = snapThought
                                 self.thoughtToggleButton.isHidden = false
                                 self.updateThoughtHeader()
-                                self.thoughtTextView.text = accumulatedThought
+                                self.thoughtTextView.text = snapThought
                                 if self.generatedText.isEmpty {
-                                    self.outputTextView.text = "🧠 思考中（已推演 \(accumulatedThought.count) 字）…"
+                                    self.outputTextView.text = "🧠 思考中（已推演 \(snapThought.count) 字）…"
                                 }
                                 self.setNeedsLayout()
                             }
                         }
                     case .answer(let delta):
                         accumulatedAnswer += delta
-                        await MainActor.run {
-                            self.generatedText = accumulatedAnswer
-                            self.outputTextView.text = accumulatedAnswer
-                            let end = NSRange(location: max(0, accumulatedAnswer.utf16.count - 1), length: 0)
-                            self.outputTextView.scrollRangeToVisible(end)
+                        if now - lastAnswerFlush >= 0.045 {
+                            lastAnswerFlush = now
+                            let cleanStream = AITextSanitizer.clean(accumulatedAnswer, streaming: true)
+                            await MainActor.run {
+                                self.generatedText = cleanStream
+                                self.outputTextView.text = cleanStream
+                                let end = NSRange(location: max(0, cleanStream.utf16.count - 1), length: 0)
+                                self.outputTextView.scrollRangeToVisible(end)
+                            }
                         }
                     }
                 }
+                let finalClean = AITextSanitizer.clean(accumulatedAnswer, streaming: false)
+                let finalThought = AITextSanitizer.clean(accumulatedThought, streaming: false)
                 await MainActor.run {
-                    let finalClean = self.generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.generatedText = finalClean
+                    if config.showThinkingProcess && !finalThought.isEmpty {
+                        self.thinkingText = finalThought
+                        self.thoughtToggleButton.isHidden = false
+                        self.updateThoughtHeader()
+                        self.thoughtTextView.text = finalThought
+                    }
                     if finalClean.isEmpty {
                         self.outputTextView.text = "⚠️ 模型未返回正文，请检查模型配置或点击重试。"
                     } else {
+                        self.outputTextView.text = finalClean
                         AIRecentHistoryStore.record(
                             title: self.lastRunPair?.title ?? "AI 助手",
                             output: finalClean,
@@ -1089,7 +1282,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     }
 
     private func handleCopyGeneratedText() {
-        let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = AITextSanitizer.clean(generatedText, streaming: false)
         guard !trimmed.isEmpty else { return }
         UIPasteboard.general.string = trimmed
         _ = ClipboardStore.record(trimmed)
@@ -1118,14 +1311,14 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     }
 
     private func handleReplace() {
-        let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = AITextSanitizer.clean(generatedText, streaming: false)
         guard !trimmed.isEmpty, hostReplaceCount > 0 else { return }
         setExpandedReadingHeight(false)
         onReplaceBeforeCursor?(hostReplaceCount, trimmed)
     }
 
     private func handleInsert() {
-        let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = AITextSanitizer.clean(generatedText, streaming: false)
         guard !trimmed.isEmpty else { return }
         setExpandedReadingHeight(false)
         onInsertText?(trimmed)

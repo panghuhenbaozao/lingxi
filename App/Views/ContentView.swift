@@ -54,5 +54,9 @@ struct ContentView: View {
             VoiceLiveTranslatorView()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showScreenshotVision) {
+            ScreenshotVisionView()
+                .environmentObject(appState)
+        }
     }
 }

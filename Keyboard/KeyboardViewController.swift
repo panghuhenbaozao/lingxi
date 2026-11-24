@@ -1,3 +1,4 @@
+import Photos
 import UIKit
 
 /// 灵犀输入法容器根视图：实现 `UIInputViewAudioFeedback` 以支持系统原生按键音兜底。
@@ -197,6 +198,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        TypingStatsStore.shared.flush()
         flushTypingHabitSessionIfNeeded()
         TouchOffsetCalibrator.shared.flush()
         if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
@@ -397,7 +399,10 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
         updateReturnKeyAppearance()
-        refreshClipboardState()
+        // 打字热路径绝不频繁跨进程查 UIPasteboard，避免每敲一字卡顿
+        if rawComposing.isEmpty && englishComposing.isEmpty && sinceKeystroke >= 0.8 {
+            refreshClipboardState(force: false)
+        }
     }
 
     // MARK: - 视图初始化
@@ -609,8 +614,13 @@ final class KeyboardViewController: UIInputViewController {
             bodyH = baseH
         }
         let dockH = currentLiveDockMode().preferredHeight
-        liveDockHeightConstraint?.constant = dockH
-        heightConstraint?.constant = dockH + effectiveToolbarHeight + bodyH
+        let totalH = dockH + effectiveToolbarHeight + bodyH
+        if let lc = liveDockHeightConstraint, abs(lc.constant - dockH) > 0.5 {
+            lc.constant = dockH
+        }
+        if let hc = heightConstraint, abs(hc.constant - totalH) > 0.5 {
+            hc.constant = totalH
+        }
     }
 
     private var currentLiveComposingPreview: String {
@@ -646,6 +656,117 @@ final class KeyboardViewController: UIInputViewController {
             return sys
         }
         return ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func openHostScreenshotWorkbench(deleteAssetID: String? = nil) {
+        let urlStr: String
+        if let assetID = deleteAssetID, !assetID.isEmpty,
+           let encoded = assetID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            urlStr = "lingxi://screenshot-ai?deleteId=\(encoded)"
+        } else {
+            urlStr = "lingxi://screenshot-ai?auto=1"
+        }
+        guard let url = URL(string: urlStr) else { return }
+        openURLFromExtension(url) { [weak self] opened in
+            guard let self, !opened else { return }
+            self.switchToPanel(.ai)
+            self.aiPanel.prepare(
+                theme: self.resolvedTheme,
+                hasFullAccess: self.hasFullAccess,
+                beforeCursor: "",
+                clipboardText: nil,
+                preferredAction: nil,
+                preservedDraft: ""
+            )
+        }
+    }
+
+    private func handleOpenScreenshotAI() {
+        commitRawIfNeeded()
+        if !AppGroup.isAvailable && hasFullAccess {
+            _ = tryImportBridgeTokenFromPasteboardIfPresent()
+        }
+        guard hasFullAccess else {
+            openHostPermissionsCenter()
+            return
+        }
+
+        // 1. 优先秒抓系统剪贴板中的最新截屏（搭配「快捷指令一键截屏拷贝」零跳转、传完秒清剪贴板）
+        if UIPasteboard.general.hasImages,
+           let img = UIPasteboard.general.image,
+           let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) {
+            switchToPanel(.ai)
+            aiPanel.runScreenshotVision(
+                imageData: jpeg,
+                sourceLabel: "剪贴板截屏",
+                assetLocalIdentifier: nil,
+                clearPasteboardAfterUpload: true,
+                autoDelete: settings.autoDeleteUploadedScreenshot,
+                theme: resolvedTheme,
+                hasFullAccess: hasFullAccess
+            )
+            return
+        }
+
+        // 2. 若已授相册权限，在键盘内直接读取最近 15 分钟内最新一张系统截屏，秒速上传 AI 识别并按设置自动删除
+        let photoStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if photoStatus == .authorized || photoStatus == .limited {
+            let options = PHFetchOptions()
+            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            options.fetchLimit = 3
+            options.predicate = NSPredicate(
+                format: "(mediaSubtype & %d) != 0",
+                PHAssetMediaSubtype.photoScreenshot.rawValue
+            )
+            let fetched = PHAsset.fetchAssets(with: .image, options: options)
+            if let latest = fetched.firstObject,
+               let created = latest.creationDate,
+               Date().timeIntervalSince(created) <= 900 {
+                let reqOpts = PHImageRequestOptions()
+                reqOpts.deliveryMode = .highQualityFormat
+                reqOpts.isSynchronous = false
+                reqOpts.isNetworkAccessAllowed = true
+                reqOpts.resizeMode = .fast
+                let targetSize = CGSize(width: 1280, height: 1280)
+                let assetID = latest.localIdentifier
+                let autoDel = settings.autoDeleteUploadedScreenshot
+                switchToPanel(.ai)
+                PHImageManager.default().requestImage(
+                    for: latest,
+                    targetSize: targetSize,
+                    contentMode: .aspectFit,
+                    options: reqOpts
+                ) { [weak self] image, _ in
+                    guard let self, let image,
+                          let jpeg = ScreenshotImageHelper.prepareJPEGData(from: image) else { return }
+                    DispatchQueue.main.async {
+                        self.aiPanel.runScreenshotVision(
+                            imageData: jpeg,
+                            sourceLabel: "相册最新截屏",
+                            assetLocalIdentifier: assetID,
+                            clearPasteboardAfterUpload: false,
+                            autoDelete: autoDel,
+                            theme: self.resolvedTheme,
+                            hasFullAccess: self.hasFullAccess
+                        )
+                    }
+                }
+                return
+            }
+        }
+
+        // 3. 若暂无近期截屏或尚未开启相册权限，同步一键拉起主 App「截屏识图工作台」（支持授权、读屏、AI识别与上传后自动删图）
+        openHostScreenshotWorkbench(deleteAssetID: nil)
+    }
+
+    private func openHostPermissionsCenter() {
+        if let url = URL(string: "lingxi://permissions") {
+            openURLFromExtension(url) { [weak self] opened in
+                if !opened, let self, let sysURL = URL(string: "app-settings:") {
+                    self.openURLFromExtension(sysURL) { _ in }
+                }
+            }
+        }
     }
 
     private func openHostVoiceTranslator() {
@@ -877,6 +998,12 @@ final class KeyboardViewController: UIInputViewController {
         aiPanel.onImportBridgeToken = { [weak self] in
             self?.tryImportBridgeTokenFromPasteboardIfPresent() ?? false
         }
+        aiPanel.onTriggerScreenshotVision = { [weak self] in
+            self?.handleOpenScreenshotAI()
+        }
+        aiPanel.onOpenScreenshotWorkbench = { [weak self] deleteAssetID in
+            self?.openHostScreenshotWorkbench(deleteAssetID: deleteAssetID)
+        }
         aiPanel.onClose = { [weak self] in
             self?.aiPromptDraft = nil
             self?.switchToPanel(.letters)
@@ -924,6 +1051,9 @@ final class KeyboardViewController: UIInputViewController {
         }
         quickSettingsPanel.onOpenEditPad = { [weak self] in
             self?.switchToPanel(.editPad)
+        }
+        quickSettingsPanel.onOpenPermissions = { [weak self] in
+            self?.openHostPermissionsCenter()
         }
         quickSettingsPanel.onClose = { [weak self] in
             self?.switchToPanel(.letters)
@@ -1304,6 +1434,8 @@ final class KeyboardViewController: UIInputViewController {
             }
         case .toggleTranslateMode:
             toggleTranslateMode()
+        case .openScreenshotAI:
+            handleOpenScreenshotAI()
         case .openVoiceTranslator:
             openHostVoiceTranslator()
         case .cycleTranslateTarget:
@@ -2483,7 +2615,6 @@ final class KeyboardViewController: UIInputViewController {
             layoutID: settings.layoutMode.rawValue,
             confusionCounts: sessionConfusionCounts
         )
-        _ = TypingHabitTracker.shared.recordTypingEvent(event)
         sessionHabitStartedAt = nil
         sessionCommittedChars = 0
         sessionCommittedWords = 0
@@ -2492,6 +2623,10 @@ final class KeyboardViewController: UIInputViewController {
         sessionGlideWords = 0
         sessionTypoCorrectedCount = 0
         sessionConfusionCounts = [:]
+        // 异步落盘，彻底避免每打满 8 字时主线程同步写 JSON 引发掉帧
+        DispatchQueue.global(qos: .utility).async {
+            _ = TypingHabitTracker.shared.recordTypingEvent(event)
+        }
     }
 
     private func insertDirectlyIntoHost(_ text: String) {
@@ -2699,14 +2834,14 @@ final class KeyboardViewController: UIInputViewController {
                               self.translateSourceBuffer.trimmingCharacters(in: .whitespacesAndNewlines) == sourceSnapshot else {
                             return
                         }
-                        self.translatePreviewText = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.translatePreviewText = AITextSanitizer.clean(accumulated, streaming: true)
                         self.translateIsStreaming = true
                         self.translateErrorText = nil
                         self.refreshToolbar()
                     }
                 }
                 try Task.checkCancellation()
-                let finalResult = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                let finalResult = AITextSanitizer.clean(accumulated, streaming: false)
                 await MainActor.run { [weak self] in
                     guard let self,
                           self.isTranslateMode,
@@ -2796,13 +2931,13 @@ final class KeyboardViewController: UIInputViewController {
 
     // MARK: - 剪贴板与 AI
 
-    private func refreshClipboardState() {
+    private func refreshClipboardState(force: Bool = true) {
         guard !isSecureField else {
             pasteMonitor.dismissCurrent()
             refreshToolbar()
             return
         }
-        pasteMonitor.refresh(settings: settings) { [weak self] _ in
+        pasteMonitor.refresh(settings: settings, force: force) { [weak self] _ in
             self?.refreshToolbar()
         }
     }
@@ -2999,7 +3134,9 @@ final class KeyboardViewController: UIInputViewController {
         let composingSyllables: [String] = (!rawComposing.isEmpty && !isUsingT9Layout && !isVToolActive && !settings.traditionalChineseEnabled && currentCorrectedHint == nil && wubiDisplayBuffer == nil && uModeDisplayBuffer == nil && currentTokens.count >= 2 && currentTokens.allSatisfy({ !($0.lockedSyllable ?? $0.text).isEmpty }))
             ? currentTokens.map { $0.lockedSyllable ?? $0.text }
             : []
-        let activeSelectedText: String? = (settings.selectionMagicEnabled && !isSecureField) ? textDocumentProxy.selectedText : nil
+        let activeSelectedText: String? = (!isActivelyComposing && settings.selectionMagicEnabled && !isSecureField)
+            ? textDocumentProxy.selectedText
+            : nil
         let inlineAICmd: InlineAICommandMatch? = (!isSecureField && !isActivelyComposing && activePanel == .letters)
             ? InlineAICommandDetector.detect(in: textDocumentProxy.documentContextBeforeInput ?? "")
             : nil
@@ -3126,30 +3263,33 @@ final class KeyboardViewController: UIInputViewController {
 
     private func refreshCanvas() {
         let (title, accent) = returnKeyAppearance()
-        let nextLetters: Set<Character> = (!isEnglishMode && !rawComposing.isEmpty)
-            ? (engine?.segmenter.validNextLetters(for: rawComposing, scheme: settings.inputScheme) ?? [])
-            : []
-        lettersCanvas.configure(
-            theme: resolvedTheme,
-            settings: settings,
-            isEnglishMode: isEnglishMode,
-            isComposing: !rawComposing.isEmpty,
-            shiftState: shiftState,
-            needsGlobeKey: needsInputModeSwitchKey,
-            returnTitle: title,
-            returnHighlighted: accent,
-            validNextLetters: nextLetters
-        )
-        t9Canvas.configure(
-            theme: resolvedTheme,
-            settings: settings,
-            isComposing: !rawComposing.isEmpty,
-            leftSyllables: t9LeftSyllables,
-            lockedSyllables: lockedT9Syllables,
-            needsGlobeKey: needsInputModeSwitchKey,
-            returnTitle: title,
-            returnHighlighted: accent
-        )
+        if isUsingT9Layout {
+            t9Canvas.configure(
+                theme: resolvedTheme,
+                settings: settings,
+                isComposing: !rawComposing.isEmpty,
+                leftSyllables: t9LeftSyllables,
+                lockedSyllables: lockedT9Syllables,
+                needsGlobeKey: needsInputModeSwitchKey,
+                returnTitle: title,
+                returnHighlighted: accent
+            )
+        } else {
+            let nextLetters: Set<Character> = (!isEnglishMode && !rawComposing.isEmpty)
+                ? (engine?.segmenter.validNextLetters(for: rawComposing, scheme: settings.inputScheme) ?? [])
+                : []
+            lettersCanvas.configure(
+                theme: resolvedTheme,
+                settings: settings,
+                isEnglishMode: isEnglishMode,
+                isComposing: !rawComposing.isEmpty,
+                shiftState: shiftState,
+                needsGlobeKey: needsInputModeSwitchKey,
+                returnTitle: title,
+                returnHighlighted: accent,
+                validNextLetters: nextLetters
+            )
+        }
     }
 
     private func updateReturnKeyAppearance() {

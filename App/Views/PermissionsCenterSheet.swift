@@ -1,10 +1,12 @@
 import AVFoundation
 import CoreLocation
+import Photos
 import Speech
 import SwiftUI
 import UIKit
 
-/// 统一「一键开启权限」中心：集中检测并一键开启 AI 联网所需全部权限（系统键盘、允许完全访问、AI 密钥同步、语音、麦克风、定位）。
+/// 统一「一键开启权限」中心（v5.5 升级）：
+/// 集中检测并一键开启键盘、完全访问、AI 密钥同步、语音识别、麦克风、相册截屏读删与实时定位全部权限。
 struct PermissionsCenterSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -13,6 +15,7 @@ struct PermissionsCenterSheet: View {
 
     @State private var speechStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
     @State private var micPermission: AVAudioSession.RecordPermission = AVAudioSession.sharedInstance().recordPermission
+    @State private var photoStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var isRequestingAll = false
     @State private var isSyncingBridge = false
     @State private var toastMessage: String?
@@ -24,6 +27,18 @@ struct PermissionsCenterSheet: View {
 
     private var isSpeechGranted: Bool { speechStatus == .authorized }
     private var isMicGranted: Bool { micPermission == .granted }
+    private var isPhotosGranted: Bool { photoStatus == .authorized || photoStatus == .limited }
+
+    private var readyPermissionCount: Int {
+        [
+            appState.isKeyboardEnabled,
+            appState.isKeyboardFullAccessConfirmed,
+            isSpeechGranted,
+            isMicGranted,
+            isPhotosGranted,
+            isLocationGranted,
+        ].filter { $0 }.count
+    }
 
     private var allCoreAIReady: Bool {
         appState.isKeyboardEnabled && appState.isKeyboardFullAccessConfirmed && appState.aiConfig.isConfigured
@@ -71,12 +86,21 @@ struct PermissionsCenterSheet: View {
                             .foregroundStyle(.white)
                     }
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(allCoreAIReady ? "键盘与 AI 核心权限已全部就绪" : "一键补齐 AI 与键盘必需权限")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
+                        HStack(spacing: 6) {
+                            Text(allCoreAIReady ? "核心权限已就绪" : "一键补齐全部权限")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Text("\(readyPermissionCount)/6 已开")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color(Design.Palette.accentSoft))
+                                .foregroundStyle(Color(Design.Palette.accent))
+                                .clipShape(Capsule())
+                        }
                         Text(allCoreAIReady
-                             ? "现在切出灵犀键盘即可正常联网调用 AI、云翻译与语音输入。"
-                             : "iOS 要求为键盘开启「允许完全访问」后，才允许键盘联网使用 AI。")
+                             ? "键盘联网 AI、翻译、语音互译与截屏自动删图均可畅通使用。"
+                             : "点右侧按钮一次连弹申请语音/麦克风/相册/定位，再点左侧一键开完全访问。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -87,7 +111,7 @@ struct PermissionsCenterSheet: View {
                     Button {
                         openAppSystemSettings()
                     } label: {
-                        Label("一键前往系统设置", systemImage: "gearshape.fill")
+                        Label("系统设置开完全访问", systemImage: "gearshape.fill")
                             .font(.caption.bold())
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
@@ -104,7 +128,7 @@ struct PermissionsCenterSheet: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 9)
                         } else {
-                            Label("一键授权语音/定位", systemImage: "wand.and.stars")
+                            Label("一键全量弹窗授权", systemImage: "wand.and.stars")
                                 .font(.caption.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 9)
@@ -216,7 +240,19 @@ struct PermissionsCenterSheet: View {
     // MARK: - 2. 语音与实时地标增强权限
 
     private var enhancedPermissionsSection: some View {
-        Section("语音与地标增强权限（可一键弹窗授权）") {
+        Section("截屏识图、语音与地标权限（一键连弹授权）") {
+            permissionRow(
+                icon: "camera.viewfinder",
+                title: "相册读写（截屏识图 & 上传自动删图）",
+                subtitle: isPhotosGranted
+                    ? "已授权，支持一键抓取最新截屏识图并在上传后自动删除"
+                    : "用于键盘一键抓取最新截屏发给 AI，并在上传完成后自动清理原截屏",
+                isGranted: isPhotosGranted,
+                grantedLabel: "已授权",
+                actionTitle: (photoStatus == .denied || photoStatus == .restricted) ? "去设置" : "一键授权",
+                action: { Task { await requestPhotosPermission() } }
+            )
+
             permissionRow(
                 icon: "waveform",
                 title: "语音识别",
@@ -327,6 +363,7 @@ struct PermissionsCenterSheet: View {
         appState.refreshAll()
         speechStatus = SFSpeechRecognizer.authorizationStatus()
         micPermission = AVAudioSession.sharedInstance().recordPermission
+        photoStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     }
 
     private func openAppSystemSettings() {
@@ -363,6 +400,17 @@ struct PermissionsCenterSheet: View {
         showToast(granted ? "✓ 麦克风权限已开启" : "可在系统设置中开启麦克风权限", success: granted)
     }
 
+    private func requestPhotosPermission() async {
+        if photoStatus == .denied || photoStatus == .restricted {
+            openAppSystemSettings()
+            return
+        }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        photoStatus = status
+        let ok = (status == .authorized || status == .limited)
+        showToast(ok ? "✓ 相册读写权限已开启，支持截屏上传后自动删图" : "可在系统设置中允许访问照片以使用自动删截屏", success: ok)
+    }
+
     private func requestLocationPermission() async {
         if locationService.authorizationStatus == .denied || locationService.authorizationStatus == .restricted {
             openAppSystemSettings()
@@ -375,6 +423,9 @@ struct PermissionsCenterSheet: View {
     private func requestAllRuntimePermissions() async {
         isRequestingAll = true
         defer { isRequestingAll = false }
+        if !isPhotosGranted && photoStatus == .notDetermined {
+            await requestPhotosPermission()
+        }
         if !isSpeechGranted && speechStatus == .notDetermined {
             await requestSpeechPermission()
         }
@@ -386,9 +437,9 @@ struct PermissionsCenterSheet: View {
         }
         refreshPermissionStates()
         if !appState.isKeyboardFullAccessConfirmed {
-            showToast("系统语音/定位已处理；键盘「允许完全访问」需点左侧「一键前往系统设置」打开。", success: true)
+            showToast("相册/语音/麦克风/定位已全部申请！键盘「允许完全访问」请点左侧「系统设置开完全访问」打开。", success: true)
         } else {
-            showToast("✓ 全部权限检查完成！", success: true)
+            showToast("✓ 全部 6 项权限已检查完毕！", success: true)
         }
     }
 

@@ -5,6 +5,7 @@ import Foundation
 enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
     case ai
     case translate
+    case screenshot
     case voice
     case clipboard
     case layout
@@ -16,6 +17,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .ai: return "灵犀 AI"
         case .translate: return "实时翻译"
+        case .screenshot: return "截屏识图"
         case .voice: return "语音互译"
         case .clipboard: return "剪贴板"
         case .layout: return "九键/26键切换"
@@ -28,6 +30,7 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .ai: return "sparkles"
         case .translate: return "character.bubble"
+        case .screenshot: return "camera.viewfinder"
         case .voice: return "mic.fill"
         case .clipboard: return "doc.on.clipboard"
         case .layout: return "rectangle.grid.3x2"
@@ -36,9 +39,9 @@ enum ToolbarButtonID: String, Codable, CaseIterable, Identifiable {
         case .undo: return "arrow.uturn.backward"
         }
     }
-    /// 是否属于左侧主功能胶囊区（AI / 译 / 语音），其余归于右侧工具区
+    /// 是否属于左侧主功能胶囊区（AI / 译 / 截屏 / 语音），其余归于右侧工具区
     var isPrimaryLeftAction: Bool {
-        self == .ai || self == .translate || self == .voice
+        self == .ai || self == .translate || self == .screenshot || self == .voice
     }
 }
 
@@ -319,6 +322,7 @@ struct LingxiSettings: Codable, Equatable {
     var autoFuzzyPromptEnabled: Bool = true
     var geoLocationBoostEnabled: Bool = true
     var aiGeoContextEnabled: Bool = true
+    var autoDeleteUploadedScreenshot: Bool = true
     var customSwipeUpMap: [String: String] = [:]
     var customSwipeDownMap: [String: String] = [:]
 
@@ -355,7 +359,7 @@ struct LingxiSettings: Codable, Equatable {
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled, typingStatsDefaultMigratedV52
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
-        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, customSwipeUpMap, customSwipeDownMap
+        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, customSwipeUpMap, customSwipeDownMap
     }
 
     init() {}
@@ -430,6 +434,7 @@ struct LingxiSettings: Codable, Equatable {
         autoFuzzyPromptEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoFuzzyPromptEnabled) ?? d.autoFuzzyPromptEnabled
         geoLocationBoostEnabled = try c.decodeIfPresent(Bool.self, forKey: .geoLocationBoostEnabled) ?? d.geoLocationBoostEnabled
         aiGeoContextEnabled = try c.decodeIfPresent(Bool.self, forKey: .aiGeoContextEnabled) ?? d.aiGeoContextEnabled
+        autoDeleteUploadedScreenshot = try c.decodeIfPresent(Bool.self, forKey: .autoDeleteUploadedScreenshot) ?? d.autoDeleteUploadedScreenshot
         customSwipeUpMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeUpMap) ?? d.customSwipeUpMap
         customSwipeDownMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeDownMap) ?? d.customSwipeDownMap
     }
@@ -443,9 +448,15 @@ struct LingxiSettings: Codable, Equatable {
     static let customKeymapSyncFileName = "lingxi_custom_keymap.json"
     private static var cachedValue: LingxiSettings?
     private static var cachedStamp: String?
+    private static var lastStampCheckTime: CFAbsoluteTime = 0
 
-    /// 读取最新设置；利用文件内容指纹（mtime+size+inode）避免同秒读写误用旧缓存。
+    /// 读取最新设置；高频热路径 1.2s 内直接返回内存缓存，超窗再校验文件内容指纹（mtime+size+inode）。
     static func load(force: Bool = false) -> LingxiSettings {
+        let now = CFAbsoluteTimeGetCurrent()
+        if !force, let cached = cachedValue, now - lastStampCheckTime < 1.2 {
+            return cached
+        }
+        lastStampCheckTime = now
         let stamp = AppGroup.fileStamp(of: fileName)
         if !force, let cached = cachedValue, let stamp, cachedStamp == stamp {
             return cached
@@ -464,6 +475,7 @@ struct LingxiSettings: Codable, Equatable {
         let ok = AppGroup.writeJSON(self, to: Self.fileName)
         Self.cachedValue = self
         Self.cachedStamp = AppGroup.fileStamp(of: Self.fileName)
+        Self.lastStampCheckTime = CFAbsoluteTimeGetCurrent()
         if ok && notify {
             AppGroupNotifications.post(AppGroupNotifications.settingsChanged)
         }

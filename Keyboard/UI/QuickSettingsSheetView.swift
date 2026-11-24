@@ -6,6 +6,7 @@ final class QuickSettingsSheetView: UIView {
     var onThemeChanged: ((ThemeCustomization) -> Void)?
     var onBridgeSyncNow: (() -> Void)?
     var onOpenEditPad: (() -> Void)?
+    var onOpenPermissions: (() -> Void)?
     var onClose: (() -> Void)?
 
     private let scrollView = LingxiScrollView()
@@ -330,7 +331,24 @@ final class QuickSettingsSheetView: UIView {
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        row3.addArrangedSubview(makeToggleChip("译:\(settings.translateTargetLang)", on: true, theme: theme) { [weak self] in
+        row3.addArrangedSubview(makeToggleChip("截屏传后删", on: settings.autoDeleteUploadedScreenshot, theme: theme) { [weak self] in
+            guard let self else { return }
+            self.settings.autoDeleteUploadedScreenshot.toggle()
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+            self.rebuild()
+        })
+        row3.addArrangedSubview(makeToggleChip("🔐 一键权限", on: false, theme: theme) { [weak self] in
+            self?.onOpenPermissions?()
+        })
+        stackView.addArrangedSubview(row3)
+
+        let row4 = UIStackView()
+        row4.axis = .horizontal
+        row4.distribution = .fillEqually
+        row4.spacing = 6
+
+        row4.addArrangedSubview(makeToggleChip("译:\(settings.translateTargetLang)", on: true, theme: theme) { [weak self] in
             guard let self else { return }
             let langs = TranslateTargetLanguage.allCases.map(\.rawValue)
             if let idx = langs.firstIndex(of: self.settings.translateTargetLang) {
@@ -342,10 +360,10 @@ final class QuickSettingsSheetView: UIView {
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        row3.addArrangedSubview(makeToggleChip("📐 编辑台", on: false, theme: theme) { [weak self] in
+        row4.addArrangedSubview(makeToggleChip("📐 编辑台", on: false, theme: theme) { [weak self] in
             self?.onOpenEditPad?()
         })
-        stackView.addArrangedSubview(row3)
+        stackView.addArrangedSubview(row4)
 
         setNeedsLayout()
     }

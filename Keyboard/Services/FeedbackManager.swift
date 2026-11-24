@@ -17,10 +17,12 @@ final class FeedbackManager {
     private var rigidImpact = UIImpactFeedbackGenerator(style: .rigid)
     private var selectionFeedback = UISelectionFeedbackGenerator()
     private var lastPrepareTime: CFTimeInterval = 0
+    private var lastFeedbackTime: CFTimeInterval = 0
+    private let audioQueue = DispatchQueue(label: "com.lingxi.keyaudio", qos: .userInteractive)
 
     func prepare() {
         let now = CACurrentMediaTime()
-        guard now - lastPrepareTime > 0.35 else { return }
+        guard now - lastPrepareTime > 0.6 else { return }
         lastPrepareTime = now
         lightImpact.prepare()
         mediumImpact.prepare()
@@ -29,6 +31,10 @@ final class FeedbackManager {
     }
 
     func triggerKeyFeedback(tone: KeyTone = .letter, settings: LingxiSettings, hasFullAccess: Bool) {
+        let now = CACurrentMediaTime()
+        // 极高速连打（< 22ms 同帧滚键）合并震动与音效，防止主线程与 Taptic Engine 排队卡顿
+        guard now - lastFeedbackTime >= 0.022 else { return }
+        lastFeedbackTime = now
         if settings.keySoundEnabled {
             playSound(tone: tone, hasFullAccess: hasFullAccess)
         }
@@ -37,20 +43,16 @@ final class FeedbackManager {
             break
         case .light:
             lightImpact.impactOccurred(intensity: tone == .letter ? 0.62 : 0.8)
-            lightImpact.prepare()
         case .medium:
             mediumImpact.impactOccurred(intensity: tone == .letter ? 0.78 : 0.92)
-            mediumImpact.prepare()
         case .strong:
             rigidImpact.impactOccurred(intensity: 0.95)
-            rigidImpact.prepare()
         }
     }
 
     func triggerCursorTick(settings: LingxiSettings) {
         guard settings.hapticStrength != .off else { return }
         selectionFeedback.selectionChanged()
-        selectionFeedback.prepare()
     }
 
     /// 动态音效：光标/滑行/滑动指示（每步小声滴，给“动”的节奏感）
@@ -67,7 +69,9 @@ final class FeedbackManager {
             case .delete: soundID = 1155
             case .modifier: soundID = 1156
             }
-            AudioServicesPlaySystemSound(soundID)
+            audioQueue.async {
+                AudioServicesPlaySystemSound(soundID)
+            }
         } else {
             UIDevice.current.playInputClick()
         }

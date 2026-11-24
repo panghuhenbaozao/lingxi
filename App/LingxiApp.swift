@@ -26,6 +26,13 @@ struct LingxiApp: App {
                         let autoStart = comps?.queryItems?.contains(where: { $0.name == "autostart" && $0.value == "1" }) == true
                         appState.voiceTranslatorAutoStart = autoStart
                         appState.showVoiceTranslator = true
+                    case "screenshot-ai":
+                        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                        let auto = comps?.queryItems?.contains(where: { $0.name == "auto" && $0.value == "1" }) == true
+                        let delID = comps?.queryItems?.first(where: { $0.name == "deleteId" })?.value
+                        appState.screenshotAutoAnalyze = auto
+                        appState.pendingDeleteScreenshotAssetID = delID
+                        appState.showScreenshotVision = true
                     default:
                         break
                     }

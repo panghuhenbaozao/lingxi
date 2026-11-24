@@ -781,7 +781,192 @@ final class AIClient {
                 result += "\n\(geoSuffix)"
             }
         }
+        // 全链路强约束：禁止输出 * / ** / ### / ``` 等 Markdown 符号，保证聊天直发清爽自然
+        result += "\n\(AITextSanitizer.plainTextOutputRule)"
         return result
+    }
+
+    // MARK: - 多模态截屏识图流式推理（同时兼容 Gemini inlineData 与 OpenAI Vision image_url）
+
+    func streamVisionEvents(
+        imageData: Data,
+        mimeType: String = "image/jpeg",
+        prompt: String,
+        systemInstruction: String,
+        config: AIConfig = AIConfig.load(),
+        featureTag: String = "screenshot_vision",
+        thinkingOverride: AIThinkingMode? = .off
+    ) -> AsyncThrowingStream<AIStreamChunk, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                let startTime = Date()
+                var firstTokenAt: Date?
+                var answerChars = 0
+                var thoughtChars = 0
+                let effectiveThinking = thinkingOverride ?? config.thinkingMode
+                let chosenModel = config.resolvedModel(preferFast: false, preferDeep: false)
+                let base64 = imageData.base64EncodedString()
+
+                let trackingYield: (AIStreamChunk) -> Void = { chunk in
+                    if firstTokenAt == nil { firstTokenAt = Date() }
+                    switch chunk {
+                    case .thought(let t): thoughtChars += t.count
+                    case .answer(let a): answerChars += a.count
+                    }
+                    continuation.yield(chunk)
+                }
+
+                do {
+                    guard config.isConfigured else {
+                        throw AIClientError.missingAPIKey
+                    }
+                    let finalSystem = Self.mergeSystem(base: systemInstruction, config: config)
+
+                    switch config.provider {
+                    case .gemini:
+                        try await self.streamGeminiVisionWithFallback(
+                            base64Image: base64,
+                            mimeType: mimeType,
+                            prompt: prompt,
+                            systemInstruction: finalSystem,
+                            model: chosenModel,
+                            thinkingMode: effectiveThinking,
+                            config: config,
+                            yield: trackingYield
+                        )
+                    case .openAICompatible:
+                        try await self.streamOpenAIVisionCompatible(
+                            base64Image: base64,
+                            mimeType: mimeType,
+                            prompt: prompt,
+                            systemInstruction: finalSystem,
+                            model: chosenModel,
+                            thinkingMode: effectiveThinking,
+                            config: config,
+                            yield: trackingYield
+                        )
+                    }
+
+                    let now = Date()
+                    let totalMs = max(10, Int(now.timeIntervalSince(startTime) * 1000))
+                    let ttftMs = max(10, Int((firstTokenAt ?? now).timeIntervalSince(startTime) * 1000))
+                    AIUsageLedgerStore.append(
+                        AIUsageLedgerEntry(
+                            provider: config.provider.rawValue,
+                            model: chosenModel,
+                            feature: featureTag,
+                            thinkingMode: effectiveThinking.rawValue,
+                            ttftMs: ttftMs,
+                            totalMs: totalMs,
+                            inputChars: prompt.count,
+                            outputChars: answerChars,
+                            thoughtChars: thoughtChars
+                        )
+                    )
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func streamGeminiVisionWithFallback(
+        base64Image: String,
+        mimeType: String,
+        prompt: String,
+        systemInstruction: String,
+        model: String,
+        thinkingMode: AIThinkingMode,
+        config: AIConfig,
+        yield: @escaping (AIStreamChunk) -> Void
+    ) async throws {
+        var base = config.geminiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = AIConfig.defaultGeminiBaseURL }
+        while base.hasSuffix("/") { base.removeLast() }
+
+        let parts: [[String: Any]] = [
+            ["inlineData": ["mimeType": mimeType, "data": base64Image]],
+            ["text": prompt],
+        ]
+
+        do {
+            try await streamGeminiGenerateContentSSE(
+                base: base,
+                prompt: prompt,
+                userPartsOverride: parts,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: thinkingMode,
+                includeThinkingConfig: false,
+                useQueryKeyAuth: false,
+                config: config,
+                yield: yield
+            )
+            return
+        } catch AIClientError.httpError(let code, _) where code == 401 || code == 403 {
+            try await streamGeminiGenerateContentSSE(
+                base: base,
+                prompt: prompt,
+                userPartsOverride: parts,
+                systemInstruction: systemInstruction,
+                model: model,
+                thinkingMode: thinkingMode,
+                includeThinkingConfig: false,
+                useQueryKeyAuth: true,
+                config: config,
+                yield: yield
+            )
+        }
+    }
+
+    private func streamOpenAIVisionCompatible(
+        base64Image: String,
+        mimeType: String,
+        prompt: String,
+        systemInstruction: String,
+        model: String,
+        thinkingMode: AIThinkingMode,
+        config: AIConfig,
+        yield: @escaping (AIStreamChunk) -> Void
+    ) async throws {
+        var base = config.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        let primaryEndpoint = base.hasSuffix("/chat/completions") ? base : "\(base)/chat/completions"
+        let userContent: [[String: Any]] = [
+            ["type": "text", "text": prompt],
+            ["type": "image_url", "image_url": ["url": "data:\(mimeType);base64,\(base64Image)"]],
+        ]
+
+        do {
+            try await performOpenAIChatStream(
+                endpoint: primaryEndpoint,
+                prompt: prompt,
+                userContentOverride: userContent,
+                systemInstruction: systemInstruction,
+                model: model,
+                extraBody: [:],
+                config: config,
+                yield: yield
+            )
+        } catch AIClientError.httpError(let code, _) where code == 404 {
+            let lowerBase = base.lowercased()
+            let hasVersion = lowerBase.contains("/v1") || lowerBase.contains("/v2") || lowerBase.contains("/v3") || lowerBase.contains("/v4") || lowerBase.hasSuffix("/chat/completions")
+            guard !hasVersion else { throw AIClientError.httpError(code, "接口路径或当前模型不支持视觉识图") }
+            try await performOpenAIChatStream(
+                endpoint: "\(base)/v1/chat/completions",
+                prompt: prompt,
+                userContentOverride: userContent,
+                systemInstruction: systemInstruction,
+                model: model,
+                extraBody: [:],
+                config: config,
+                yield: yield
+            )
+        }
     }
 
     // MARK: - 跨协议思考参数组装器（纯函数，可直接单元测试）
@@ -1002,6 +1187,7 @@ final class AIClient {
     private func streamGeminiGenerateContentSSE(
         base: String,
         prompt: String,
+        userPartsOverride: [[String: Any]]? = nil,
         systemInstruction: String,
         model: String,
         thinkingMode: AIThinkingMode,
@@ -1049,9 +1235,10 @@ final class AIClient {
             genConfig["thinkingConfig"] = tc
         }
 
+        let userParts: [[String: Any]] = userPartsOverride ?? [["text": prompt]]
         let payload: [String: Any] = [
             "systemInstruction": ["parts": [["text": systemInstruction]]],
-            "contents": [["role": "user", "parts": [["text": prompt]]]],
+            "contents": [["role": "user", "parts": userParts]],
             "generationConfig": genConfig,
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -1173,6 +1360,7 @@ final class AIClient {
     private func performOpenAIChatStream(
         endpoint: String,
         prompt: String,
+        userContentOverride: Any? = nil,
         systemInstruction: String,
         model: String,
         extraBody: [String: Any],
@@ -1192,11 +1380,12 @@ final class AIClient {
             request.setValue(v, forHTTPHeaderField: k)
         }
 
+        let userContentValue: Any = userContentOverride ?? prompt
         var payload: [String: Any] = [
             "model": model.isEmpty ? "deepseek-chat" : model,
             "messages": [
                 ["role": "system", "content": systemInstruction],
-                ["role": "user", "content": prompt],
+                ["role": "user", "content": userContentValue],
             ],
             "temperature": config.temperature,
             "top_p": config.topP,

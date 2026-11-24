@@ -258,10 +258,10 @@ final class VoiceLiveTranslatorController: ObservableObject {
                 ) {
                     if Task.isCancelled { return }
                     acc += chunk
-                    self.translatedText = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.translatedText = AITextSanitizer.clean(acc, streaming: true)
                 }
                 if Task.isCancelled { return }
-                let finalOut = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+                let finalOut = AITextSanitizer.clean(acc, streaming: false)
                 self.translatedText = finalOut
                 self.lastTranslatedSnapshot = clean
                 self.isTranslating = false

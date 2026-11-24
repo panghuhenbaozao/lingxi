@@ -21,6 +21,7 @@ final class TopToolbarView: UIView {
     enum Action {
         case toggleAI
         case toggleTranslateMode
+        case openScreenshotAI
         case openVoiceTranslator
         case cycleTranslateTarget
         case toggleTranslateTone
@@ -73,6 +74,7 @@ final class TopToolbarView: UIView {
     private let rightClusterStack = UIStackView()
     private let aiButton = UIButton(type: .system)
     private let translateButton = UIButton(type: .system)
+    private let screenshotButton = UIButton(type: .system)
     private let voiceButton = UIButton(type: .system)
     private let clipboardButton = UIButton(type: .system)
     private let layoutButton = UIButton(type: .system)
@@ -205,7 +207,7 @@ final class TopToolbarView: UIView {
         rightClusterStack.spacing = 6
         idleScrollView.addSubview(rightClusterStack)
 
-        // 左侧核心胶囊：AI + 译 + 语音互译
+        // 左侧核心胶囊：AI + 译 + 截屏识图 + 语音互译
         configurePrimaryPillButton(
             aiButton,
             title: "AI",
@@ -217,6 +219,12 @@ final class TopToolbarView: UIView {
             title: "译",
             symbol: "character.bubble",
             action: #selector(didTapTranslate)
+        )
+        configurePrimaryPillButton(
+            screenshotButton,
+            title: "识图",
+            symbol: "camera.viewfinder",
+            action: #selector(didTapScreenshot)
         )
         configurePrimaryPillButton(
             voiceButton,
@@ -278,6 +286,7 @@ final class TopToolbarView: UIView {
 
         leftClusterStack.addArrangedSubview(aiButton)
         leftClusterStack.addArrangedSubview(translateButton)
+        leftClusterStack.addArrangedSubview(screenshotButton)
         leftClusterStack.addArrangedSubview(voiceButton)
         [undoButton, layoutButton, editPadButton, clipboardButton, settingsButton, dismissKeyboardButton].forEach {
             rightClusterStack.addArrangedSubview($0)
@@ -437,6 +446,7 @@ final class TopToolbarView: UIView {
         switch id {
         case .ai: return aiButton
         case .translate: return translateButton
+        case .screenshot: return screenshotButton
         case .voice: return voiceButton
         case .clipboard: return clipboardButton
         case .layout: return layoutButton
@@ -608,7 +618,7 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
-        for btn in [voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
+        for btn in [screenshotButton, voiceButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
             btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
             btn.tintColor = theme.keyText
             btn.setTitleColor(theme.keyText, for: .normal)
@@ -716,7 +726,10 @@ final class TopToolbarView: UIView {
         self.isSelectionMagicActive = (selectedHostText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) && !hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden
         self.activeInlineCommand = (!hasCandidates && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && hasFullAccess) ? inlineAICommand : nil
 
-        layoutButton.setTitle(layoutMode == .qwerty26 ? "九键" : "26键", for: .normal)
+        let desiredLayoutTitle = layoutMode == .qwerty26 ? "九键" : "26键"
+        if layoutButton.title(for: .normal) != desiredLayoutTitle {
+            layoutButton.setTitle(desiredLayoutTitle, for: .normal)
+        }
 
         // 实时翻译栏与 AI 输入框现已升级为位于候选词栏正上方的常驻 LiveInputDockView（绝不被候选词挡住），
         // 顶栏自身保持专注展示拼音音节/候选词，并在空闲时高亮当前激活状态。
@@ -1105,6 +1118,7 @@ final class TopToolbarView: UIView {
 
     @objc private func didTapAI() { onAction?(.toggleAI) }
     @objc private func didTapTranslate() { onAction?(.toggleTranslateMode) }
+    @objc private func didTapScreenshot() { onAction?(.openScreenshotAI) }
     @objc private func didTapVoice() { onAction?(.openVoiceTranslator) }
     @objc private func didTapClipboard() { onAction?(.toggleClipboard) }
     @objc private func didTapLayout() { onAction?(.toggleLayoutQuick) }

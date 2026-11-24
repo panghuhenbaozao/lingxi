@@ -14,6 +14,7 @@ struct HomeTestView: View {
     @State private var navigateToStats = false
     @State private var bridgeToast: String?
     @State private var isSyncingBridge = false
+    @State private var statsDebounceTask: Task<Void, Never>?
     @FocusState private var isTestingFocused: Bool
 
     var body: some View {
@@ -135,13 +136,23 @@ struct HomeTestView: View {
                 }
             } else if !appState.isKeyboardFullAccessConfirmed {
                 HStack(spacing: 10) {
-                    actionPill("权限检查", icon: "checkmark.shield", filled: false) {
+                    actionPill("一键开启全部权限", icon: "checkmark.shield", filled: false) {
                         appState.showPermissionsCenter = true
                     }
-                    actionPill("一键开启 AI 完全访问", icon: "lock.open.fill", filled: true) {
+                    actionPill("开完全访问", icon: "lock.open.fill", filled: true) {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
                         }
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    actionPill("一键权限中心", icon: "checkmark.shield.fill", filled: false) {
+                        appState.showPermissionsCenter = true
+                    }
+                    actionPill("截屏识图 · 传后自动删", icon: "camera.viewfinder", filled: false) {
+                        appState.screenshotAutoAnalyze = false
+                        appState.showScreenshotVision = true
                     }
                 }
             }
@@ -308,7 +319,14 @@ struct HomeTestView: View {
                     .background(Color(.tertiarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .onChange(of: sandboxText) { _ in
-                        appState.reloadTypingStatsSummary()
+                        statsDebounceTask?.cancel()
+                        statsDebounceTask = Task {
+                            try? await Task.sleep(nanoseconds: 350_000_000)
+                            guard !Task.isCancelled else { return }
+                            await MainActor.run {
+                                appState.reloadTypingStatsSummary()
+                            }
+                        }
                     }
 
                 if sandboxText.isEmpty {

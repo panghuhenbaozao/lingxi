@@ -53,6 +53,9 @@ final class AppState: ObservableObject {
     @Published var showPermissionsCenter: Bool = false
     @Published var showVoiceTranslator: Bool = false
     @Published var voiceTranslatorAutoStart: Bool = false
+    @Published var showScreenshotVision: Bool = false
+    @Published var screenshotAutoAnalyze: Bool = false
+    @Published var pendingDeleteScreenshotAssetID: String? = nil
     @Published var typingStatsSummary: TypingStatsStore.Summary = TypingStatsStore.shared.summary()
     @Published var customBgPreview: UIImage?
     @Published var userAvatarImage: UIImage?

@@ -66,16 +66,37 @@ final class PasteboardMonitor {
     private(set) var bannerState: ClipboardBannerState = .hidden
     private var dismissedChangeCount: Int = -1
     private var activeChangeCount: Int = -1
+    private var lastCheckedAt: CFTimeInterval = 0
+    private var lastObservedChangeCount: Int = -1
 
-    func refresh(settings: LingxiSettings, onChange: @escaping (ClipboardBannerState) -> Void) {
+    func refresh(settings: LingxiSettings, force: Bool = false, onChange: @escaping (ClipboardBannerState) -> Void) {
         guard settings.clipboardBannerEnabled else {
-            bannerState = .hidden
-            onChange(.hidden)
+            if bannerState != .hidden {
+                bannerState = .hidden
+                onChange(.hidden)
+            }
             return
         }
 
+        let now = CACurrentMediaTime()
+        if !force, now - lastCheckedAt < 1.2 {
+            return
+        }
+        lastCheckedAt = now
+
         let pb = UIPasteboard.general
         let currentCount = pb.changeCount
+
+        // 快速通路：changeCount 未变动且已有明确状态时，跳过重复的跨进程 hasStrings 与磁盘 JSON 解码
+        if !force && currentCount == lastObservedChangeCount {
+            if currentCount == dismissedChangeCount && bannerState == .hidden {
+                return
+            }
+            if currentCount == activeChangeCount && bannerState != .hidden {
+                return
+            }
+        }
+        lastObservedChangeCount = currentCount
 
         // 1. 若系统剪贴板无字符串，检查是否有跨屏剪贴板接力或主 App 刚写入的待展示条目
         guard pb.hasStrings else {

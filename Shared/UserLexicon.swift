@@ -25,6 +25,9 @@ final class UserLexicon {
     private static let dbFileName = "user_dict.sqlite"
 
     private var db: OpaquePointer?
+    private var singleAbbrStmt: OpaquePointer?
+    private var singleT9Stmt: OpaquePointer?
+    private var predictNextStmt: OpaquePointer?
     private let queue = DispatchQueue(label: "com.lingxi.userlexicon", qos: .userInitiated)
 
     init() {
@@ -32,6 +35,9 @@ final class UserLexicon {
     }
 
     deinit {
+        if let singleAbbrStmt { sqlite3_finalize(singleAbbrStmt) }
+        if let singleT9Stmt { sqlite3_finalize(singleT9Stmt) }
+        if let predictNextStmt { sqlite3_finalize(predictNextStmt) }
         if let db {
             sqlite3_close(db)
         }
@@ -78,6 +84,29 @@ final class UserLexicon {
         // 兼容旧库迁移
         sqlite3_exec(handle, "ALTER TABLE user_words ADD COLUMN t9_abbr TEXT NOT NULL DEFAULT '';", nil, nil, nil)
         sqlite3_exec(handle, "CREATE INDEX IF NOT EXISTS idx_uw_t9 ON user_words (t9_abbr, pinned DESC, freq DESC);", nil, nil, nil)
+
+        // 预编译高频热路径 SQL 语句，避免每次按键都触发 SQLite 解析与查询规划
+        sqlite3_prepare_v2(
+            handle,
+            "SELECT word, py, freq, last_used, pinned FROM user_words WHERE abbr = ? AND (pinned = 1 OR freq >= ?) ORDER BY pinned DESC, last_used DESC, freq DESC LIMIT ?",
+            -1,
+            &singleAbbrStmt,
+            nil
+        )
+        sqlite3_prepare_v2(
+            handle,
+            "SELECT word, py, freq, last_used, pinned FROM user_words WHERE t9_abbr = ? AND (pinned = 1 OR freq >= ?) ORDER BY pinned DESC, last_used DESC, freq DESC LIMIT ?",
+            -1,
+            &singleT9Stmt,
+            nil
+        )
+        sqlite3_prepare_v2(
+            handle,
+            "SELECT next_word FROM bigrams WHERE prev_word = ? ORDER BY freq DESC, last_used DESC LIMIT ?",
+            -1,
+            &predictNextStmt,
+            nil
+        )
     }
 
     private static func toT9Digits(_ s: String) -> String {
@@ -105,13 +134,37 @@ final class UserLexicon {
         return max(0.15, Double(max(1, freq)) * exp(-ageDays * log(2.0) / 30.0))
     }
 
-    /// 按首字母缩写查询用户词库（同步高速读取，支持自动学习门槛与 30 天衰减）。
+    /// 按首字母缩写查询用户词库（同步高速读取，单缩写复用预编译 stmt 零解析开销）。
     func lookup(abbrList: [String], isT9: Bool = false, minFrequency: Int = 1, limit: Int = 200) -> [(word: String, py: String, boost: Double)] {
         guard !abbrList.isEmpty else { return [] }
         let now = Date().timeIntervalSince1970
         let threshold = max(1, minFrequency)
         return queue.sync {
             guard let db else { return [] }
+            if abbrList.count == 1, let cachedStmt = (isT9 ? singleT9Stmt : singleAbbrStmt) {
+                sqlite3_reset(cachedStmt)
+                sqlite3_clear_bindings(cachedStmt)
+                sqlite3_bind_text(cachedStmt, 1, abbrList[0], -1, Self.sqliteTransient)
+                sqlite3_bind_int(cachedStmt, 2, Int32(threshold))
+                sqlite3_bind_int(cachedStmt, 3, Int32(limit))
+
+                var out: [(String, String, Double)] = []
+                while sqlite3_step(cachedStmt) == SQLITE_ROW {
+                    guard let wPtr = sqlite3_column_text(cachedStmt, 0),
+                          let pPtr = sqlite3_column_text(cachedStmt, 1) else { continue }
+                    let word = String(cString: wPtr)
+                    let py = String(cString: pPtr)
+                    let freq = Int(sqlite3_column_int(cachedStmt, 2))
+                    let lastUsed = sqlite3_column_double(cachedStmt, 3)
+                    let pinned = sqlite3_column_int(cachedStmt, 4) != 0
+                    let eff = Self.decayedFrequency(freq, lastUsed: lastUsed, now: now)
+                    let boost = (pinned ? 24.0 : 0.0) + min(7.0, 1.8 + log(max(1.0, eff)) * 1.15)
+                    out.append((word, py, boost))
+                }
+                sqlite3_reset(cachedStmt)
+                return out
+            }
+
             let col = isT9 ? "t9_abbr" : "abbr"
             let placeholders = Array(repeating: "?", count: abbrList.count).joined(separator: ",")
             let sql = """
@@ -246,23 +299,13 @@ final class UserLexicon {
         }
     }
 
-    /// 查询二元上下文下一词联想。
+    /// 查询二元上下文下一词联想（复用预编译 stmt 零 SQL 解析开销）。
     func predictNext(after prevWord: String, limit: Int = 10) -> [String] {
         guard !prevWord.isEmpty else { return [] }
         return queue.sync {
-            guard let db else { return [] }
-            let sql = """
-            SELECT next_word
-            FROM bigrams
-            WHERE prev_word = ?
-            ORDER BY freq DESC, last_used DESC
-            LIMIT ?
-            """
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-                return []
-            }
-            defer { sqlite3_finalize(stmt) }
+            guard let stmt = predictNextStmt else { return [] }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
             sqlite3_bind_text(stmt, 1, prevWord, -1, Self.sqliteTransient)
             sqlite3_bind_int(stmt, 2, Int32(limit))
 
@@ -272,6 +315,7 @@ final class UserLexicon {
                     out.append(String(cString: ptr))
                 }
             }
+            sqlite3_reset(stmt)
             return out
         }
     }

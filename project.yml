@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "5.4.2"
+    MARKETING_VERSION: "5.5.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
@@ -43,7 +43,8 @@ targets:
         UIApplicationSupportsIndirectInputEvents: true
         ITSAppUsesNonExemptEncryption: false
         LingxiAppGroup: group.com.lingxi.ime
-        NSPhotoLibraryUsageDescription: 用于选择键盘背景图片与个人头像
+        NSPhotoLibraryUsageDescription: 用于选择键盘背景图片、读取最新截屏发给 AI 识图并在上传后自动删除原截屏
+        NSPhotoLibraryAddUsageDescription: 用于配合截屏识图功能管理及清理已上传的临时截屏
         NSFaceIDUsageDescription: 用于通过 Apple 面容 ID 安全登录灵犀账号及解锁本地敏感信息保险箱
         NSSpeechRecognitionUsageDescription: 用于语音输入并通过灵犀 AI 智能去除口水词与润色
         NSMicrophoneUsageDescription: 用于语音输入转写
@@ -101,6 +102,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LingxiAppGroup: group.com.lingxi.ime
+        NSPhotoLibraryUsageDescription: 用于键盘一键抓取最新截屏发送给 AI 识别，并在上传完成后自动删除原截屏
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSAllowsArbitraryLoads: true

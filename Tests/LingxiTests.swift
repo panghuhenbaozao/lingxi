@@ -525,7 +525,8 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(summary.todayChars, 2 + 2 + 4)
         XCTAssertEqual(summary.totalActiveSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(summary.streakDays, 1)
-        // 验证另一进程/实例无需重建即可热重载磁盘字数
+        // 触发立即落盘后，验证另一进程/实例无需重建即可热重载磁盘字数
+        store.flush()
         XCTAssertEqual(observerStore.summary(now: base.addingTimeInterval(130)).todayChars, 8)
         // 清除后归零
         store.clearAll()
@@ -541,8 +542,8 @@ final class LingxiTests: XCTestCase {
         let legacy = try JSONDecoder().decode(LingxiSettings.self, from: Data(legacyJSON.utf8))
         XCTAssertEqual(legacy.toolbarLayout.count, ToolbarButtonID.allCases.count)
         XCTAssertEqual(legacy.toolbarLayout.map({ $0.buttonID }), ToolbarButtonID.allCases)
-        // v5.3 极简默认：AI/译/语音/剪贴板/设置/撤销可见，编辑面板/九键切换默认隐藏
-        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .voice, .clipboard, .settings, .undo]
+        // v5.5 极简默认：AI/译/截屏识图/语音/剪贴板/设置/撤销可见，编辑面板/九键切换默认隐藏
+        let expectedVisible: Set<ToolbarButtonID> = [.ai, .translate, .screenshot, .voice, .clipboard, .settings, .undo]
         let visibleByDefault = Set(legacy.toolbarLayout.filter(\.isVisible).map(\.buttonID))
         XCTAssertEqual(visibleByDefault, expectedVisible)
         XCTAssertTrue(legacy.showComposingStrip)
@@ -2199,5 +2200,48 @@ final class LingxiTests: XCTestCase {
                 secondsSinceLastReturn: 5.0
             )
         )
+    }
+
+    func testV550AITextSanitizerAndScreenshotVisionConfig() throws {
+        // 1. 彻底清除 AI 输出中的 * / ** / ### / ``` / --- / > 等 Markdown 符号
+        let messyAI = """
+        ### 回复建议
+        **太好了！**我们今晚 *七点半* 老地方见，别忘带 `身份证`。
+        * 方案一：**先吃饭再看电影**
+        - 方案二：直接去江边散步
+        ---
+        > 算式核对：2*3=6，5 * 8 = 40
+        """
+        let clean = AITextSanitizer.clean(messyAI, streaming: false)
+        XCTAssertFalse(clean.contains("**"), "不应残留 ** 粗体符号")
+        XCTAssertFalse(clean.contains("###"), "不应残留 ### 标题符号")
+        XCTAssertFalse(clean.contains("`"), "不应残留反引号")
+        XCTAssertFalse(clean.contains("---"), "不应残留分割线")
+        XCTAssertTrue(clean.contains("太好了！我们今晚 七点半 老地方见"))
+        XCTAssertTrue(clean.contains("• 方案一：先吃饭再看电影"))
+        XCTAssertTrue(clean.contains("• 方案二：直接去江边散步"))
+        XCTAssertTrue(clean.contains("2*3=6"), "正常数学乘号 2*3=6 必须保留")
+        XCTAssertTrue(clean.contains("5 * 8 = 40"), "正常数学算式 5 * 8 必须保留")
+
+        // 流式尾部未闭合的 ** 或 * 不得泄漏到界面
+        let streamPartial = AITextSanitizer.clean("你好，这是**重点内容", streaming: true)
+        XCTAssertFalse(streamPartial.contains("*"))
+        XCTAssertEqual(streamPartial, "你好，这是重点内容")
+
+        // 2. AIClient.mergeSystem 自动注入禁止 Markdown 的格式约束
+        let merged = AIClient.mergeSystem(base: "测试提示词", config: AIConfig())
+        XCTAssertTrue(merged.contains("严禁使用任何 Markdown 语法"))
+
+        // 3. 截屏识图顶栏按钮与上传后自动删图设置默认开启 + 向后兼容解码
+        XCTAssertTrue(ToolbarButtonID.screenshot.isPrimaryLeftAction)
+        XCTAssertTrue(defaultToolbarLayout.contains(where: { $0.buttonID == .screenshot && $0.isVisible }))
+        XCTAssertTrue(LingxiSettings().autoDeleteUploadedScreenshot)
+        let legacySettings = try JSONDecoder().decode(LingxiSettings.self, from: Data("{}".utf8))
+        XCTAssertTrue(legacySettings.autoDeleteUploadedScreenshot)
+        XCTAssertGreaterThanOrEqual(ScreenshotVisionPreset.allCases.count, 5)
+        for p in ScreenshotVisionPreset.allCases {
+            XCTAssertFalse(p.promptText.isEmpty)
+            XCTAssertFalse(p.systemInstruction.isEmpty)
+        }
     }
 }
