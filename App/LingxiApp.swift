@@ -34,6 +34,8 @@ struct LingxiApp: App {
                     case "voice-translate":
                         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
                         let autoStart = comps?.queryItems?.contains(where: { $0.name == "autostart" && $0.value == "1" }) == true
+                        let modeRaw = comps?.queryItems?.first(where: { $0.name == "mode" })?.value
+                        appState.voiceTranslatorInitialMode = modeRaw.flatMap { VoiceTranslateMode(rawValue: $0) }
                         appState.voiceTranslatorAutoStart = autoStart
                         appState.showVoiceTranslator = true
                     case "screenshot-ai":

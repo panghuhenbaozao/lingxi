@@ -216,6 +216,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         autoCapitalizeIfNeeded()
         if activePanel == .ai {
             aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
+        } else if activePanel == .voice {
+            voicePanel.refreshEngineStatus(hasFullAccess: hasFullAccess)
         }
         registerPhotoScreenshotObserverIfNeeded()
         checkPasteboardScreenshotOnAppearIfNeeded()
@@ -272,8 +274,18 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                let imp = current.method(for: modernSelector) {
                 typealias OpenURLIMP = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, (@convention(block) (Bool) -> Void)?) -> Void
                 let fn = unsafeBitCast(imp, to: OpenURLIMP.self)
-                let callback: @convention(block) (Bool) -> Void = { success in
-                    DispatchQueue.main.async { completion(success) }
+                let callback: @convention(block) (Bool) -> Void = { [weak self] success in
+                    DispatchQueue.main.async {
+                        if success {
+                            completion(true)
+                        } else if let ctx = self?.extensionContext {
+                            ctx.open(url) { ctxOpened in
+                                DispatchQueue.main.async { completion(ctxOpened) }
+                            }
+                        } else {
+                            completion(false)
+                        }
+                    }
                 }
                 fn(current, modernSelector, url as NSURL, [:] as NSDictionary, callback)
                 return
@@ -834,16 +846,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func triggerAutoScreenshotShortcut() {
-        // 调用 iOS 苹果快捷指令「灵犀截屏识图」（2步：截屏 -> 拷贝至剪贴板），完成后切回聊天框键盘自动秒识并静默清空剪贴板！
-        awaitingShortcutScreenshot = true
-        let encoded = "灵犀截屏识图".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        guard let url = URL(string: "shortcuts://run-shortcut?name=\(encoded)") else { return }
-        openURLFromExtension(url) { [weak self] opened in
-            if !opened {
-                self?.awaitingShortcutScreenshot = false
-                self?.openHostScreenshotWorkbench(deleteAssetID: nil)
-            }
-        }
+        // 不再跳转用户尚未安装的苹果快捷指令（避免提示「没有这个命令」），改为直接在键盘内读取最新截屏或打开选图工作台
+        openHostScreenshotWorkbench(deleteAssetID: nil)
     }
 
     private func handleOpenScreenshotAI() {
@@ -855,13 +859,21 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         switchToPanel(activePanel == .screenshot ? .letters : .screenshot)
     }
 
-    private func openHostPermissionsCenter() {
+    private func openHostPermissionsCenter(completion: ((Bool) -> Void)? = nil) {
         if let url = URL(string: "lingxi://permissions") {
             openURLFromExtension(url) { [weak self] opened in
-                if !opened, let self, let sysURL = URL(string: "app-settings:") {
-                    self.openURLFromExtension(sysURL) { _ in }
+                if opened {
+                    completion?(true)
+                } else if let self, let sysURL = URL(string: "app-settings:") {
+                    self.openURLFromExtension(sysURL) { sysOpened in
+                        completion?(sysOpened)
+                    }
+                } else {
+                    completion?(false)
                 }
             }
+        } else {
+            completion?(false)
         }
     }
 
@@ -874,16 +886,27 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         switchToPanel(activePanel == .voice ? .letters : .voice)
     }
 
-    private func openHostVoiceWarmUp() {
-        guard let url = URL(string: "lingxi://voice-warmup") else { return }
-        openURLFromExtension(url) { _ in }
+    private func openHostVoiceWarmUp(completion: ((Bool) -> Void)? = nil) {
+        guard let url = URL(string: "lingxi://voice-warmup") else {
+            completion?(false)
+            return
+        }
+        openURLFromExtension(url) { opened in
+            completion?(opened)
+        }
     }
 
-    private func openHostVoiceTranslator() {
-        guard let url = URL(string: "lingxi://voice-translate?autostart=1") else { return }
-        openURLFromExtension(url) { [weak self] opened in
-            guard let self, !opened else { return }
-            self.switchToPanel(.voice)
+    private func openHostVoiceTranslator(mode: VoiceTranslateMode? = nil, completion: ((Bool) -> Void)? = nil) {
+        var urlStr = "lingxi://voice-translate?autostart=1"
+        if let mode {
+            urlStr += "&mode=\(mode.rawValue)"
+        }
+        guard let url = URL(string: urlStr) else {
+            completion?(false)
+            return
+        }
+        openURLFromExtension(url) { opened in
+            completion?(opened)
         }
     }
 
@@ -1119,14 +1142,32 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
         }
-        voicePanel.onWarmUpHostVoiceEngine = { [weak self] in
-            self?.openHostVoiceWarmUp()
+        voicePanel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
+            guard let self else { return }
+            self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            self.exitTransientAIAndTranslateModes()
+            self.performEdit {
+                for _ in 0..<deleteCount {
+                    self.textDocumentProxy.deleteBackward()
+                }
+                self.textDocumentProxy.insertText(replacement)
+            }
+            if self.shouldAllowPanguSpace, self.settings.typingStatsEnabled, !replacement.isEmpty {
+                TypingStatsStore.shared.recordCommit(text: replacement)
+            }
+            self.switchToPanel(.letters)
         }
-        voicePanel.onOpenFullVoiceWorkbench = { [weak self] in
-            self?.openHostVoiceTranslator()
+        voicePanel.onFetchHostInputContext = { [weak self] in
+            self?.textDocumentProxy.documentContextBeforeInput ?? ""
         }
-        voicePanel.onOpenPermissions = { [weak self] in
-            self?.openHostPermissionsCenter()
+        voicePanel.onWarmUpHostVoiceEngine = { [weak self] done in
+            self?.openHostVoiceWarmUp(completion: done)
+        }
+        voicePanel.onOpenFullVoiceWorkbench = { [weak self] mode, done in
+            self?.openHostVoiceTranslator(mode: mode, completion: done)
+        }
+        voicePanel.onOpenPermissions = { [weak self] done in
+            self?.openHostPermissionsCenter(completion: done)
         }
         voicePanel.onClose = { [weak self] in
             self?.switchToPanel(.letters)

@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "5.6.1"
+    MARKETING_VERSION: "5.6.2"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
@@ -108,6 +108,8 @@ targets:
         NSMicrophoneUsageDescription: 用于在键盘内直接进行语音输入与实时双语转换
         NSSpeechRecognitionUsageDescription: 用于在键盘内实时将语音转为文字与双语翻译
         NSLocalNetworkUsageDescription: 用于键盘扩展与本机后台语音引擎安全通信（纯本机回环，绝不外传）
+        LSApplicationQueriesSchemes:
+          - lingxi
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSAllowsArbitraryLoads: true

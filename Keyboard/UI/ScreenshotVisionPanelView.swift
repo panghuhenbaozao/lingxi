@@ -96,13 +96,13 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         sourceSubLabel.lineBreakMode = .byTruncatingTail
         addSubview(sourceSubLabel)
 
-        autoShotButton.setTitle("⚡截屏", for: .normal)
+        autoShotButton.setTitle("📷读图", for: .normal)
         autoShotButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .bold)
         autoShotButton.layer.cornerRadius = 9
         autoShotButton.layer.cornerCurve = .continuous
-        autoShotButton.accessibilityLabel = "调用快捷指令一键自动截屏"
+        autoShotButton.accessibilityLabel = "立即抓取最新截屏并在键盘内识别"
         autoShotButton.actionHandler = { [weak self] in
-            self?.onTriggerAutoScreenshotShortcut?()
+            self?.scanLatestScreenshot(autoAnalyze: true)
         }
         addSubview(autoShotButton)
 
@@ -198,7 +198,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         retryButton.actionHandler = { [weak self] in self?.handleRetryOrStop() }
         copyButton.setTitle("复制", for: .normal)
         copyButton.actionHandler = { [weak self] in self?.handleCopy() }
-        workbenchButton.setTitle("选图/引导", for: .normal)
+        workbenchButton.setTitle("相册选图", for: .normal)
         workbenchButton.actionHandler = { [weak self] in self?.onOpenHostWorkbench?() }
         insertButton.setTitle("插入上屏", for: .normal)
         insertButton.actionHandler = { [weak self] in self?.handleInsert() }
@@ -526,9 +526,9 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
         refreshNoticeBar()
 
         if photoAuth != .authorized && photoAuth != .limited {
-            outputTextView.text = "📷 两种超顺手识图方式（绝不乱弹删图框）：\n• 零弹窗自动删图：系统截屏后点预览「完成 → 拷贝并删除」，切回键盘点「识图」自动识别并在传完后静默清空剪贴板！\n• 相册直读：点下方「开启相册权限」后随手截屏，顶栏自动浮出「📷 刚截的屏 · 识图」轻提示。"
+            outputTextView.text = "📷 键盘内识图（无需快捷指令，绝不乱弹删除框）：\n• 零弹窗秒清：系统截屏后点左下预览 →「完成 → 拷贝并删除」，回键盘点右上「📷读图」立即识别并自动清空剪贴板！\n• 随手截屏直读：点下方「开启相册权限」后，按电源+音量上（或轻点手机背面两下）截屏，顶栏立即浮出「📷 刚截的屏 · ✨ 识图」。"
         } else {
-            outputTextView.text = "📷 当前暂无 30 分钟内新截屏：\n• 随手截屏后，键盘顶栏会轻巧提示「📷 刚截的屏 · 识图」，点一下立即识别（不会打断打字，也绝不自动弹删除框）；\n• 点右上「⚡截屏」可一键调用快捷指令「灵犀截屏识图」（截屏→拷贝至剪贴板），识别完自动静默清空零残留！"
+            outputTextView.text = "📷 当前暂无 30 分钟内新截屏（无需快捷指令）：\n• 按「电源+音量上」或「轻点手机背面两下」截屏，然后点右上「📷读图」或顶栏「✨ 识图」立即在键盘内识别；\n• 也可点底部「相册选图」挑任意历史照片，或截屏时点系统「拷贝并删除」实现 0 弹窗自动清空！"
         }
         updateButtonsEnabled()
     }

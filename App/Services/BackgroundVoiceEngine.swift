@@ -67,6 +67,7 @@ final class BackgroundVoiceEngine: ObservableObject {
 
     private var activeMode: VoiceTranslateMode = .zhToEn
     private var lastTranslatedSnapshot: String = ""
+    private var lastHandledRequestID: String = ""
     private var lastStateBroadcastTime: CFTimeInterval = 0
     private var lastActivityTime: Date = Date()
     private var tapInstalled = false
@@ -166,6 +167,22 @@ final class BackgroundVoiceEngine: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
+    /// 当主 App 前台打开全屏「实时语音同传」工作台时，先礼让释放音频引擎避免两个 AVAudioEngine 互相抢麦。
+    func pauseForForegroundVoice() -> Bool {
+        let wasWarm = isWarm
+        if wasWarm {
+            shutdown()
+        }
+        return wasWarm
+    }
+
+    func resumeAfterForegroundVoiceIfNeeded(wasWarm: Bool) {
+        guard wasWarm else { return }
+        Task {
+            _ = await warmUp()
+        }
+    }
+
     /// 核心：在前台启动常驻 `AVAudioEngine` 与 `inputNode` Tap，确保切入后台后随时可无报错收音。
     private func ensureAudioEngineRunning() throws {
         if audioEngine.isRunning && tapInstalled {
@@ -248,7 +265,19 @@ final class BackgroundVoiceEngine: ObservableObject {
         data.append("data".data(using: .ascii)!)
         var subchunk2Size = dataSize
         data.append(Data(bytes: &subchunk2Size, count: 4))
-        data.append(Data(count: Int(dataSize)))
+        // 写入极微弱不可听见的 -90 dBFS 交替抖动底噪（+1 / -1 LSB），
+        // 人耳完全 0 感知，但可防止 iOS 17/18 mediaserverd 把全零静音流判定为闲置挂起。
+        var samples = Data(capacity: Int(dataSize))
+        var posSample = Int16(1).littleEndian
+        var negSample = Int16(-1).littleEndian
+        for i in 0..<numSamples {
+            if i % 2 == 0 {
+                withUnsafeBytes(of: &posSample) { samples.append(contentsOf: $0) }
+            } else {
+                withUnsafeBytes(of: &negSample) { samples.append(contentsOf: $0) }
+            }
+        }
+        data.append(samples)
         return data
     }
 
@@ -277,6 +306,14 @@ final class BackgroundVoiceEngine: ObservableObject {
     }
 
     private func handleCommand(_ cmd: VoiceIPCCommand) {
+        // 请求去重：防止 App Group 与回环双通道短时间内重复执行同一个 .start 导致取消刚建好的识别任务
+        if !cmd.requestID.isEmpty && cmd.requestID == lastHandledRequestID {
+            liveState.lastCommandID = cmd.requestID
+            broadcastState(force: true)
+            return
+        }
+        lastHandledRequestID = cmd.requestID
+        liveState.lastCommandID = cmd.requestID
         lastActivityTime = Date()
         let mode = VoiceTranslateMode(rawValue: cmd.modeRaw) ?? activeMode
         switch cmd.action {
@@ -477,6 +514,7 @@ final class BackgroundVoiceEngine: ObservableObject {
         guard let port = NWEndpoint.Port(rawValue: VoiceIPCBridge.loopbackPort) else { return }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
+        params.requiredInterfaceType = .loopback
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
         guard let newListener = try? NWListener(using: params) else { return }
         newListener.newConnectionHandler = { [weak self] conn in
@@ -508,14 +546,15 @@ final class BackgroundVoiceEngine: ObservableObject {
             }()
             let bodyPart: Data? = raw.range(of: "\r\n\r\n").map { Data(raw[$0.upperBound...].utf8) }
 
-            // 解析单包 GET /voice/cmd?action=...&mode=... 或兼容 POST /voice/command JSON Body
+            // 解析单包 GET /voice/cmd?action=...&mode=...&req=... 或兼容 POST /voice/command JSON Body
             var parsedCmd: VoiceIPCCommand?
             if requestTarget.hasPrefix("/voice/cmd"),
                let comps = URLComponents(string: "http://127.0.0.1\(requestTarget)"),
                let actionRaw = comps.queryItems?.first(where: { $0.name == "action" })?.value,
                let action = VoiceIPCCommand.Action(rawValue: actionRaw) {
                 let modeRaw = comps.queryItems?.first(where: { $0.name == "mode" })?.value ?? VoiceTranslateMode.zhToEn.rawValue
-                parsedCmd = VoiceIPCCommand(action: action, modeRaw: modeRaw)
+                let reqID = comps.queryItems?.first(where: { $0.name == "req" })?.value ?? UUID().uuidString
+                parsedCmd = VoiceIPCCommand(action: action, modeRaw: modeRaw, requestID: reqID)
             } else if firstLine.contains("POST /voice/command"),
                       let bodyPart,
                       !bodyPart.isEmpty,

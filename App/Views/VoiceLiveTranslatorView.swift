@@ -33,6 +33,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
     private var liveTranslateDebounceTask: Task<Void, Never>?
     private var translateStreamTask: Task<Void, Never>?
     private var lastTranslatedSnapshot = ""
+    private var pausedBackgroundEngineWasWarm = false
 
     func selectMode(_ newMode: VoiceTranslateMode) {
         guard mode != newMode else { return }
@@ -106,13 +107,17 @@ final class VoiceLiveTranslatorController: ObservableObject {
         }
 
         stop(runFinalTranslate: false)
+        // 若后台保活语音引擎正在占用麦克风，先礼让释放避免两个 AVAudioEngine 互相冲突
+        if BackgroundVoiceEngine.shared.isWarm {
+            pausedBackgroundEngineWasWarm = BackgroundVoiceEngine.shared.pauseForForegroundVoice()
+        }
         transcript = ""
         translatedText = ""
         lastTranslatedSnapshot = ""
 
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+            try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker, .allowBluetooth])
             try session.setActive(true, options: .notifyOthersOnDeactivation)
 
             let req = SFSpeechAudioBufferRecognitionRequest()
@@ -123,9 +128,14 @@ final class VoiceLiveTranslatorController: ObservableObject {
             self.recognitionRequest = req
 
             let inputNode = audioEngine.inputNode
-            let format = inputNode.outputFormat(forBus: 0)
+            let hwFormat = inputNode.inputFormat(forBus: 0)
+            guard hwFormat.channelCount > 0 && hwFormat.sampleRate > 0 else {
+                errorText = "未检测到可用麦克风通道，请检查系统麦克风权限或蓝牙耳机连接。"
+                return
+            }
             inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            // 使用 format: nil 自动匹配当前硬件采样率，蓝牙耳机切换绝不崩溃
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
                 req.append(buffer)
                 let level = Self.computeNormalizedLevel(from: buffer)
                 Task { @MainActor [weak self] in
@@ -185,6 +195,13 @@ final class VoiceLiveTranslatorController: ObservableObject {
             triggerTranslationNow(for: clean, aiConfig: aiConfig, recordHistory: true)
         } else if clean.isEmpty {
             statusText = "点下方麦克风开始说话（\(mode.shortTitle)）"
+        }
+    }
+
+    func restoreBackgroundEngineIfNeeded() {
+        if pausedBackgroundEngineWasWarm {
+            pausedBackgroundEngineWasWarm = false
+            BackgroundVoiceEngine.shared.resumeAfterForegroundVoiceIfNeeded(wasWarm: true)
         }
     }
 
@@ -343,15 +360,21 @@ struct VoiceLiveTranslatorView: View {
                 }
             }
             .onAppear {
-                if appState.voiceTranslatorAutoStart {
-                    appState.voiceTranslatorAutoStart = false
-                    if !controller.isRecording {
-                        Task { await controller.start(aiConfig: appState.aiConfig) }
-                    }
+                applyPendingExternalLaunchIfNeeded()
+            }
+            .onChange(of: appState.voiceTranslatorAutoStart) { shouldStart in
+                if shouldStart {
+                    applyPendingExternalLaunchIfNeeded()
+                }
+            }
+            .onChange(of: appState.voiceTranslatorInitialMode) { newMode in
+                if newMode != nil {
+                    applyPendingExternalLaunchIfNeeded()
                 }
             }
             .onDisappear {
                 controller.stop(runFinalTranslate: false)
+                controller.restoreBackgroundEngineIfNeeded()
             }
         }
     }
@@ -681,6 +704,19 @@ struct VoiceLiveTranslatorView: View {
                 .padding(12)
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+
+    private func applyPendingExternalLaunchIfNeeded() {
+        if let initMode = appState.voiceTranslatorInitialMode {
+            appState.voiceTranslatorInitialMode = nil
+            controller.selectMode(initMode)
+        }
+        if appState.voiceTranslatorAutoStart {
+            appState.voiceTranslatorAutoStart = false
+            if !controller.isRecording {
+                Task { await controller.start(aiConfig: appState.aiConfig) }
             }
         }
     }

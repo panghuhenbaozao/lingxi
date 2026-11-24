@@ -2295,4 +2295,24 @@ final class LingxiTests: XCTestCase {
         XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "qwen-plus", provider: .openAICompatible))
         XCTAssertFalse(ScreenshotOCRService.modelLikelySupportsVision(modelID: "glm-4-flash", provider: .openAICompatible))
     }
+
+    func testV562VoiceIPCCommandDeduplicationAndLegacyDecode() throws {
+        // 1. 新版 VoiceIPCCommand 携带唯一 requestID，VoiceIPCState 回传 lastCommandID 防止双通道重复 start
+        let cmd = VoiceIPCCommand(action: .start, modeRaw: VoiceTranslateMode.enToZh.rawValue, requestID: "req-abc-123")
+        let encoded = try JSONEncoder().encode(cmd)
+        let decoded = try JSONDecoder().decode(VoiceIPCCommand.self, from: encoded)
+        XCTAssertEqual(decoded.requestID, "req-abc-123")
+        XCTAssertEqual(decoded.action, .start)
+
+        // 2. 向后兼容旧版无 requestID / lastCommandID 的 JSON
+        let legacyCmdJSON = Data("{\"action\":\"stop\",\"modeRaw\":\"zhToEn\"}".utf8)
+        let legacyCmd = try JSONDecoder().decode(VoiceIPCCommand.self, from: legacyCmdJSON)
+        XCTAssertEqual(legacyCmd.action, .stop)
+        XCTAssertFalse(legacyCmd.requestID.isEmpty)
+
+        let legacyStateJSON = Data("{\"engineWarm\":true,\"isRecording\":false}".utf8)
+        let legacyState = try JSONDecoder().decode(VoiceIPCState.self, from: legacyStateJSON)
+        XCTAssertTrue(legacyState.engineWarm)
+        XCTAssertEqual(legacyState.lastCommandID, "")
+    }
 }

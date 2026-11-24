@@ -356,10 +356,10 @@ struct ScreenshotVisionView: View {
 
     private var quickTipCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("⚡ 键盘内真·一键自动截屏识图（零相册残留）", systemImage: "bolt.fill")
+            Label("📷 键盘内极速截屏识图技巧（无需快捷指令 · 零删图弹窗）", systemImage: "camera.viewfinder")
                 .font(.caption.bold())
                 .foregroundStyle(Color(Design.Palette.accent))
-            Text("方案 1（系统监听 · 零配置）：授予相册读写权限后，在微信/抖音按「电源+音量上」或「轻点背面两下」截屏，键盘 1 秒内自动弹起识图面板并上传分析；\n方案 2（键盘内点「⚡截屏」零相册残留）：打开苹果「快捷指令」新建名为「灵犀截屏识图」的 2 步指令（① 截屏 ② 拷贝至剪贴板），以后在键盘内点「⚡截屏」即自动截屏识图并在传完后秒清剪贴板！")
+            Text("方案 1（零配置 · 推荐）：打开系统「设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下 → 截屏」。在微信/抖音轻拍手机背面截屏，键盘顶栏自动浮出「📷 刚截的屏 · ✨ 识图」，点一下直接识别且绝不自动弹删除框；\n方案 2（0 弹窗自动清空）：截屏后点左下预览 → 右上「完成 → 拷贝并删除」，切回键盘点「📷读图」，识别完成后自动静默清空剪贴板，相册零残留！")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

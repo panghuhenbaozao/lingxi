@@ -53,6 +53,7 @@ final class AppState: ObservableObject {
     @Published var showPermissionsCenter: Bool = false
     @Published var showVoiceTranslator: Bool = false
     @Published var voiceTranslatorAutoStart: Bool = false
+    @Published var voiceTranslatorInitialMode: VoiceTranslateMode? = nil
     @Published var showScreenshotVision: Bool = false
     @Published var screenshotAutoAnalyze: Bool = false
     @Published var pendingDeleteScreenshotAssetID: String? = nil
