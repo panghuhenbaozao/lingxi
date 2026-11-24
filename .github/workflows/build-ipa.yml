@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    runs-on: macos-15-intel
 
     steps:
       - name: Checkout repository
@@ -78,6 +78,7 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Lingxi.app build/Payload/
           test -d build/Payload/Lingxi.app/PlugIns/LingxiKeyboard.appex
           test -f build/Payload/Lingxi.app/PlugIns/LingxiKeyboard.appex/pinyin.sqlite
+          test -f build/Payload/Lingxi.app/PlugIns/LingxiKeyboard.appex/supplement_lexicon.tsv
           cd build
           zip -r -q Lingxi-unsigned.ipa Payload
           ls -lh Lingxi-unsigned.ipa
