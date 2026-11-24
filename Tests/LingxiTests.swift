@@ -2315,4 +2315,25 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(legacyState.engineWarm)
         XCTAssertEqual(legacyState.lastCommandID, "")
     }
+
+    func testV570AudioWAVEncoderAndPCMConversion() {
+        // 构造 4 个 16-bit Little-Endian 采样: 0, 16384 (+0.5), -16384 (-0.5), 32767 (~+1.0)
+        var pcm = Data()
+        for v: Int16 in [0, 16384, -16384, 32767] {
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { pcm.append(contentsOf: $0) }
+        }
+        let wav = AudioWAVEncoder.encodePCM16MonoToWAV(pcm16Data: pcm, sampleRate: 16_000)
+        XCTAssertEqual(wav.count, 44 + pcm.count)
+        XCTAssertEqual(String(data: wav.prefix(4), encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: wav.subdata(in: 8..<12), encoding: .ascii), "WAVE")
+        XCTAssertEqual(String(data: wav.subdata(in: 36..<40), encoding: .ascii), "data")
+
+        let floats = AudioWAVEncoder.pcm16ToFloat32Samples(pcm)
+        XCTAssertEqual(floats.count, 4)
+        XCTAssertEqual(floats[0], 0.0, accuracy: 0.0001)
+        XCTAssertEqual(floats[1], 0.5, accuracy: 0.0001)
+        XCTAssertEqual(floats[2], -0.5, accuracy: 0.0001)
+        XCTAssertGreaterThan(floats[3], 0.999)
+    }
 }

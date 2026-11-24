@@ -229,6 +229,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         voicePanel.stopAllRecording(runFinalTranslate: false)
+        voicePanel.teardownWebAudio()
         TypingStatsStore.shared.flush()
         flushTypingHabitSessionIfNeeded()
         TouchOffsetCalibrator.shared.flush()

@@ -455,26 +455,48 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
             return
         }
 
-        // 2. 读取相册最近 30 分钟内最新一张系统截屏
+        // 2. 读取相册最近 24 小时内最新一张系统截屏（若无系统截屏标签，自动兜底读取最新一张照片，绝不因 30 分钟过期读不到！）
         let photoAuth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if photoAuth == .authorized || photoAuth == .limited {
-            let opts = PHFetchOptions()
-            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            opts.fetchLimit = 3
-            opts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
-            let fetched = PHAsset.fetchAssets(with: .image, options: opts)
-            if let latest = fetched.firstObject,
-               let created = latest.creationDate,
-               Date().timeIntervalSince(created) <= 1800 {
+            let shotOpts = PHFetchOptions()
+            shotOpts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            shotOpts.fetchLimit = 3
+            shotOpts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
+            var candidateAsset = PHAsset.fetchAssets(with: .image, options: shotOpts).firstObject
+            var isScreenshotSubtype = (candidateAsset != nil)
+
+            if let created = candidateAsset?.creationDate, Date().timeIntervalSince(created) > 86_400 {
+                candidateAsset = nil
+            }
+            if candidateAsset == nil {
+                let anyOpts = PHFetchOptions()
+                anyOpts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+                anyOpts.fetchLimit = 1
+                candidateAsset = PHAsset.fetchAssets(with: .image, options: anyOpts).firstObject
+                isScreenshotSubtype = false
+            }
+
+            if let latest = candidateAsset {
+                let created = latest.creationDate ?? Date()
                 let assetID = latest.localIdentifier
                 let ageSec = Int(max(0, Date().timeIntervalSince(created)))
-                let ageText = ageSec < 60 ? "\(ageSec)秒前" : "\(ageSec / 60)分钟前"
+                let ageText: String
+                if ageSec < 60 {
+                    ageText = "\(ageSec)秒前"
+                } else if ageSec < 3600 {
+                    ageText = "\(ageSec / 60)分钟前"
+                } else if ageSec < 86_400 {
+                    ageText = "\(ageSec / 3600)小时前"
+                } else {
+                    ageText = "最近照片"
+                }
+                let kindLabel = isScreenshotSubtype ? "最新截屏" : "最新相册图"
                 let req = PHImageRequestOptions()
                 req.deliveryMode = .highQualityFormat
                 req.isSynchronous = false
                 req.isNetworkAccessAllowed = true
                 req.resizeMode = .exact
-                outputTextView.text = "📷 正在读取最新截屏（\(ageText)）…"
+                outputTextView.text = "📷 正在读取\(kindLabel)（\(ageText)）…"
                 PHImageManager.default().requestImage(
                     for: latest,
                     targetSize: CGSize(width: 768, height: 768),
@@ -490,8 +512,8 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                             self.capturedImage = nil
                             self.capturedJPEGData = nil
                             self.capturedAssetID = nil
-                            self.sourceDescription = "截屏读取失败"
-                            self.outputTextView.text = "⚠️ 该截屏位于 iCloud 或暂不可读，请点右上「↻」重试，或截图后点左下「拷贝并删除」直接免相册识图。"
+                            self.sourceDescription = "图片读取失败"
+                            self.outputTextView.text = "⚠️ 该图片位于 iCloud 或暂不可读，请点右上「📷读图」重试，或截图后点左下「拷贝并删除」直接免相册识图。"
                             self.updateThumbnailUI()
                             self.refreshNoticeBar()
                             self.updateButtonsEnabled()
@@ -501,13 +523,13 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                         self.capturedJPEGData = jpeg
                         self.capturedAssetID = assetID
                         self.capturedFromPasteboard = false
-                        self.sourceDescription = "最新截屏 · \(ageText)"
+                        self.sourceDescription = "\(kindLabel) · \(ageText)"
                         self.updateThumbnailUI()
                         self.refreshNoticeBar()
                         if autoAnalyze {
                             self.startVisionRecognition()
                         } else {
-                            self.outputTextView.text = "✓ 已读取最新截屏（\(ageText)）。点上方功能即可在键盘内识图回复。"
+                            self.outputTextView.text = "✓ 已读取\(kindLabel)（\(ageText)）。点上方功能即可在键盘内识图回复。"
                             self.updateButtonsEnabled()
                         }
                     }

@@ -969,6 +969,143 @@ final class AIClient {
         }
     }
 
+    // MARK: - 音频直接识别与双语转换（供键盘内 WKWebView 录音在离线语音权限未开时云端无缝兜底）
+
+    /// 将键盘内录制好的 16kHz WAV 音频直接发给支持音频的模型（Gemini 原生音频理解 / OpenAI 兼容 `/audio/transcriptions`）完成转写与目标语种转换。
+    func transcribeAndTranslateAudio(
+        wavData: Data,
+        mode: VoiceTranslateMode,
+        config: AIConfig = AIConfig.load()
+    ) async throws -> (transcript: String, translated: String) {
+        guard config.isConfigured else {
+            throw AIClientError.missingAPIKey
+        }
+        switch config.provider {
+        case .gemini:
+            var base = config.geminiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if base.isEmpty { base = AIConfig.defaultGeminiBaseURL }
+            while base.hasSuffix("/") { base.removeLast() }
+            let model = config.resolvedModel(preferFast: true, preferDeep: false)
+            let base64Audio = wavData.base64EncodedString()
+            let prompt = """
+            请听取这段语音，完成两件事并严格按下面两行格式输出（不要任何 Markdown、星号、引号或多余解释）：
+            原文：<逐字听写用户说出的\(mode.sourceLanguageLabel)内容>
+            结果：<按要求输出最终的\(mode.targetLanguageLabel)文本：\(mode.systemPrompt)>
+            """
+            let parts: [[String: Any]] = [
+                ["inlineData": ["mimeType": "audio/wav", "data": base64Audio]],
+                ["text": prompt],
+            ]
+            var acc = ""
+            let yieldHandler: (AIStreamChunk) -> Void = { chunk in
+                if case .answer(let delta) = chunk { acc += delta }
+            }
+            do {
+                try await streamGeminiGenerateContentSSE(
+                    base: base,
+                    prompt: prompt,
+                    userPartsOverride: parts,
+                    systemInstruction: Self.mergeSystem(base: "你是精准的实时语音听写与双语翻译引擎。", config: config),
+                    model: model,
+                    thinkingMode: .off,
+                    includeThinkingConfig: false,
+                    useQueryKeyAuth: false,
+                    config: config,
+                    yield: yieldHandler
+                )
+            } catch AIClientError.httpError(let code, _) where code == 401 || code == 403 {
+                acc = ""
+                try await streamGeminiGenerateContentSSE(
+                    base: base,
+                    prompt: prompt,
+                    userPartsOverride: parts,
+                    systemInstruction: Self.mergeSystem(base: "你是精准的实时语音听写与双语翻译引擎。", config: config),
+                    model: model,
+                    thinkingMode: .off,
+                    includeThinkingConfig: false,
+                    useQueryKeyAuth: true,
+                    config: config,
+                    yield: yieldHandler
+                )
+            }
+            let cleaned = AITextSanitizer.clean(acc, streaming: false)
+            var src = ""
+            var dst = ""
+            for line in cleaned.components(separatedBy: .newlines) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if t.hasPrefix("原文：") || t.hasPrefix("原文:") {
+                    src = String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                } else if t.hasPrefix("结果：") || t.hasPrefix("结果:") {
+                    dst = String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
+            }
+            if dst.isEmpty { dst = cleaned }
+            if src.isEmpty { src = dst }
+            return (src, dst)
+
+        case .openAICompatible:
+            // 先调用 OpenAI 兼容 /audio/transcriptions（支持 OpenAI / SiliconFlow / Groq / OneAPI 等中转站）
+            var base = config.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            while base.hasSuffix("/") { base.removeLast() }
+            if base.hasSuffix("/chat/completions") {
+                base = String(base.dropLast("/chat/completions".count))
+            }
+            let endpoint = "\(base)/audio/transcriptions"
+            guard let url = URL(string: endpoint) else { throw AIClientError.invalidEndpoint }
+
+            let boundary = "LingxiAudio-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            var body = Data()
+            func appendField(_ name: String, _ value: String) {
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+                body.append("\(value)\r\n".data(using: .utf8)!)
+            }
+            let whisperModel = base.lowercased().contains("siliconflow") ? "FunAudioLLM/SenseVoiceSmall" : "whisper-1"
+            let langCode = mode.sourceLocaleID.hasPrefix("en") ? "en" : (mode.sourceLocaleID.hasPrefix("ja") ? "ja" : "zh")
+            appendField("model", whisperModel)
+            appendField("language", langCode)
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"file\"; filename=\"voice.wav\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+            body.append(wavData)
+            body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.assumesHTTP3Capable = false
+            if !config.activeAPIKey.isEmpty {
+                req.setValue("Bearer \(config.activeAPIKey)", forHTTPHeaderField: "Authorization")
+            }
+            req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse else { throw AIClientError.invalidEndpoint }
+            guard (200..<300).contains(http.statusCode) else {
+                let errTxt = String(data: data, encoding: .utf8) ?? ""
+                throw AIClientError.httpError(http.statusCode, Self.extractErrorMessage(errTxt))
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let transcript = (obj["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else { throw AIClientError.emptyResponse }
+
+            if !mode.isTranslationMode {
+                return (transcript, AITextSanitizer.clean(transcript, streaming: false))
+            }
+            var translatedAcc = ""
+            for try await chunk in streamText(
+                prompt: transcript,
+                systemInstruction: mode.systemPrompt,
+                config: config,
+                featureTag: "in_keyboard_voice_audio_translate",
+                preferFast: true
+            ) {
+                translatedAcc += chunk
+            }
+            return (transcript, AITextSanitizer.clean(translatedAcc, streaming: false))
+        }
+    }
+
     // MARK: - 跨协议思考参数组装器（纯函数，可直接单元测试）
 
     static func geminiThinkingPayload(model: String, mode: AIThinkingMode, budget: Int) -> [String: Any] {
