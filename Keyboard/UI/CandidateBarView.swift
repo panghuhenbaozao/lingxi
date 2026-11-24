@@ -318,9 +318,13 @@ final class ExpandedCandidatesView: UIView {
 
     var onSelectCandidate: ((Int) -> Void)?
     var onLongPressCandidate: ((Int, UIView) -> Void)?
+    /// 点击展开面板内的音节胶囊切换查看任意第 k 个音节的全部单字（nil 表示回到整句/综合候选）
+    var onSelectSyllable: ((Int?) -> Void)?
     var onClose: (() -> Void)?
 
     private let filterControl = UISegmentedControl(items: Filter.allCases.map(\.title))
+    private let syllableScroll = LingxiScrollView()
+    private let syllableStack = UIStackView()
     private let toneControl = UISegmentedControl(items: MandarinTone.allCases.map(\.label))
     private let closeButton = ActionClosureButton(type: .system)
     private let scrollView = LingxiScrollView()
@@ -328,6 +332,8 @@ final class ExpandedCandidatesView: UIView {
     private let emptyHintLabel = UILabel()
     private var gridButtonPool: [UIButton] = []
     private var allCandidates: [PinyinCandidate] = []
+    private var currentSyllables: [String] = []
+    private var activeSyllableIndex: Int?
     private var visibleIndices: [Int] = []
     private var currentFilter: Filter = .all
     private var currentTone: MandarinTone = .all
@@ -342,6 +348,15 @@ final class ExpandedCandidatesView: UIView {
         filterControl.selectedSegmentIndex = 0
         filterControl.addTarget(self, action: #selector(filterChanged), for: .valueChanged)
         addSubview(filterControl)
+
+        syllableScroll.showsHorizontalScrollIndicator = false
+        syllableScroll.isHidden = true
+        addSubview(syllableScroll)
+
+        syllableStack.axis = .horizontal
+        syllableStack.alignment = .center
+        syllableStack.spacing = 6
+        syllableScroll.addSubview(syllableStack)
 
         toneControl.selectedSegmentIndex = 0
         toneControl.isHidden = true
@@ -377,11 +392,23 @@ final class ExpandedCandidatesView: UIView {
         let closeW: CGFloat = 52
         closeButton.frame = CGRect(x: bounds.width - pad - closeW, y: 6, width: closeW, height: 28)
         filterControl.frame = CGRect(x: pad, y: 6, width: max(120, closeButton.frame.minX - pad - 6), height: 28)
-        let showTone = (currentFilter == .singleChar)
-        toneControl.isHidden = !showTone
+
         var scrollY = filterControl.frame.maxY + 4
+        let showSyllables = currentSyllables.count >= 2
+        syllableScroll.isHidden = !showSyllables
+        if showSyllables {
+            let sylH: CGFloat = 28
+            syllableScroll.frame = CGRect(x: 0, y: scrollY, width: bounds.width, height: sylH)
+            let fitW = ceil(syllableStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+            syllableStack.frame = CGRect(x: pad, y: 1, width: fitW, height: sylH - 2)
+            syllableScroll.contentSize = CGSize(width: max(bounds.width, fitW + pad * 2), height: sylH)
+            scrollY = syllableScroll.frame.maxY + 4
+        }
+
+        let showTone = (currentFilter == .singleChar) || (activeSyllableIndex != nil)
+        toneControl.isHidden = !showTone
         if showTone {
-            toneControl.frame = CGRect(x: pad, y: filterControl.frame.maxY + 4, width: bounds.width - pad * 2, height: 26)
+            toneControl.frame = CGRect(x: pad, y: scrollY, width: bounds.width - pad * 2, height: 26)
             scrollY = toneControl.frame.maxY + 4
         }
         scrollView.frame = CGRect(x: 0, y: scrollY, width: bounds.width, height: max(40, bounds.height - scrollY))
@@ -401,21 +428,73 @@ final class ExpandedCandidatesView: UIView {
         closeButton.backgroundColor = theme.specialKeyFill
         closeButton.setTitleColor(theme.keyText, for: .normal)
         emptyHintLabel.textColor = theme.keyHintText
+        rebuildSyllablePills()
         rebuildButtons()
     }
 
-    func update(candidates: [PinyinCandidate]) {
-        // 防闪烁：候选未变化时跳过重置筛选与全量重建（打字链路 refreshUI 高频触发）
-        let signature = candidates.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
+    func update(
+        candidates: [PinyinCandidate],
+        syllables: [String] = [],
+        activeSyllableIndex: Int? = nil
+    ) {
+        let sylKey = syllables.joined(separator: "'") + "#\(activeSyllableIndex ?? -1)"
+        let signature = sylKey + "|" + candidates.map { "\($0.word)\u{1}\($0.codeHint)\u{1}\($0.source)" }.joined(separator: "\u{2}")
         if signature == lastSignature { return }
         lastSignature = signature
         self.allCandidates = candidates
-        currentFilter = .all
+        self.currentSyllables = syllables
+        self.activeSyllableIndex = activeSyllableIndex
+        if activeSyllableIndex != nil {
+            currentFilter = .singleChar
+            filterControl.selectedSegmentIndex = Filter.singleChar.rawValue
+        } else {
+            currentFilter = .all
+            filterControl.selectedSegmentIndex = 0
+        }
         currentTone = .all
-        filterControl.selectedSegmentIndex = 0
         toneControl.selectedSegmentIndex = 0
+        rebuildSyllablePills()
         rebuildButtons()
+        setNeedsLayout()
         scrollView.setContentOffset(.zero, animated: false)
+    }
+
+    private func rebuildSyllablePills() {
+        syllableStack.arrangedSubviews.forEach {
+            syllableStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        guard let theme, currentSyllables.count >= 2 else { return }
+
+        let allBtn = ActionClosureButton(type: .custom)
+        let isAllActive = (activeSyllableIndex == nil)
+        allBtn.setTitle("整句/逐字", for: .normal)
+        allBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        allBtn.contentEdgeInsets = UIEdgeInsets(top: 4, left: 9, bottom: 4, right: 9)
+        allBtn.layer.cornerRadius = 11
+        allBtn.layer.cornerCurve = .continuous
+        allBtn.backgroundColor = isAllActive ? theme.accentFill : theme.specialKeyFill
+        allBtn.setTitleColor(isAllActive ? theme.accentText : theme.keyText, for: .normal)
+        allBtn.actionHandler = { [weak self] in
+            self?.onSelectSyllable?(nil)
+        }
+        syllableStack.addArrangedSubview(allBtn)
+
+        for (idx, syl) in currentSyllables.enumerated() {
+            let pill = ActionClosureButton(type: .custom)
+            let isSelected = (activeSyllableIndex == idx)
+            pill.setTitle("第\(idx + 1)字·\(syl)", for: .normal)
+            pill.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+            pill.contentEdgeInsets = UIEdgeInsets(top: 4, left: 9, bottom: 4, right: 9)
+            pill.layer.cornerRadius = 11
+            pill.layer.cornerCurve = .continuous
+            pill.backgroundColor = isSelected ? theme.accentFill : theme.specialKeyFill
+            pill.setTitleColor(isSelected ? theme.accentText : theme.keyText, for: .normal)
+            pill.actionHandler = { [weak self] in
+                self?.onSelectSyllable?(idx)
+            }
+            syllableStack.addArrangedSubview(pill)
+        }
     }
 
     @objc private func filterChanged() {

@@ -226,9 +226,14 @@ final class PinyinEngine {
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
         let segs = segmenter.segmentations(raw: trimmed, scheme: effectiveScheme)
-        // 单音节查询自动放宽候选池至 420，确保 8105 规范字 + Unicode BMP 生僻字在展开面板中 100% 完整可查不截断
+        // 单音节放宽至 420（100% 覆盖规范字+生僻字），多音节长输入放宽至 260（确保打很多字时首音节单字仍完整保留 140+ 字不截断！）
         let isSingleSyllableQuery = segs.contains { $0.count == 1 }
-        let effectiveLimit = (isSingleSyllableQuery && limit >= 64) ? max(limit, 420) : limit
+        let effectiveLimit: Int
+        if limit >= 64 {
+            effectiveLimit = isSingleSyllableQuery ? max(limit, 420) : max(limit, 260)
+        } else {
+            effectiveLimit = limit
+        }
         var (bestSeg, out) = evaluateSegmentations(
             segs,
             isT9: false,
@@ -344,6 +349,44 @@ final class PinyinEngine {
                             out.insert(adjCand, at: min(1, out.count))
                         }
                     }
+                }
+            }
+        }
+
+        // 3.5 单音节平翘舌/前后鼻音温和兜底（如未开模糊音时打 ze 也能在第 4~5 位看到「这」，打 si 能看到「是」，打 zi 能看到「只/知」）
+        if settings.fuzzyFallbackEnabled && effectiveScheme == .quanpin && allComplete && bestSeg.count == 1 {
+            let syl = bestSeg[0].text
+            var fuzzyAlts: [String] = []
+            for (dg, sg) in [("zh", "z"), ("ch", "c"), ("sh", "s")] {
+                if syl.hasPrefix(dg) {
+                    fuzzyAlts.append(sg + String(syl.dropFirst(2)))
+                } else if syl.hasPrefix(sg) {
+                    fuzzyAlts.append(dg + String(syl.dropFirst(1)))
+                }
+            }
+            for (finA, finB) in [("ang", "an"), ("eng", "en"), ("ing", "in")] {
+                if syl.hasSuffix(finA) {
+                    fuzzyAlts.append(String(syl.dropLast(3)) + finB)
+                } else if syl.hasSuffix(finB) {
+                    fuzzyAlts.append(String(syl.dropLast(2)) + finA)
+                }
+            }
+            var insertPos = min(3, out.count)
+            var existingWords = Set(out.map(\.word))
+            for alt in fuzzyAlts where segmenter.validSyllables.contains(alt) {
+                let altTok = PinyinToken(text: alt, raw: trimmed, kind: .complete, end: trimmed.count)
+                let hits = lookup(tokens: [altTok], start: 0, end: 1, openEnd: false, isT9: false, settings: settings)
+                for h in hits.prefix(2) where h.word.count == 1 && h.lp > -8.6 && existingWords.insert(h.word).inserted {
+                    let fallbackCand = PinyinCandidate(
+                        word: h.word,
+                        py: h.py,
+                        lp: h.lp - 1.5,
+                        consumed: trimmed.count,
+                        isExact: false,
+                        source: .dictionary
+                    )
+                    out.insert(fallbackCand, at: min(insertPos, out.count))
+                    insertPos += 1
                 }
             }
         }
@@ -870,7 +913,12 @@ final class PinyinEngine {
             : [:]
         let segs = segmenter.t9Segmentations(digits: digits, lockedPrefixes: lockedSyllables)
         let isSingleSyllableT9 = segs.contains { $0.count == 1 }
-        let effectiveLimit = (isSingleSyllableT9 && limit >= 64) ? max(limit, 420) : limit
+        let effectiveLimit: Int
+        if limit >= 64 {
+            effectiveLimit = isSingleSyllableT9 ? max(limit, 420) : max(limit, 260)
+        } else {
+            effectiveLimit = limit
+        }
         let (bestSeg, rawOut) = evaluateSegmentations(
             segs,
             isT9: true,
@@ -1423,47 +1471,72 @@ final class PinyinEngine {
 
         let prefixUpper = min(bestSeg.count - 1, maxPhraseLen)
         if bestSeg.count >= 2 && limit >= 12 {
-            // 长拼音/多音节保护：避免 extendedFull 与 2~7 字中间前缀词把候选上限填满，导致首音节单字完全消失
-            let immediateExtendedCap = 12
-            for c in extendedFull.prefix(immediateExtendedCap) { appendUnique(c) }
-            let overflowExtended = extendedFull.count > immediateExtendedCap ? Array(extendedFull.dropFirst(immediateExtendedCap)) : []
-
+            // 对齐微信/搜狗长句分字选词黄金排位：
+            //   1) 整句与完整词 (exactFull / keptSentences) 居首；
+            //   2) 紧跟最核心的 2~4 个前段词组（如「这里的」「这里」），方便分步组词；
+            //   3) 立刻在首屏第 4~6 位放上首音节最高频单字（如「这」「我」），无需向右狂翻几十个词就能一键选单字！
+            //   4) 随后展开完整首音节单字池（保底最高 140 字）与其余中间词组、前缀补全词。
             let singleChars = lookup(tokens: bestSeg, start: 0, end: 1, openEnd: false, isT9: isT9, settings: settings)
-            let guaranteedSingleQuota = min(singleChars.count, max(16, limit / 3))
-            var deferredPrefixes: [PinyinCandidate] = []
+                .filter { $0.word.count == 1 }
+            let guaranteedSingleQuota = min(singleChars.count, max(36, min(160, (limit * 3) / 5)))
 
+            var primaryPrefixes: [PinyinCandidate] = []
+            var secondaryPrefixes: [PinyinCandidate] = []
             if prefixUpper >= 2 {
                 for k in stride(from: prefixUpper, through: 2, by: -1) {
                     let prefixCands = lookup(tokens: bestSeg, start: 0, end: k, openEnd: false, isT9: isT9, settings: settings)
-                    let tierCap = (k >= 4) ? 4 : (k == 3 ? 5 : 6)
-                    for c in prefixCands.prefix(tierCap) {
-                        if output.count < max(1, limit - guaranteedSingleQuota) {
-                            appendUnique(c)
+                    // 最长前段与双字前段各提取 1~2 个精品词放在首屏单字之前，其余后置避免淹没单字
+                    let frontCap = (k == 2) ? 2 : (k == prefixUpper ? 1 : 0)
+                    let tierCap = (k >= 4) ? 3 : (k == 3 ? 4 : 6)
+                    for (idx, c) in prefixCands.prefix(tierCap).enumerated() {
+                        if idx < frontCap && primaryPrefixes.count < 3 {
+                            primaryPrefixes.append(c)
                         } else {
-                            deferredPrefixes.append(c)
+                            secondaryPrefixes.append(c)
                         }
                     }
                     if prefixCands.count > tierCap {
-                        deferredPrefixes.append(contentsOf: prefixCands.dropFirst(tierCap).prefix(14))
+                        secondaryPrefixes.append(contentsOf: prefixCands.dropFirst(tierCap).prefix(10))
                     }
                 }
             }
 
-            // 1) 将首音节高频前 8 个单字放入靠前位置，确保顶部横向候选栏无需展开即可直接滑动选到单字
-            let topSingleCount = min(8, guaranteedSingleQuota)
-            for c in singleChars.prefix(topSingleCount) { appendUnique(c) }
-
-            // 2) 追加剩余保底单字（共至多 32 个），确保展开面板「只看单字」在任意长度拼音下都有完整单字库
-            if guaranteedSingleQuota > topSingleCount {
-                for c in singleChars[topSingleCount..<guaranteedSingleQuota] { appendUnique(c) }
+            // 先放至多 3 个最常用前段词组（确保整句+常用词后紧邻首屏单字！）
+            for c in primaryPrefixes {
+                if output.count >= 4 { break }
+                appendUnique(c)
             }
 
-            // 3) 用剩余配额回填更多中间词组、补全词与其余生僻单字
-            for c in deferredPrefixes {
+            // 首屏直出首音节前 4 个核心单字（如打 zhelidedongxi 首屏直接可见「这」「着」，实现丝滑逐字/分步上屏！）
+            let firstScreenSingleCount = min(4, guaranteedSingleQuota)
+            for c in singleChars.prefix(firstScreenSingleCount) { appendUnique(c) }
+
+            // 紧随其后放次级前段词组与少量高分前缀补全
+            for c in primaryPrefixes { appendUnique(c) }
+            for c in secondaryPrefixes.prefix(8) {
+                if output.count < max(8, limit - guaranteedSingleQuota) {
+                    appendUnique(c)
+                }
+            }
+            for c in extendedFull.prefix(8) {
+                if output.count < max(8, limit - guaranteedSingleQuota) {
+                    appendUnique(c)
+                }
+            }
+
+            // 追加全部保底单字（最高 160 字），保证展开面板「只看单字」即使在 10 音节长句下也能找到所有常用字与次常用字！
+            if guaranteedSingleQuota > firstScreenSingleCount {
+                for c in singleChars[firstScreenSingleCount..<guaranteedSingleQuota] {
+                    appendUnique(c)
+                }
+            }
+
+            // 用剩余配额回填其余词组、扩展补全与生僻单字
+            for c in secondaryPrefixes.dropFirst(8) {
                 if output.count >= limit { break }
                 appendUnique(c)
             }
-            for c in overflowExtended {
+            for c in extendedFull.dropFirst(8) {
                 if output.count >= limit { break }
                 appendUnique(c)
             }
@@ -1675,8 +1748,17 @@ final class PinyinEngine {
             }
             let finalLP = baseLP + (usedFuzzy ? Self.fuzzyPenalty : 0.0) - compPenalty
             let row = CachedRow(word: word, py: py, lp: finalLP, exact: allExact, isUser: isUser)
-            if let existing = bestByWord[word], existing.lp >= row.lp {
-                return
+            if let existing = bestByWord[word] {
+                // 致命缺陷修复：精确音节匹配 (exact == true) 必须永远优先于开放前缀补全 (exact == false)！
+                // 此前仅比较 existing.lp >= row.lp，导致「这」(zhei -6.064) 在 openEnd=true 时先把「这」锁死为 exact=false，
+                // 随后真正的精确匹配「这」(zhe -6.064) 因 lp 相等被直接丢弃，致使打 zhe 时「这」沉到 90+ 生僻字之后彻底打不出来！
+                // 同理修复「嗯」(eng 遮蔽 en)、「称」(cheng 遮蔽 chen)、「得」(dei 遮蔽 de) 等全部 23 组多音前缀遮蔽问题！
+                if existing.exact && !row.exact {
+                    return
+                }
+                if existing.exact == row.exact && existing.lp >= row.lp {
+                    return
+                }
             }
             bestByWord[word] = row
         }

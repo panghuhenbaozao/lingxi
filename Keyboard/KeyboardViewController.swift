@@ -84,6 +84,16 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         v.applyCandidateFontSize(CGFloat(settings.candidateFontSize))
         v.onSelectCandidate = { [weak self] idx in self?.selectCandidate(at: idx) }
         v.onLongPressCandidate = { [weak self] idx, _ in self?.handleLongPressCandidate(at: idx) }
+        v.onSelectSyllable = { [weak self] sylIdx in
+            guard let self else { return }
+            if let sylIdx {
+                if self.editingSyllableIndex != sylIdx {
+                    self.enterRetroactiveSyllableEdit(at: sylIdx)
+                }
+            } else if let cur = self.editingSyllableIndex {
+                self.enterRetroactiveSyllableEdit(at: cur)
+            }
+        }
         v.onClose = { [weak self] in
             guard let self else { return }
             self.isCandidatesExpanded = false
@@ -1068,8 +1078,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             guard let self else { return }
             self.isCandidatesExpanded.toggle()
             if self.isCandidatesExpanded {
-                self.mountSubpanelIfNeeded(self.expandedCandidates)
-                self.expandedCandidates.update(candidates: self.currentCandidates)
+                self.syncExpandedCandidatesIfVisible()
             }
             self.updateVisiblePanel()
             self.refreshToolbar()
@@ -2623,12 +2632,22 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
         currentCandidates = merged
         // 关键零延迟优化：折叠态绝不重建隐藏的展开网格（此前每按一键都在后台重排上百个隐藏按钮！）
-        if isCandidatesExpanded {
-            mountSubpanelIfNeeded(expandedCandidates)
-            expandedCandidates.update(candidates: merged)
-        }
+        syncExpandedCandidatesIfVisible()
         syncInlineMarkedTextIfEnabled()
         refreshUI()
+    }
+
+    private func syncExpandedCandidatesIfVisible() {
+        guard isCandidatesExpanded else { return }
+        mountSubpanelIfNeeded(expandedCandidates)
+        let sylLabels: [String] = currentTokens.count >= 2
+            ? currentTokens.map { $0.lockedSyllable ?? $0.text }
+            : []
+        expandedCandidates.update(
+            candidates: currentCandidates,
+            syllables: sylLabels,
+            activeSyllableIndex: editingSyllableIndex
+        )
     }
 
     private func syncInlineMarkedTextIfEnabled() {
@@ -2679,10 +2698,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                     var merged = [patchedCand] + baseList.filter { $0.word != patchedWord }
                     if merged.isEmpty { merged = [patchedCand] }
                     currentCandidates = merged
-                    if isCandidatesExpanded {
-                        mountSubpanelIfNeeded(expandedCandidates)
-                        expandedCandidates.update(candidates: merged)
-                    }
+                    isCandidatesExpanded = false
                     refreshUI()
                     return
                 }
@@ -3675,10 +3691,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             if !savedSentenceCandidatesBeforeEdit.isEmpty {
                 currentCandidates = savedSentenceCandidatesBeforeEdit
                 savedSentenceCandidatesBeforeEdit = []
-                if isCandidatesExpanded {
-                    mountSubpanelIfNeeded(expandedCandidates)
-                    expandedCandidates.update(candidates: currentCandidates)
-                }
+                syncExpandedCandidatesIfVisible()
             }
             refreshUI()
             return
@@ -3690,10 +3703,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let singleList = engine.candidatesForSingleToken(currentTokens[idx], isT9: isUsingT9Layout, settings: settings, limit: 360)
         if !singleList.isEmpty {
             currentCandidates = singleList
-            if isCandidatesExpanded {
-                mountSubpanelIfNeeded(expandedCandidates)
-                expandedCandidates.update(candidates: singleList)
-            }
+            syncExpandedCandidatesIfVisible()
         }
         refreshUI()
     }

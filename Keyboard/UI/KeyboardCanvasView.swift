@@ -736,7 +736,11 @@ final class KeyboardCanvasView: UIView {
                         && track.pathLength < 72
                         && abs(dy) > abs(dx) * 1.5
                     let elapsed = CACurrentMediaTime() - track.startTime
-                    if !track.glideActive && !isShortVerticalFlick && elapsed >= 0.09 && track.visitedLetterKeys.count >= 2 && track.pathLength >= 52 {
+                    // 提高滑行触发门槛（至少跨越 3 个键且轨迹 >=88pt，或双键长滑 >=120pt），
+                    // 彻底杜绝双手快速敲打 z-h-e 等连续字母时因拇指轻微带滑被误判为滑行输入吞掉单字！
+                    let glideTriggered = (track.visitedLetterKeys.count >= 3 && track.pathLength >= 88 && elapsed >= 0.13)
+                        || (track.visitedLetterKeys.count >= 2 && track.pathLength >= 120 && elapsed >= 0.15)
+                    if !track.glideActive && !isShortVerticalFlick && glideTriggered {
                         track.glideActive = true
                         track.flickedSecondary = false
                         track.flickedDown = false

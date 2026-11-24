@@ -2417,5 +2417,33 @@ final class LingxiTests: XCTestCase {
         XCTAssertTrue(ToolbarButtonID.allCases.contains(.symbols))
         let legacyDecoded = try JSONDecoder().decode(LingxiSettings.self, from: Data("{\"toolbarLayout\":[{\"buttonID\":\"ai\",\"isVisible\":true,\"order\":0}]}".utf8))
         XCTAssertTrue(legacyDecoded.toolbarLayout.contains(where: { $0.buttonID == .symbols && $0.isVisible }))
+
+        // 7. v5.8.1 关键修复：多音长读音前缀绝不遮蔽短读音精确字（「这」zhe vs zhei、「嗯」en vs eng、「称」chen vs cheng）
+        XCTAssertEqual(engine.query(raw: "zhe", settings: settings).candidates.first?.word, "这", "zhe 首选必须是 这，不得被 zhei 前缀遮蔽沉底")
+        XCTAssertEqual(engine.queryT9(digits: "943", lockedSyllables: [], settings: settings).candidates.first?.word, "这", "九宫格 943(zhe) 首选必须是 这")
+        XCTAssertEqual(engine.query(raw: "en", settings: settings).candidates.first?.word, "嗯", "en 首选必须是 嗯，不得被 eng 遮蔽")
+        let chenTop10 = engine.query(raw: "chen", settings: settings).candidates.prefix(10).map(\.word)
+        XCTAssertTrue(chenTop10.contains("称"), "chen 前 10 候选必须包含多音字 称")
+
+        // 8. 单音节平翘舌温和兜底：未开模糊音打 ze 时前 6 位也应给出「这」，打 si 给出「是」
+        let zeTop6 = engine.query(raw: "ze", settings: settings).candidates.prefix(6).map(\.word)
+        XCTAssertEqual(zeTop6.first, "则")
+        XCTAssertTrue(zeTop6.contains("这"), "单音节 ze 应温和兜底提供 这")
+        let siTop6 = engine.query(raw: "si", settings: settings).candidates.prefix(6).map(\.word)
+        XCTAssertTrue(siTop6.contains("是"), "单音节 si 应温和兜底提供 是")
+
+        // 9. 长句/多字输入下的首屏单字直出与大池单字保底（打很多字也能立刻在前 8 位点到首音节单字，且展开单字池 >= 30 字）
+        for (longRaw, expectedFirstSingle) in [
+            ("zheli", "这"),
+            ("zhelidedongxi", "这"),
+            ("woxiangquchifanzuijintianqizhenhao", "我"),
+            ("yiqiqukankanba", "一"),
+        ] {
+            let longRes = engine.query(raw: longRaw, settings: settings)
+            let firstScreenSingles = longRes.candidates.prefix(8).filter { $0.word.count == 1 }.map(\.word)
+            XCTAssertTrue(firstScreenSingles.contains(expectedFirstSingle), "长输入 \(longRaw) 首屏前 8 项必须直接包含单字 \(expectedFirstSingle)")
+        }
+        let yiLongSingles = engine.query(raw: "yiqiqukankanba", settings: settings).candidates.filter { $0.word.count == 1 }
+        XCTAssertGreaterThanOrEqual(yiLongSingles.count, 80, "长句输入下首音节展开单字池应完整保留 80+ 单字")
     }
 }
