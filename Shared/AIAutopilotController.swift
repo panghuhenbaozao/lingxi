@@ -235,7 +235,7 @@ enum AIAutopilotController {
 
         // C. 模糊音精准自动探测（合并 SQLite 观察与 TypingHabitTracker 易混音计数）
         var mergedConfusions = stats.fuzzyConfusionCounts
-        for (k, v) in habitProfile.confusionPairs {
+        for (k, v) in habitProfile.confusionMatrix {
             mergedConfusions[k] = max(mergedConfusions[k] ?? 0, v)
         }
         let fuzzyMapping: [(dbKey: String, settingKey: String, label: String)] = [

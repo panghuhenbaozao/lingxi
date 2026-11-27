@@ -259,7 +259,7 @@ struct AIAutopilotHubView: View {
                     if stats.totalLongDrafts > 0 {
                         LXTag(text: "长草稿 \(stats.totalLongDrafts) 段")
                     }
-                    ForEach(stats.fuzzyConfusionCounts.sorted(by: { $0.value > $1.value }).prefix(4), id: \.key) { item in
+                    ForEach(Array(stats.fuzzyConfusionCounts.sorted(by: { $0.value > $1.value }).prefix(4)), id: \.key) { item in
                         LXTag(text: "易混 \(item.key.replacingOccurrences(of: "_", with: "/")) ×\(item.value)", tint: Color(Design.Palette.warning), filled: true)
                     }
                 }
@@ -423,7 +423,7 @@ struct AIAutopilotHubView: View {
                     .foregroundStyle(Color(Design.Palette.stone))
                     .padding(.vertical, 4)
             } else {
-                ForEach(decisions.prefix(20)) { rec in
+                ForEach(Array(decisions.prefix(20))) { rec in
                     HStack(alignment: .top, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 6) {
@@ -489,7 +489,7 @@ struct AIAutopilotHubView: View {
                     .padding(.vertical, 4)
             } else {
                 LXFlowLayout(spacing: 8, lineSpacing: 8) {
-                    ForEach(topVocab.prefix(18)) { item in
+                    ForEach(Array(topVocab.prefix(18))) { item in
                         LXTag(
                             text: "\(item.word) · \(item.domain) ×\(item.learnCount)",
                             tint: Color(Design.Palette.slate)
