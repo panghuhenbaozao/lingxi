@@ -401,7 +401,7 @@ struct AIOfflineLinterView: View {
 
                 Section("进阶操作") {
                     LXFlowLayout(spacing: 8, lineSpacing: 8) {
-                        if spoken.changed {
+                        if spoken.hasChanges {
                             Button {
                                 inputText = spoken.cleaned
                                 UIPasteboard.general.string = spoken.cleaned

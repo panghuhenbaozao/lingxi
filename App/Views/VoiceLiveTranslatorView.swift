@@ -560,7 +560,7 @@ struct VoiceLiveTranslatorView: View {
                             let raw = controller.transcript
                             let report = VoiceTranscriptCleaner.clean(raw)
                             lastOfflineCleanedOriginal = raw
-                            showOfflineCleanDiff = report.changed
+                            showOfflineCleanDiff = report.hasChanges
                             controller.translatedText = report.cleaned
                             controller.errorText = nil
                             controller.statusText = "离线口述清洗（0ms）：\(report.summaryBadge)"
