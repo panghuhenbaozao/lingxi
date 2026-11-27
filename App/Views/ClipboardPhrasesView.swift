@@ -27,8 +27,8 @@ struct ClipboardPhrasesView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 Picker("内容类型", selection: $segment) {
-                    Text("剪贴板 · \(appState.clipboardItems.count)").tag(0)
-                    Text("快捷短语 · \(appState.quickPhrases.count)").tag(1)
+                    Text("剪贴板").tag(0)
+                    Text("常用短语").tag(1)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, Design.Spacing.md)
@@ -42,7 +42,7 @@ struct ClipboardPhrasesView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("工具")
+            .navigationTitle("剪贴板")
             .lxToast($toolboxToast)
             .onAppear {
                 let relayConfig = ClipboardRelayConfig.load()
@@ -62,7 +62,7 @@ struct ClipboardPhrasesView: View {
                 relaySSETask = nil
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     if segment == 0 {
                         Menu {
                             Button {
@@ -228,14 +228,11 @@ struct ClipboardPhrasesView: View {
                         }
                     }
                 } header: {
-                    Text("剪贴板历史 · \(filtered.count)")
-                } footer: {
-                    Text("点按复制；右滑置顶，左滑删除，长按有更多排版操作。")
+                    Text("最近记录（\(filtered.count)）")
                 }
             }
 
             toolsSection
-            formatSection
         }
         .listStyle(.insetGrouped)
     }
@@ -416,122 +413,50 @@ struct ClipboardPhrasesView: View {
         }
     }
 
-    // 效率工具箱（L2 专项子页收口）
+    // 精简核心效率工具（撤除冗余表情库/话术库/6 宫格噪声）
     private var toolsSection: some View {
-        Section("更多工具") {
+        Section("效率工具") {
             NavigationLink {
                 PersonalFillCardsSubView()
             } label: {
-                toolHubRow(
-                    icon: "person.text.rectangle.fill",
-                    title: "个人速填名片夹",
-                    subtitle: "家/公司地址、开票税号、车牌，小程序 3 秒分字段填表"
-                )
+                compactToolRow(icon: "person.text.rectangle", title: "速填名片夹", value: "地址 / 开票")
             }
 
             NavigationLink {
                 DraftRecoverySubView()
             } label: {
-                toolHubRow(
-                    icon: "clock.arrow.circlepath",
-                    title: "草稿防丢黑匣子",
-                    subtitle: "24 小时纯本地自动留底长草稿，防切 App 刷新清空"
-                )
-            }
-
-            NavigationLink {
-                SocialScriptBankSubView()
-            } label: {
-                toolHubRow(
-                    icon: "text.bubble.fill",
-                    title: "高情商离线话术口袋",
-                    subtitle: "拒绝、催促、道歉、祝福、闲鱼维权，零 API 密钥离线直发"
-                )
+                compactToolRow(icon: "clock.arrow.circlepath", title: "草稿防丢", value: "24 小时留底")
             }
 
             NavigationLink {
                 CrossDeviceRelaySubView()
             } label: {
-                toolHubRow(icon: "laptopcomputer.and.iphone", title: "跨屏剪贴板接力", subtitle: "6 位匹配码，电脑和手机互传文字")
+                compactToolRow(icon: "laptopcomputer.and.iphone", title: "跨屏接力", value: "手机 ⇄ 电脑")
             }
 
-            NavigationLink {
-                EmojiKaomojiCatalogSubView()
-            } label: {
-                toolHubRow(icon: "face.smiling", title: "表情与颜文字库", subtitle: "搜索并一键复制")
+            HStack(spacing: 10) {
+                formatButton("链接去追踪", icon: "link") {
+                    let r = LinkPrivacyCleaner.clean($0)
+                    return r.extractedCleanURL ?? r.cleanedText
+                }
+                formatButton("盘古空格", icon: "textformat.abc") { TextFormatterToolbox.addPanguSpaces($0) }
             }
-
-            Button {
-                showVoiceStudio = true
-            } label: {
-                toolHubRow(icon: "mic.fill", title: "实时语音同传", subtitle: "中⇄英 · 中⇄日 · 语音朗读", showsChevron: true)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink {
-                SecureVaultSubView()
-            } label: {
-                toolHubRow(
-                    icon: "lock.shield.fill",
-                    title: "Face ID 本地保险箱",
-                    subtitle: "敏感信息只存本机，永不上云",
-                    badge: "\(appState.secureVaultItems.count) 条"
-                )
-            }
+            .padding(.vertical, 4)
         }
     }
 
-    private var formatSection: some View {
-        Section {
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    formatButton("链接去追踪", icon: "link.badge.plus") {
-                        let r = LinkPrivacyCleaner.clean($0)
-                        return r.extractedCleanURL ?? r.cleanedText
-                    }
-                    formatButton("发帖防限流", icon: "megaphone.fill") { OfflineTextLinter.autoReplacePlatformRisks($0) }
-                }
-                HStack(spacing: 8) {
-                    formatButton("盘古空格", icon: "textformat.abc") { TextFormatterToolbox.addPanguSpaces($0) }
-                    formatButton("去多余空行", icon: "text.justify") { TextFormatterToolbox.collapseBlankLines($0) }
-                }
-                HStack(spacing: 8) {
-                    formatButton("数字编号", icon: "list.number") { TextFormatterToolbox.toNumberedList($0) }
-                    formatButton("圆点列表", icon: "list.bullet") { TextFormatterToolbox.toBulletList($0) }
-                }
-            }
-            .padding(.vertical, 6)
-        } header: {
-            Text("剪贴板一键排版与净化")
-        } footer: {
-            Text("对系统剪贴板里的当前内容生效，处理后自动写回剪贴板。")
-        }
-    }
-
-    private func toolHubRow(icon: String, title: String, subtitle: String, badge: String? = nil, showsChevron: Bool = false) -> some View {
+    private func compactToolRow(icon: String, title: String, value: String) -> some View {
         HStack(spacing: 12) {
-            LXIconTile(icon: icon)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(Color(Design.Palette.stone))
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            if let badge {
-                LXTag(text: badge)
-            }
-            if showsChevron {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-            }
+            LXIconTile(icon: icon, size: 30)
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color(Design.Palette.ink))
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.footnote)
+                .foregroundStyle(Color(Design.Palette.stone))
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
+        .padding(.vertical, 3)
     }
 
     // MARK: - 2. 动态变量快捷短语（支持 {{日期}} / {{时间}} / {{剪贴板}} / {{随机问候}} 实时渲染）

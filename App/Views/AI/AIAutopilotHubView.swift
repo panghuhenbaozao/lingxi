@@ -187,8 +187,6 @@ struct AIAutopilotHubView: View {
             .padding(.vertical, 6)
         } header: {
             Text("全权操控策略")
-        } footer: {
-            Text("AI 仅在 26 项安全打字效率开关白名单内调优（纠错、模糊音、盘古空格、草稿防丢、热区自适应等），绝不触碰无痕模式、隐私脱敏护盾或任何密钥。")
         }
     }
 
@@ -200,29 +198,19 @@ struct AIAutopilotHubView: View {
                 showObsidianVault = true
             } label: {
                 HStack(spacing: 12) {
-                    LXIconTile(icon: "circle.hexagongrid", tint: Color(Design.Palette.accent), size: 38)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text("Obsidian 风格双链知识图谱")
-                                .font(.subheadline.weight(.bold))
-                                .foregroundStyle(Color(Design.Palette.ink))
-                            LXTag(
-                                text: "\(stats.vaultNoteCount) 笔记 · \(stats.vaultLinkCount) 双链",
-                                tint: Color(Design.Palette.accent),
-                                filled: true
-                            )
-                        }
-                        Text("用你的 API 把打字习惯、对话与自述提炼为 [[双向链接]] 常青笔记，2-Hop 图谱按需召回反哺每次 AI 回复，支持导出 .md。")
-                            .font(.caption)
-                            .foregroundStyle(Color(Design.Palette.stone))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 4)
+                    LXIconTile(icon: "circle.hexagongrid", tint: Color(Design.Palette.accent), size: 34)
+                    Text("Obsidian 双链图谱")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    Spacer()
+                    Text("\(stats.vaultNoteCount) 笔记 · \(stats.vaultLinkCount) 双链")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
                     Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(Design.Palette.muted))
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -238,10 +226,10 @@ struct AIAutopilotHubView: View {
                     HStack(spacing: 5) {
                         if appState.isRunningObsidianLearn {
                             ProgressView().controlSize(.mini).tint(Color.white)
-                            Text("API 提炼双链中…")
+                            Text("演化中…")
                         } else {
                             Image(systemName: "wand.and.stars")
-                            Text("用我的 API 演化双链记忆库")
+                            Text("API 演化双链")
                         }
                     }
                 }
@@ -251,11 +239,9 @@ struct AIAutopilotHubView: View {
                 Button("进图谱") {
                     showObsidianVault = true
                 }
-                .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.ink)))
             }
             .padding(.vertical, 2)
-        } header: {
-            Text("Obsidian LLM Wiki · 自学习个性化知识库")
         }
     }
 
@@ -376,9 +362,7 @@ struct AIAutopilotHubView: View {
             }
             .padding(.vertical, 4)
         } header: {
-            Text("AI 专属本地 SQLite 数据库")
-        } footer: {
-            Text("主 App 与键盘扩展通过 App Group 共享这份加密保护 SQLite 库；密码框、无痕模式与敏感隐私内容严格跳过，永不入库。")
+            Text("本地 SQLite 学习库")
         }
     }
 
@@ -479,9 +463,7 @@ struct AIAutopilotHubView: View {
                 }
             }
         } header: {
-            Text("长期认知记忆（每次 AI 调用自动带入）")
-        } footer: {
-            Text("置顶记忆拥有最高权重，会优先注入你的每一次 AI 润色、回复、翻译与对话提示词中，让 AI 越用越懂你。")
+            Text("长期认知记忆")
         }
     }
 

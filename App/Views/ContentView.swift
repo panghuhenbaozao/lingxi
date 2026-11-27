@@ -16,7 +16,7 @@ struct ContentView: View {
 
             ThemeStudioView()
                 .tabItem {
-                    Label("外观", systemImage: "paintpalette")
+                    Label("外观", systemImage: "paintbrush")
                 }
                 .tag(1)
 
@@ -28,7 +28,7 @@ struct ContentView: View {
 
             ClipboardPhrasesView()
                 .tabItem {
-                    Label("工具", systemImage: "tray.full")
+                    Label("剪贴板", systemImage: "doc.on.clipboard")
                 }
                 .tag(3)
 

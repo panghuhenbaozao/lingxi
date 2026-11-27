@@ -49,7 +49,7 @@ struct HomeTestView: View {
             .navigationTitle("灵犀")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         openAccount()
                     } label: {
@@ -390,7 +390,7 @@ struct HomeTestView: View {
                             label: "平均速率"
                         )
                         statDivider
-                        statCell(value: "\(stats.streakDays)", unit: "天", label: "连续打卡")
+                        statCell(value: "\(appState.cognitiveStats.vaultNoteCount)", unit: "篇", label: "AI 记忆")
                     }
                 }
             }
@@ -427,55 +427,83 @@ struct HomeTestView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - 3. 常用入口
+    // MARK: - 3. 快捷入口（2×2 呼吸感卡片，一屏直达核心能力）
 
     private var quickEntriesCard: some View {
-        LXCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("常用功能")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                HStack(spacing: 8) {
-                    quickEntry("语音互译", icon: "mic.fill") {
-                        appState.showVoiceTranslator = true
-                    }
-                    quickEntry("截屏识图", icon: "text.viewfinder") {
-                        appState.showScreenshotVision = true
-                    }
-                    quickEntry("AI 智脑", icon: "sparkles") {
-                        selectTab(2)
-                    }
-                    quickEntry("换皮肤", icon: "paintpalette") {
-                        selectTab(1)
-                    }
+        let activePreset = appState.theme.activePreset(isSystemDark: colorScheme == .dark)
+        return VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                quickTile(
+                    icon: "sparkles",
+                    title: "AI 与记忆库",
+                    detail: appState.settings.aiAutopilotMode.shortBadge,
+                    tint: Color(Design.Palette.accent)
+                ) {
+                    selectTab(2)
+                }
+                quickTile(
+                    icon: "paintbrush",
+                    title: "键盘外观",
+                    detail: activePreset.name
+                ) {
+                    selectTab(1)
+                }
+            }
+            HStack(spacing: 10) {
+                quickTile(
+                    icon: "doc.on.clipboard",
+                    title: "剪贴板",
+                    detail: "\(appState.clipboardItems.count) 条"
+                ) {
+                    selectTab(3)
+                }
+                quickTile(
+                    icon: "slider.horizontal.3",
+                    title: "输入设置",
+                    detail: appState.settings.inputScheme.shortBadge
+                ) {
+                    selectTab(4)
                 }
             }
         }
     }
 
-    private func quickEntry(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func quickTile(icon: String, title: String, detail: String, tint: Color = Color(Design.Palette.ink), action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 8) {
-                LXIconTile(icon: icon, size: 44)
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color(Design.Palette.charcoal))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+            HStack(spacing: 12) {
+                LXIconTile(icon: icon, tint: tint, size: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, minHeight: 72)
-            .contentShape(Rectangle())
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(Design.Palette.canvas), in: RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
+                    .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 8, x: 0, y: 2)
+            .contentShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - 4. 试打区
+    // MARK: - 4. 极简试打区
 
     private var sandboxCard: some View {
         LXCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    Text("试打区")
+                    Text("试打")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color(Design.Palette.ink))
                     if !sandboxText.isEmpty {
@@ -484,6 +512,14 @@ struct HomeTestView: View {
                             .foregroundStyle(Color(Design.Palette.stone))
                     }
                     Spacer()
+                    if !sandboxText.isEmpty {
+                        Button("清空") {
+                            sandboxText = ""
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .buttonStyle(.plain)
+                    }
                     if isTestingFocused {
                         Button {
                             isTestingFocused = false
@@ -491,7 +527,7 @@ struct HomeTestView: View {
                             Image(systemName: "keyboard.chevron.compact.down")
                                 .font(.system(size: 15, weight: .medium))
                                 .foregroundStyle(Color(Design.Palette.stone))
-                                .frame(width: 32, height: 32)
+                                .frame(width: 28, height: 28)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -505,11 +541,11 @@ struct HomeTestView: View {
                         .scrollContentBackground(.hidden)
                         .font(.system(size: 16))
                         .padding(10)
-                        .frame(minHeight: 180)
+                        .frame(minHeight: 130)
                         .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
-                                .stroke(isTestingFocused ? Color(Design.Palette.accent).opacity(0.6) : Color.clear, lineWidth: 1)
+                                .stroke(isTestingFocused ? Color(Design.Palette.accent).opacity(0.55) : Color.clear, lineWidth: 1)
                         )
                         .onChange(of: sandboxText) { _ in
                             statsDebounceTask?.cancel()
@@ -523,66 +559,12 @@ struct HomeTestView: View {
                         }
 
                     if sandboxText.isEmpty {
-                        Text("点这里切到「灵犀输入法」试打：\n可试试 v+3d 相对日期、v180cm 换算、/en 斜杠宏或仓式划动。")
+                        Text("点此切到「灵犀输入法」试打…")
                             .font(.subheadline)
                             .foregroundStyle(Color(Design.Palette.muted))
-                            .lineSpacing(3)
                             .padding(.leading, 15)
                             .padding(.top, 18)
                             .allowsHitTesting(false)
-                    }
-                }
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        sandboxTipChip("填离线体检样例") {
-                            sandboxText = "各位好,我们在iPhone16上完成了的的闭环联调!明天3点见"
-                            isTestingFocused = true
-                        }
-                        if !sandboxText.isEmpty {
-                            sandboxTipChip("一键离线排版") {
-                                let fixed = OfflineTextLinter.autoFix(sandboxText)
-                                if fixed != sandboxText {
-                                    sandboxText = fixed
-                                    toast = "已完成离线盘古排版与错字修复"
-                                } else {
-                                    toast = "当前文本排版已很规范"
-                                }
-                            }
-                            sandboxTipChip("一键转繁体") {
-                                sandboxText = ChineseScriptConverter.toTraditional(sandboxText, variant: appState.settings.traditionalVariant)
-                                toast = "已按「\(appState.settings.traditionalVariant.displayName)」转换"
-                            }
-                        }
-                        sandboxTipChip("模拟验证码短信") {
-                            let code = String(Int.random(in: 100000...999999))
-                            let sms = "【灵犀】您的登录验证码为 \(code)，5分钟内有效。"
-                            UIPasteboard.general.string = sms
-                            _ = ClipboardStore.record(sms)
-                            toast = "已复制模拟验证码 \(code)，点输入框即可见顶栏一键填入"
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                if !sandboxText.isEmpty {
-                    HStack(spacing: 8) {
-                        Button {
-                            UIPasteboard.general.string = sandboxText
-                            toast = "已复制试打内容"
-                        } label: {
-                            Label("复制", systemImage: "doc.on.doc")
-                        }
-                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
-
-                        Button {
-                            sandboxText = ""
-                        } label: {
-                            Label("清空", systemImage: "xmark")
-                        }
-                        .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.stone)))
-
-                        Spacer(minLength: 0)
                     }
                 }
             }
@@ -590,17 +572,6 @@ struct HomeTestView: View {
     }
 
     // MARK: - Actions
-
-    private func sandboxTipChip(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Color(Design.Palette.ink))
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(Color(Design.Palette.surface), in: Capsule())
-            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
-            .buttonStyle(.plain)
-    }
 
     private func openAccount() {
         if appState.isCloudAuthenticated {

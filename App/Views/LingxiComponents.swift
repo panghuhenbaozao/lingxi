@@ -4,34 +4,109 @@ import UIKit
 // MARK: - 灵犀 App 共享 UI 组件（极简白设计系统 · DESIGN.md）
 // 所有 App 页面统一使用：图标块 / 胶囊标签 / 可删词条 / 新增输入行 / 空状态 / 胶囊按钮 / 流式换行 / 卡片 / 底部浮动提示条
 
-/// 白底 + hairline 卡片容器（用于非 List 的滚动页）
+/// 极简悬浮卡片容器（柔和环境阴影 + 0.5px 细边 + 充裕留白）
 struct LXCard<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
         content
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
+            .padding(16)
             .background(Color(Design.Palette.canvas), in: RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
                     .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
             )
+            .shadow(color: Color.black.opacity(0.035), radius: 10, x: 0, y: 3)
     }
 }
 
-/// 圆角图标块：浅色底 + 主题色图标
+/// 极简分组卡片容器（替代厚重 List，提供 Apple / Linear 级净白分组视觉）
+struct LXGroupCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(Design.Palette.canvas), in: RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
+                .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.03), radius: 8, x: 0, y: 2)
+    }
+}
+
+/// 极简分区标题（轻字重 + 微字距，不抢主内容视觉）
+struct LXSectionLabel: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color(Design.Palette.stone))
+            .padding(.leading, 6)
+            .padding(.bottom, 2)
+    }
+}
+
+/// 单行精炼入口行（左图标 + 标题 + 右侧短状态值 + 箭头，杜绝大段文字堆砌）
+struct LXCleanRow: View {
+    let icon: String
+    let title: String
+    var value: String? = nil
+    var tint: Color = Color(Design.Palette.ink)
+    var showsChevron: Bool = true
+
+    var body: some View {
+        HStack(spacing: 12) {
+            LXIconTile(icon: icon, tint: tint, size: 30)
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color(Design.Palette.ink))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let value, !value.isEmpty {
+                Text(value)
+                    .font(.footnote)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color(Design.Palette.muted))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .contentShape(Rectangle())
+    }
+}
+
+/// 圆角图标块：克制中性浅底 + 柔和语义色，避免满屏刺眼同色方块
 struct LXIconTile: View {
     let icon: String
-    var tint: Color = Color(Design.Palette.accent)
+    var tint: Color = Color(Design.Palette.ink)
     var size: CGFloat = 32
 
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: size * 0.44, weight: .semibold))
+            .font(.system(size: size * 0.44, weight: .medium))
             .foregroundStyle(tint)
             .frame(width: size, height: size)
-            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
+            .background(
+                tint == Color(Design.Palette.ink)
+                    ? Color(Design.Palette.surface)
+                    : tint.opacity(0.11),
+                in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+            )
             .accessibilityHidden(true)
     }
 }

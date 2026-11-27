@@ -16,7 +16,6 @@ struct DictionarySettingsView: View {
     var body: some View {
         NavigationStack {
             List {
-                // 对标 Apple iOS「设置」顶部第一栏：圆形头像 + Apple Account 卡片
                 Section {
                     if appState.isCloudAuthenticated {
                         NavigationLink {
@@ -24,7 +23,7 @@ struct DictionarySettingsView: View {
                         } label: {
                             appleAccountHeaderRow(
                                 title: appState.cloudConfig.username.isEmpty ? "灵犀账号" : appState.cloudConfig.username,
-                                subtitle: "国内云端在线 · " + (appState.cloudConfig.email.isEmpty ? "E2EE 同步就绪" : appState.cloudConfig.email),
+                                subtitle: appState.cloudConfig.email.isEmpty ? "云端同步已连接" : appState.cloudConfig.email,
                                 isSignedIn: true
                             )
                         }
@@ -34,103 +33,78 @@ struct DictionarySettingsView: View {
                         } label: {
                             HStack {
                                 appleAccountHeaderRow(
-                                    title: appState.isLocalOfflineAccount ? "升级为国内云端账号" : "登录灵犀云端账号",
-                                    subtitle: appState.isLocalOfflineAccount
-                                        ? "当前为本机离线档案 · 点此免代理直连国内云端"
-                                        : "国内免代理直连 · 面容 ID / 邮箱同步词库与外观",
+                                    title: "登录灵犀账号",
+                                    subtitle: "同步个人词库、外观与设置",
                                     isSignedIn: false
                                 )
                                 Image(systemName: "chevron.right")
-                                    .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Color(Design.Palette.muted))
                             }
                         }
                         .buttonStyle(.plain)
-
-                        NavigationLink {
-                            CloudAccountView()
-                        } label: {
-                            HStack(spacing: 12) {
-                                LXIconTile(icon: "laptopcomputer.and.iphone")
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("跨屏剪贴板与自托管服务器")
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(Color(Design.Palette.ink))
-                                    Text("无需登录也能用 6 位码接力")
-                                        .font(.caption)
-                                        .foregroundStyle(Color(Design.Palette.stone))
-                                        .lineLimit(1)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
                     }
                 }
 
-                Section("核心输入") {
+                Section("输入") {
+                    settingsLink(icon: "sparkles", tint: Design.Palette.accent, title: "AI 自动托管",
+                                 value: appState.settings.aiAutopilotMode.shortBadge) {
+                        AIAutopilotHubView()
+                    }
                     settingsLink(icon: "keyboard", tint: Design.Palette.ink, title: "输入方案与布局",
-                                 subtitle: appState.settings.inputScheme.displayName + " · " + appState.settings.layoutMode.displayName) {
+                                 value: "\(appState.settings.inputScheme.shortBadge) · \(appState.settings.layoutMode.displayName)") {
                         SchemeLayoutSettingsView()
                     }
-                    settingsLink(icon: "hand.tap", tint: Design.Palette.ink, title: "键盘手感与手势",
-                                 subtitle: "震动 " + appState.settings.hapticStrength.displayName + (appState.settings.keySoundEnabled ? " · 音效开" : " · 音效关") + " · 26键映射") {
+                    settingsLink(icon: "hand.tap", tint: Design.Palette.ink, title: "手感与划动",
+                                 value: appState.settings.hapticStrength.displayName) {
                         KeyboardFeelSettingsView()
                     }
                     settingsLink(icon: "rectangle.3.offgrid", tint: Design.Palette.ink, title: "工具栏与候选栏",
-                                 subtitle: "按钮排序 · 候选栏高度与字号") {
+                                 value: "\(Int(appState.settings.candidateFontSize))pt") {
                         ToolbarSettingsView()
                     }
                 }
 
-                Section("智能与词库") {
+                Section("纠错与词库") {
                     settingsLink(icon: "wand.and.stars", tint: Design.Palette.ink, title: "智能纠错与联想",
-                                 subtitle: "纠错 · 标点 · 剪贴板预览") {
+                                 value: appState.settings.typoCorrectionEnabled ? "已开启" : "已关闭") {
                         SmartInputSettingsView()
                     }
                     settingsLink(icon: "waveform", tint: Design.Palette.ink, title: "模糊音",
-                                 subtitle: appState.settings.fuzzy.enabledCount > 0
-                                    ? "已开启 \(appState.settings.fuzzy.enabledCount) 组"
-                                    : "未开启 · 16 组可选") {
+                                 value: appState.settings.fuzzy.enabledCount > 0 ? "\(appState.settings.fuzzy.enabledCount) 组" : "关闭") {
                         FuzzyPinyinSettingsView()
                     }
-                    settingsLink(
-                        icon: "book.closed",
-                        tint: Design.Palette.accent,
-                        title: "词库与实时地标",
-                        subtitle: lexiconAndLocationSubtitle
-                    ) {
+                    settingsLink(icon: "book.closed", tint: Design.Palette.ink, title: "词库与地标",
+                                 value: "\(appState.userWords.count) 词") {
                         LexiconAndLocationHubView()
                     }
                 }
 
                 Section {
-                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计与手型热力图",
-                                 subtitle: "今日 \(appState.typingStatsSummary.todayChars) 字 · 近 30 天趋势与热区") {
+                    settingsLink(icon: "chart.bar", tint: Design.Palette.ink, title: "打字统计",
+                                 value: "今日 \(appState.typingStatsSummary.todayChars) 字") {
                         TypingStatsView()
                     }
-                    settingsLink(icon: "icloud.and.arrow.up", tint: Design.Palette.ink, title: "云同步与加密备份",
-                                 subtitle: syncAndBackupSubtitle) {
+                    settingsLink(icon: "icloud.and.arrow.up", tint: Design.Palette.ink, title: "同步与备份",
+                                 value: appState.isCloudAuthenticated ? "云端" : "本地") {
                         DataSyncAndBackupHubView()
                     }
-                    settingsLink(icon: "textformat.abc", tint: Design.Palette.ink, title: "趣味英文字体",
-                                 subtitle: stylishFontName) {
-                        StylishFontSettingsView()
+                    settingsLink(icon: "lock.shield", tint: Design.Palette.ink, title: "本地加密保险箱",
+                                 value: appState.secureVaultItems.isEmpty ? "空" : "\(appState.secureVaultItems.count) 条") {
+                        SecureVaultSubView()
                     }
-                    settingsLink(icon: "stethoscope", tint: Design.Palette.ink, title: "使用指南与共享诊断",
-                                 subtitle: AppGroup.isAvailable ? "本机共享已连通 · 8 条进阶技巧" : "免费侧载隔离 · 一键云桥接与技巧") {
+                    settingsLink(icon: "stethoscope", tint: Design.Palette.ink, title: "指南与诊断",
+                                 value: AppGroup.isAvailable ? "正常" : "侧载") {
                         UsageGuideAndDiagnosticsView()
                     }
                 } header: {
-                    Text("数据、同步与诊断")
+                    Text("数据与隐私")
                 } footer: {
-                    VStack(spacing: 4) {
-                        Text("灵犀输入法 \(appVersionText)")
-                        Text("键盘永不联网 · 未登录时数据不离开设备")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(Color(Design.Palette.stone))
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 20)
+                    Text("灵犀输入法 \(appVersionText) · 本地优先 · 隐私隔离")
+                        .font(.caption2)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 16)
                 }
             }
             .listStyle(.insetGrouped)
@@ -202,23 +176,23 @@ struct DictionarySettingsView: View {
         return "上次备份 " + Date(timeIntervalSince1970: lastBackupExportAt).formatted(.relative(presentation: .named))
     }
 
-    private func settingsLink<Destination: View>(icon: String, tint: UIColor, title: String, subtitle: String, @ViewBuilder destination: () -> Destination) -> some View {
+    private func settingsLink<Destination: View>(icon: String, tint: UIColor, title: String, value: String, @ViewBuilder destination: () -> Destination) -> some View {
         NavigationLink {
             destination()
         } label: {
             HStack(spacing: 12) {
-                LXIconTile(icon: icon, tint: Color(Design.Palette.accent))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color(Design.Palette.ink))
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(Color(Design.Palette.stone))
-                        .lineLimit(1)
-                }
+                LXIconTile(icon: icon, tint: Color(tint), size: 30)
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(value)
+                    .font(.footnote)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 3)
         }
     }
 }

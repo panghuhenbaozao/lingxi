@@ -77,11 +77,11 @@ struct ThemeStudioView: View {
         case .followSystem:
             let dayName = KeyboardThemePreset.find(id: appState.theme.lightThemeID).name
             let nightName = KeyboardThemePreset.find(id: appState.theme.darkThemeID).name
-            return "跟随系统：日间「\(dayName)」· 夜间「\(nightName)」"
+            return "日间 \(dayName) · 夜间 \(nightName)"
         case .alwaysLight:
-            return "已锁定浅色「\(activePreset.name)」，切换任意 App 不变色"
+            return "锁定浅色 · \(activePreset.name)"
         case .alwaysDark:
-            return "已锁定深色「\(activePreset.name)」，切换任意 App 不变色"
+            return "锁定深色 · \(activePreset.name)"
         }
     }
 
@@ -256,13 +256,17 @@ struct ThemeStudioView: View {
 
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("✨ AI")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .padding(.horizontal, 9)
-                    .frame(height: 26)
-                    .background(Color(hexColor: preset.accentFill).opacity(0.18))
-                    .foregroundStyle(Color(hexColor: preset.candidateHighlight))
-                    .clipShape(Capsule())
+                HStack(spacing: 3) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("AI")
+                        .font(.system(size: 11.5, weight: .semibold))
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Color(hexColor: preset.accentFill).opacity(0.18))
+                .foregroundStyle(Color(hexColor: preset.candidateHighlight))
+                .clipShape(Capsule())
 
                 Text("灵犀输入法")
                     .font(.system(size: 13.5, weight: .semibold))
@@ -488,77 +492,40 @@ struct ThemeStudioView: View {
     // MARK: - 4. L2 进阶外观子页入口（自由调色 / 壁纸几何 / JSON 分享）
 
     private var advancedLinksCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("进阶定制", systemImage: "slider.horizontal.3")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color(Design.Palette.slate))
-                .padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 8) {
+            LXSectionLabel("进阶定制")
 
-            VStack(spacing: 0) {
+            LXGroupCard {
                 NavigationLink {
                     ThemeColorPaletteView()
                 } label: {
-                    subpageRow(
+                    LXCleanRow(
                         icon: "eyedropper.halffull",
-                        title: "自由调色板",
-                        subtitle: "日间、夜间两套颜色分别调整",
-                        badge: appState.theme.hasCustomColorOverrides ? "已自定义" : nil
+                        title: "自由调色",
+                        value: appState.theme.hasCustomColorOverrides ? "已自定义" : "默认"
                     )
                 }
                 Divider().padding(.leading, 58)
                 NavigationLink {
                     ThemeWallpaperAndKeyDetailView()
                 } label: {
-                    subpageRow(
+                    LXCleanRow(
                         icon: "photo.on.rectangle.angled",
-                        title: "壁纸与键帽细节",
-                        subtitle: "相册壁纸、圆角、透明度与阴影",
-                        badge: appState.customBgPreview != nil ? "已设壁纸" : "圆角 \(Int(appState.theme.keyCornerRadius))pt"
+                        title: "壁纸与键帽",
+                        value: appState.customBgPreview != nil ? "已设壁纸" : "圆角 \(Int(appState.theme.keyCornerRadius))pt"
                     )
                 }
                 Divider().padding(.leading, 58)
                 NavigationLink {
                     ThemeCommunityShareView()
                 } label: {
-                    subpageRow(
-                        icon: "square.and.arrow.up.on.square",
-                        title: "皮肤分享与导入",
-                        subtitle: "导出 JSON 发给朋友，或导入别人的皮肤",
-                        badge: nil
+                    LXCleanRow(
+                        icon: "square.and.arrow.up",
+                        title: "皮肤导入导出"
                     )
                 }
             }
-            .background(Color(Design.Palette.canvas), in: RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                    .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
-            )
         }
-    }
-
-    private func subpageRow(icon: String, title: String, subtitle: String, badge: String?) -> some View {
-        HStack(spacing: 12) {
-            LXIconTile(icon: icon)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(Color(Design.Palette.stone))
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            if let badge {
-                LXTag(text: badge)
-            }
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
     }
 }
 

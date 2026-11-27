@@ -35,25 +35,25 @@ extension UIColor {
 /// 键盘扩展不引用本枚举（只用 `KeyboardTheme`），所以暗色映射不会把键盘卡面变黑。
 enum Design {
     enum Palette {
-        static let canvas = dynamic(light: "#FFFFFF", dark: "#1C1C1E")
-        static let canvasTop = dynamic(light: "#FFFFFF", dark: "#1C1C1E")
-        static let canvasBottom = dynamic(light: "#FFFFFF", dark: "#1C1C1E")
-        static let surface = dynamic(light: "#F7F8FA", dark: "#2C2C2E")
-        static let surfaceSoft = dynamic(light: "#F2F3F5", dark: "#242426")
-        static let hairline = dynamic(light: "#E5E7EB", dark: "#3A3A3C")
-        static let hairlineSoft = dynamic(light: "#EAECF0", dark: "#333335")
-        static let ink = dynamic(light: "#0A0A0A", dark: "#F2F2F7")
+        static let canvas = dynamic(light: "#FFFFFF", dark: "#161618")
+        static let canvasTop = dynamic(light: "#FFFFFF", dark: "#161618")
+        static let canvasBottom = dynamic(light: "#FFFFFF", dark: "#161618")
+        static let surface = dynamic(light: "#F4F5F7", dark: "#222226")
+        static let surfaceSoft = dynamic(light: "#ECEEF2", dark: "#1D1D21")
+        static let hairline = dynamic(light: "#E8EAEE", dark: "#2C2C31")
+        static let hairlineSoft = dynamic(light: "#F0F1F4", dark: "#252529")
+        static let ink = dynamic(light: "#111214", dark: "#F5F5F7")
         static let inkStrong = dynamic(light: "#000000", dark: "#FFFFFF")
-        static let charcoal = dynamic(light: "#222222", dark: "#E5E5EA")
-        static let slate = dynamic(light: "#45515E", dark: "#C7C7CC")
-        static let steel = dynamic(light: "#5F5F5F", dark: "#AEAEB2")
-        static let stone = dynamic(light: "#6E6E73", dark: "#98989D")
-        static let muted = dynamic(light: "#A8AAB2", dark: "#6C6C70")
-        static let success = dynamic(light: "#17976A", dark: "#34C77B")
-        static let error = dynamic(light: "#C94A4A", dark: "#FF6B6B")
-        static let warning = dynamic(light: "#D97706", dark: "#FFB340")
-        static let accent = dynamic(light: "#007AFF", dark: "#0A84FF")
-        static let accentSoft = dynamic(light: "#EBF4FF", dark: "#172A45")
+        static let charcoal = dynamic(light: "#1F2328", dark: "#E5E5EA")
+        static let slate = dynamic(light: "#4B5563", dark: "#C7C7CC")
+        static let steel = dynamic(light: "#5F6672", dark: "#AEAEB2")
+        static let stone = dynamic(light: "#6B7280", dark: "#9A9AA3")
+        static let muted = dynamic(light: "#9CA3AF", dark: "#63636B")
+        static let success = dynamic(light: "#15803D", dark: "#34D399")
+        static let error = dynamic(light: "#DC2626", dark: "#F87171")
+        static let warning = dynamic(light: "#D97706", dark: "#FBBF24")
+        static let accent = dynamic(light: "#2F5BFF", dark: "#5B82FF")
+        static let accentSoft = dynamic(light: "#EEF2FF", dark: "#1A2444")
         static let accentText = UIColor(hex: "#FFFFFF")
         static let keyPressed = dynamic(light: "#E5E7EB", dark: "#3A3A3C")
 
@@ -68,9 +68,9 @@ enum Design {
     }
 
     enum Radius {
-        static let card: CGFloat = 16
+        static let card: CGFloat = 18
         static let cardSmall: CGFloat = 12
-        static let input: CGFloat = 8
+        static let input: CGFloat = 10
         static let full: CGFloat = 9999
     }
 

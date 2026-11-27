@@ -161,21 +161,14 @@ struct ObsidianVaultGraphView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("向记忆库投入一段个人习惯、职业背景或沟通原则（可选）：")
-                        .font(.caption)
-                        .foregroundStyle(Color(Design.Palette.stone))
                     TextEditor(text: $inboxDraft)
                         .font(.footnote)
-                        .frame(height: 76)
+                        .frame(height: 68)
                         .padding(6)
                         .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color(Design.Palette.hairline), lineWidth: 0.6)
-                        )
                         .overlay(alignment: .topLeading) {
                             if inboxDraft.isEmpty {
-                                Text("例如：我是 iOS 开发者，给老板汇报喜欢先给结论再分条列数据，不要感叹号和官腔；平时常和设计同学对评审…")
+                                Text("可选：写两句个人习惯或偏好，让 AI 自动拆解入库…")
                                     .font(.caption)
                                     .foregroundStyle(Color(Design.Palette.muted))
                                     .padding(.horizontal, 11)
@@ -200,10 +193,10 @@ struct ObsidianVaultGraphView: View {
                         HStack(spacing: 5) {
                             if appState.isRunningObsidianLearn {
                                 ProgressView().controlSize(.mini).tint(Color.white)
-                                Text("API 提炼双链中…")
+                                Text("提炼中…")
                             } else {
                                 Image(systemName: "wand.and.stars")
-                                Text(inboxDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "用我的 API 全库自学习演化" : "用我的 API 拆解入库并建双链")
+                                Text(inboxDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "API 自学习" : "拆解并建双链")
                             }
                         }
                     }
@@ -217,7 +210,7 @@ struct ObsidianVaultGraphView: View {
                     } label: {
                         Label("导出 .md", systemImage: "square.and.arrow.up")
                     }
-                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.ink)))
                     .background(
                         Color.clear.fileExporter(
                             isPresented: $showExporter,
@@ -227,7 +220,7 @@ struct ObsidianVaultGraphView: View {
                         ) { result in
                             switch result {
                             case .success:
-                                showFeedback("已导出 Obsidian 兼容 Markdown 双链知识库（含 YAML 与 log.md）")
+                                showFeedback("已导出 Obsidian .md 双链知识库")
                             case .failure(let err):
                                 let ns = err as NSError
                                 if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
@@ -255,10 +248,6 @@ struct ObsidianVaultGraphView: View {
                 }
             }
             .padding(.vertical, 4)
-        } header: {
-            Text("LLM Wiki · 自主提炼与个性化")
-        } footer: {
-            Text("参考 Obsidian + Zettelkasten 理念：每次使用你的 API 深度提炼，AI 会把打字习惯、词汇领域、历史对话与收件箱沉淀为原子常青笔记并用 [[双链]] 互联；日常采纳 6 次 AI 输出后也会在后台静默进化。")
         }
     }
 
@@ -512,7 +501,20 @@ private struct ObsidianInteractiveGraphCanvas: View {
             }()
 
             ZStack {
-                Canvas { ctx, _ in
+                Canvas { ctx, size in
+                    // 极简点阵画布背景（致敬 Obsidian / Linear Canvas）
+                    let step: CGFloat = 20
+                    let dotColor = Color(Design.Palette.hairline).opacity(0.75)
+                    var y: CGFloat = step
+                    while y < size.height {
+                        var x: CGFloat = step
+                        while x < size.width {
+                            let rect = CGRect(x: x - 0.8, y: y - 0.8, width: 1.6, height: 1.6)
+                            ctx.fill(Path(ellipseIn: rect), with: .color(dotColor))
+                            x += step
+                        }
+                        y += step
+                    }
                     for edge in links {
                         guard let p1 = positions[edge.fromSlug],
                               let p2 = positions[edge.toSlug] else { continue }
