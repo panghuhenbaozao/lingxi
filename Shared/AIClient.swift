@@ -1058,9 +1058,18 @@ final class AIClient {
         if !habitSuffix.isEmpty {
             result += "\n\(habitSuffix)"
         }
-        let cognitiveBlock = AICognitiveMemoryDB.shared.promptContextBlock(limit: 8)
+        let cognitiveBlock = AICognitiveMemoryDB.shared.promptContextBlock(limit: 6)
         if !cognitiveBlock.isEmpty {
             result += "\n【灵犀 AI 本地 SQLite 长期认知记忆库（懂你档案）】\n\(cognitiveBlock)"
+        }
+        let obsidianGraphBlock = ObsidianMemoryVaultEngine.recallPromptContextBlock(
+            query: userPrompt,
+            scene: config.activeScenePersona.shortTitle,
+            db: .shared,
+            limit: 6
+        )
+        if !obsidianGraphBlock.isEmpty {
+            result += "\n【Obsidian 双链知识图谱按需召回记忆（2-Hop Graph-RAG）】\n\(obsidianGraphBlock)"
         }
         if LingxiSettings.load().aiGeoContextEnabled {
             let geoSuffix = GeoLocationContext.load().aiTimeLocationPromptSuffix()

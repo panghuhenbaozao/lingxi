@@ -38,8 +38,8 @@
 - **16 键专业光标与排版编辑台 (`TextEditingPadView`)**：十字方向键、行首/行尾、向后/向前删、按词删、撤销、隐私安全粘贴、一键离线排版、一键离线脱敏、简繁切换。
 - **270+ 词条 Emoji 实时联想 + 语义快筛栏**：全拼/双拼/九键/五笔均支持句尾词 Emoji 联想，键盘表情面板新增 **全部 / 情绪 / 手势 / 职场 / 美食 / 祝福 / 动物** 一键快筛条。
 
-### 4. 三协议流式 AI 写作中枢（AI 全权托管学习库 + 10 大专业工作室 + 原生 PDF 知识卡）
-- **🧠 AI 全权托管与专属本地 SQLite 认知学习数据库 (`AICognitiveMemoryDB` & `AIAutopilotController` & `AIAutopilotHubView`)**：主 App 与键盘扩展共享本地加密保护 `ai_cognitive_memory.sqlite`（6 张关系表持续沉淀打字行为观察、高频自学习词领域、长期认知记忆与透明决策审计日志，密码框与无痕模式零采集）；默认开启「AI 全权自动托管」，由 0ms 本机习惯引擎与用户大模型双驱动，在 26 项安全打字开关白名单内按你的习惯自动开启纠错、动态热区、盘古空格、草稿防丢与易混模糊音（每一项变更均可 1 键撤回），并将沉淀的专属认知记忆自动注入每一次 AI 回复，越用越懂你。
+### 4. 三协议流式 AI 写作中枢（Obsidian 风格双链自学习记忆库 + AI 全权托管 + 10 大专业工作室）
+- **🕸️ Obsidian 风格「LLM Wiki」双链自学习记忆库与 AI 全权托管 (`AICognitiveMemoryDB` + `ObsidianMemoryVaultEngine` + `AIAutopilotController` + `ObsidianVaultGraphView`)**：参考 Obsidian + Zettelkasten + A-MEM 架构，在主 App 与键盘扩展共享的本地加密 SQLite 库（`ai_cognitive_memory.sqlite`）中持久化原子常青笔记（`index / wiki / persona / habits / inbox`）、双向 `[[Wikilinks]]` 知识图谱与 `log.md` 演化日志；使用你填写的任意大模型 API 自动将打字习惯、高频词汇、对话偏好与自述拆解为带 YAML Frontmatter 的双链笔记（并可在日常采纳 AI 输出后静默自进化），每次 AI 调用实时执行 **2-Hop 图谱 Graph-RAG 按需召回 + Ebbinghaus 记忆强化**，支持交互式关系图谱点选跳转与一键导出 Obsidian `.md` 整库；同时在 26 项安全打字功能白名单内全权托管自动开启纠错、动态热区、盘古空格、草稿防丢与易混模糊音（全透明审计、支持 1 键撤回，密码框与无痕模式零入库）。
 - **三协议原生直连 + 自动容灾切换 + 隐私脱敏护盾**：支持 **Google Gemini**（`store=false`）、**OpenAI 兼容接口**（DeepSeek / Qwen / OpenAI / 反代）与 **Anthropic Claude** 原生协议；支持 402/429/5xx 零正文瞬时自动切备用档案，发往外部模型前自动脱敏手机号/身份证/银行卡/密钥并流式无感还原。
 - **10 大 AI 专业工作室**：
   - **多话题富文本工作台 (`AIWorkbenchSheet`)**：Cherry Studio 级原生 Markdown 渲染（标题、要点、引用、带一键复制的围栏代码块）+ 策略参谋 + 模型盲测竞技场。

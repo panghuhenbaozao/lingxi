@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 struct AISettingsView: View {
     private enum StudioDestination: Hashable {
         case autopilotHub
+        case obsidianVault
         case toneAndDiff
         case writingStudio
         case translationStudio
@@ -245,6 +246,8 @@ struct AISettingsView: View {
         switch dest {
         case .autopilotHub:
             AIAutopilotHubView()
+        case .obsidianVault:
+            ObsidianVaultGraphView()
         case .toneAndDiff:
             AIToneAndDiffStudioView { draft in openWorkbench(tab: 0, draft: draft) }
         case .writingStudio:
@@ -306,7 +309,7 @@ struct AISettingsView: View {
                         }
                         Text(
                             stats.personaDigest.isEmpty
-                                ? "专属 SQLite 学习库 · \(stats.totalObservations) 次习惯观察 · \(stats.memoryCount) 条记忆 · \(stats.activeDecisionCount) 项已自动开启"
+                                ? "Obsidian 双链记忆库 · \(stats.vaultNoteCount) 笔记 · \(stats.vaultLinkCount) 双链 · \(stats.activeDecisionCount) 项已自动开启"
                                 : stats.personaDigest
                         )
                         .font(.caption)
@@ -326,27 +329,27 @@ struct AISettingsView: View {
             HStack(spacing: 8) {
                 Button {
                     Task {
-                        let res = await appState.runDeepAIAutopilot()
+                        let res = await appState.runObsidianAPISelfLearning()
                         showToast(res.summary)
                     }
                 } label: {
                     HStack(spacing: 5) {
-                        if appState.isRunningAutopilot {
+                        if appState.isRunningObsidianLearn || appState.isRunningAutopilot {
                             ProgressView().controlSize(.mini).tint(Color.white)
-                            Text("AI 正在分析数据库…")
+                            Text("API 自学习演化中…")
                         } else {
                             Image(systemName: "sparkles")
-                            Text("立即 AI 托管调优")
+                            Text("API 自学习与托管")
                         }
                     }
                 }
                 .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
-                .disabled(appState.isRunningAutopilot || mode == .off)
+                .disabled(appState.isRunningObsidianLearn || appState.isRunningAutopilot || mode == .off)
 
                 Button {
-                    pushedDestination = .autopilotHub
+                    pushedDestination = .obsidianVault
                 } label: {
-                    Label("SQLite 库", systemImage: "externaldrive.fill")
+                    Label("双链图谱", systemImage: "circle.hexagongrid")
                 }
                 .buttonStyle(LXCapsuleButtonStyle(prominent: false))
             }
@@ -639,13 +642,11 @@ struct AISettingsView: View {
                             HStack(spacing: 8) {
                                 Button {
                                     UIPasteboard.general.string = quickOutput
-                                    if !appState.settings.incognitoModeEnabled {
-                                        AICognitiveMemoryDB.shared.recordAIInteraction(
-                                            featureTag: quickResultLabel.isEmpty ? quickAction.rawValue : quickResultLabel,
-                                            scene: appState.aiConfig.activeScenePersona.rawValue,
-                                            outcome: "copied"
-                                        )
-                                    }
+                                    appState.recordAcceptedAIInteractionAndMaybeLearn(
+                                        featureTag: quickResultLabel.isEmpty ? quickAction.rawValue : quickResultLabel,
+                                        scene: appState.aiConfig.activeScenePersona.rawValue,
+                                        outcome: "copied"
+                                    )
                                     showToast("已复制成品")
                                 } label: {
                                     Label("复制", systemImage: "doc.on.doc")

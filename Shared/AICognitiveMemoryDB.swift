@@ -145,6 +145,129 @@ struct TypingObservationSample: Sendable {
     }
 }
 
+/// Obsidian 风格原子记忆笔记所属目录（对标 Karpathy LLM Wiki / Zettelkasten 5 分区）
+enum VaultNoteFolder: String, Codable, CaseIterable, Identifiable, Sendable {
+    case index = "index"
+    case wiki = "wiki"
+    case persona = "persona"
+    case habits = "habits"
+    case inbox = "inbox"
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .index: return "总览索引"
+        case .wiki: return "常青知识"
+        case .persona: return "人设偏好"
+        case .habits: return "打字习惯"
+        case .inbox: return "原始收件箱"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .index: return "map.fill"
+        case .wiki: return "doc.text.fill"
+        case .persona: return "person.crop.circle.fill"
+        case .habits: return "keyboard"
+        case .inbox: return "tray.and.arrow.down.fill"
+        }
+    }
+}
+
+/// Obsidian 风格原子记忆笔记（含 YAML Frontmatter 元数据、[[双向链接]] 正文与 Ebbinghaus 记忆强度）
+struct ObsidianVaultNote: Identifiable, Codable, Equatable, Sendable {
+    let id: String
+    let slug: String
+    var title: String
+    var folder: VaultNoteFolder
+    var summary: String
+    var bodyMarkdown: String
+    var tags: [String]
+    var strength: Double
+    var recallCount: Int
+    var source: String // "ai_llm" | "local_auto" | "user_manual" | "auto_reflect"
+    var isPinned: Bool
+    let createdAt: Int
+    var updatedAt: Int
+    var lastRecalledAt: Int
+
+    var sourceDisplayName: String {
+        switch source {
+        case "ai_llm": return "API 深度提炼"
+        case "auto_reflect": return "交互自学习"
+        case "user_manual": return "手动笔记"
+        default: return "本地习惯引擎"
+        }
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        slug: String? = nil,
+        title: String,
+        folder: VaultNoteFolder = .wiki,
+        summary: String,
+        bodyMarkdown: String,
+        tags: [String] = [],
+        strength: Double = 0.72,
+        recallCount: Int = 0,
+        source: String = "ai_llm",
+        isPinned: Bool = false,
+        createdAt: Int = Int(Date().timeIntervalSince1970),
+        updatedAt: Int = Int(Date().timeIntervalSince1970),
+        lastRecalledAt: Int = 0
+    ) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = id
+        self.slug = slug ?? AICognitiveMemoryDB.normalizeSlug(cleanTitle)
+        self.title = cleanTitle
+        self.folder = folder
+        self.summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.bodyMarkdown = bodyMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.tags = tags
+        self.strength = min(1.0, max(0.1, strength))
+        self.recallCount = max(0, recallCount)
+        self.source = source
+        self.isPinned = isPinned
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastRecalledAt = lastRecalledAt
+    }
+}
+
+/// Obsidian 双向 [[Wikilink]] 知识图谱连边
+struct VaultLinkEdge: Identifiable, Codable, Equatable, Sendable {
+    var id: String { "\(fromSlug)->\(toSlug)" }
+    let fromSlug: String
+    let toSlug: String
+    let relation: String // "related" | "causes" | "prefers" | "part_of" | "resolves"
+    let weight: Double
+    let updatedAt: Int
+}
+
+/// Obsidian `log.md` 追加式 AI 自学习演化日志
+struct VaultEvolutionLogEntry: Identifiable, Codable, Equatable, Sendable {
+    let id: Int
+    let createdAt: Int
+    let action: String
+    let noteTitle: String
+    let detail: String
+    let source: String
+
+    var actionDisplayName: String {
+        switch action {
+        case "distill": return "提炼笔记"
+        case "link": return "建立双链"
+        case "merge": return "融合去重"
+        case "strengthen": return "记忆强化"
+        case "autopilot_tune": return "功能调优"
+        case "user_teach": return "手动录入"
+        default: return "记忆演化"
+        }
+    }
+}
+
 /// 本地 SQLite 认知数据库汇总指标（供 UI 展示与 AI 托管决策使用）
 struct CognitiveDBStats: Equatable, Sendable {
     let dbFileSizeBytes: Int64
@@ -165,6 +288,9 @@ struct CognitiveDBStats: Equatable, Sendable {
     let activeDecisionCount: Int
     let vocabCount: Int
     let interactionCount: Int
+    let vaultNoteCount: Int
+    let vaultLinkCount: Int
+    let vaultEvolutionCount: Int
     let fuzzyConfusionCounts: [String: Int]
     let nightSessionRatio: Double
     let lastAutopilotRunAt: Int
@@ -192,7 +318,8 @@ struct CognitiveDBStats: Equatable, Sendable {
         totalBackspaces: 0, totalTypoFixes: 0, totalEnglishWords: 0, totalDigitMix: 0,
         totalEmojiPicks: 0, totalBracketPairs: 0, totalLongDrafts: 0, totalVModeUses: 0,
         totalGlideWords: 0, memoryCount: 0, decisionCount: 0, activeDecisionCount: 0,
-        vocabCount: 0, interactionCount: 0, fuzzyConfusionCounts: [:], nightSessionRatio: 0,
+        vocabCount: 0, interactionCount: 0, vaultNoteCount: 0, vaultLinkCount: 0, vaultEvolutionCount: 0,
+        fuzzyConfusionCounts: [:], nightSessionRatio: 0,
         lastAutopilotRunAt: 0, personaDigest: ""
     )
 }
@@ -338,6 +465,62 @@ final class AICognitiveMemoryDB {
             updated_at INTEGER NOT NULL
         );
         """)
+
+        // Obsidian 风格自学习双链记忆库三表（原子笔记 + 双向 [[Wikilink]] 边 + log.md 演化日志）
+        execUnsafe("""
+        CREATE TABLE IF NOT EXISTS vault_notes (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            folder TEXT NOT NULL DEFAULT 'wiki',
+            summary TEXT NOT NULL DEFAULT '',
+            body_markdown TEXT NOT NULL DEFAULT '',
+            tags_csv TEXT NOT NULL DEFAULT '',
+            strength REAL NOT NULL DEFAULT 0.72,
+            recall_count INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'ai_llm',
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_recalled_at INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+        execUnsafe("CREATE INDEX IF NOT EXISTS idx_vault_notes_folder ON vault_notes(folder, is_pinned DESC, strength DESC);")
+
+        execUnsafe("""
+        CREATE TABLE IF NOT EXISTS vault_links (
+            from_slug TEXT NOT NULL,
+            to_slug TEXT NOT NULL,
+            relation TEXT NOT NULL DEFAULT 'related',
+            weight REAL NOT NULL DEFAULT 1.0,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (from_slug, to_slug)
+        );
+        """)
+        execUnsafe("CREATE INDEX IF NOT EXISTS idx_vault_links_to ON vault_links(to_slug);")
+
+        execUnsafe("""
+        CREATE TABLE IF NOT EXISTS vault_evolution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            note_title TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'ai_llm'
+        );
+        """)
+    }
+
+    static func normalizeSlug(_ raw: String) -> String {
+        let stripped = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "[[", with: "")
+            .replacingOccurrences(of: "]]", with: "")
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "\\", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let collapsed = stripped.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return collapsed.lowercased()
     }
 
     private func execUnsafe(_ sql: String) {
@@ -748,6 +931,9 @@ final class AICognitiveMemoryDB {
         let activeDecCount = scalarCountUnsafe("SELECT COUNT(*) FROM autopilot_decisions WHERE reverted = 0;")
         let vocCount = scalarCountUnsafe("SELECT COUNT(*) FROM vocab_learning_log;")
         let interCount = scalarCountUnsafe("SELECT COUNT(*) FROM ai_interaction_episodes;")
+        let noteCount = scalarCountUnsafe("SELECT COUNT(*) FROM vault_notes;")
+        let linkCount = scalarCountUnsafe("SELECT COUNT(*) FROM vault_links;")
+        let evoCount = scalarCountUnsafe("SELECT COUNT(*) FROM vault_evolution_log;")
         let lastRun = Int(getMeta("last_autopilot_run_at") ?? "0") ?? 0
         let digest = getMeta("persona_digest") ?? ""
         let nightRatio = obsCount > 0 ? Double(nightObs) / Double(obsCount) : 0
@@ -771,6 +957,9 @@ final class AICognitiveMemoryDB {
             activeDecisionCount: activeDecCount,
             vocabCount: vocCount,
             interactionCount: interCount,
+            vaultNoteCount: noteCount,
+            vaultLinkCount: linkCount,
+            vaultEvolutionCount: evoCount,
             fuzzyConfusionCounts: confMap,
             nightSessionRatio: nightRatio,
             lastAutopilotRunAt: lastRun,
@@ -806,7 +995,7 @@ final class AICognitiveMemoryDB {
         return block
     }
 
-    /// 导出完整认知数据库为可读 JSON（不含任何敏感密码/密钥）
+    /// 导出完整认知数据库与 Obsidian 双链记忆库为可读 JSON（不含任何敏感密码/密钥）
     func exportJSONSummary() -> Data? {
         struct ExportSnapshot: Codable {
             let exportedAt: Int
@@ -814,6 +1003,9 @@ final class AICognitiveMemoryDB {
             let memories: [CognitiveMemoryFact]
             let decisions: [AutopilotDecisionRecord]
             let topVocab: [VocabLearningRecord]
+            let vaultNotes: [ObsidianVaultNote]
+            let vaultLinks: [VaultLinkEdge]
+            let evolutionLogs: [VaultEvolutionLogEntry]
         }
         let stats = loadStats()
         let snap = ExportSnapshot(
@@ -821,11 +1013,396 @@ final class AICognitiveMemoryDB {
             personaDigest: stats.personaDigest,
             memories: fetchMemories(limit: 120),
             decisions: fetchDecisions(limit: 100),
-            topVocab: fetchTopVocab(limit: 80)
+            topVocab: fetchTopVocab(limit: 80),
+            vaultNotes: fetchVaultNotes(limit: 160),
+            vaultLinks: fetchAllVaultLinks(limit: 400),
+            evolutionLogs: fetchEvolutionLogs(limit: 80)
         )
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try? enc.encode(snap)
+    }
+
+    // MARK: - 6. Obsidian 双链知识图谱记忆库 CRUD（vault_notes / vault_links / vault_evolution_log）
+
+    func upsertVaultNote(_ note: ObsidianVaultNote, extraLinks: [(toTitle: String, relation: String)] = []) {
+        let cleanTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSlug = Self.normalizeSlug(note.slug.isEmpty ? cleanTitle : note.slug)
+        guard !cleanTitle.isEmpty, !cleanSlug.isEmpty else { return }
+
+        // 自动融合正文中的 #标签 与显式 tags
+        let inlineTags = ObsidianMemoryVaultEngine.parseHashtags(in: note.bodyMarkdown)
+        var mergedTags: [String] = []
+        var seenTags = Set<String>()
+        for t in (note.tags + inlineTags) {
+            let cleaned = t.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
+            if !cleaned.isEmpty, seenTags.insert(cleaned).inserted {
+                mergedTags.append(cleaned)
+            }
+        }
+        let tagsCSV = mergedTags.prefix(10).joined(separator: ",")
+        let nowTs = Int(Date().timeIntervalSince1970)
+
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return }
+
+        let sql = """
+        INSERT INTO vault_notes (
+            id, slug, title, folder, summary, body_markdown, tags_csv,
+            strength, recall_count, source, is_pinned, created_at, updated_at, last_recalled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+            title = excluded.title,
+            folder = excluded.folder,
+            summary = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE vault_notes.summary END,
+            body_markdown = excluded.body_markdown,
+            tags_csv = excluded.tags_csv,
+            strength = MIN(1.0, MAX(vault_notes.strength, excluded.strength) + 0.04),
+            source = CASE WHEN vault_notes.source = 'user_manual' AND excluded.source != 'user_manual' THEN 'user_manual' ELSE excluded.source END,
+            is_pinned = MAX(vault_notes.is_pinned, excluded.is_pinned),
+            updated_at = excluded.updated_at;
+        """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, note.id, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 2, cleanSlug, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 3, cleanTitle, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 4, note.folder.rawValue, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 5, note.summary, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 6, note.bodyMarkdown, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 7, tagsCSV, -1, Self.sqliteTransient)
+            sqlite3_bind_double(stmt, 8, note.strength)
+            sqlite3_bind_int(stmt, 9, Int32(note.recallCount))
+            sqlite3_bind_text(stmt, 10, note.source, -1, Self.sqliteTransient)
+            sqlite3_bind_int(stmt, 11, note.isPinned ? 1 : 0)
+            sqlite3_bind_int64(stmt, 12, Int64(note.createdAt))
+            sqlite3_bind_int64(stmt, 13, Int64(nowTs))
+            sqlite3_bind_int64(stmt, 14, Int64(note.lastRecalledAt))
+            sqlite3_step(stmt)
+        }
+
+        // 重建此笔记的出链边（自动解析正文中的 [[wikilink]] + 显式关联边）
+        var delStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM vault_links WHERE from_slug = ?;", -1, &delStmt, nil) == SQLITE_OK, let delStmt {
+            defer { sqlite3_finalize(delStmt) }
+            sqlite3_bind_text(delStmt, 1, cleanSlug, -1, Self.sqliteTransient)
+            sqlite3_step(delStmt)
+        }
+
+        var edgeMap: [String: (relation: String, weight: Double)] = [:]
+        for rawTarget in ObsidianMemoryVaultEngine.parseWikilinks(in: note.bodyMarkdown) {
+            let tSlug = Self.normalizeSlug(rawTarget)
+            if !tSlug.isEmpty && tSlug != cleanSlug {
+                edgeMap[tSlug] = ("related", 1.0)
+            }
+        }
+        for extra in extraLinks {
+            let tSlug = Self.normalizeSlug(extra.toTitle)
+            if !tSlug.isEmpty && tSlug != cleanSlug {
+                let rel = extra.relation.trimmingCharacters(in: .whitespacesAndNewlines)
+                edgeMap[tSlug] = (rel.isEmpty ? "related" : rel, 1.15)
+            }
+        }
+        let linkSQL = "INSERT OR REPLACE INTO vault_links (from_slug, to_slug, relation, weight, updated_at) VALUES (?, ?, ?, ?, ?);"
+        for (toSlug, info) in edgeMap {
+            var lStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, linkSQL, -1, &lStmt, nil) == SQLITE_OK, let lStmt {
+                defer { sqlite3_finalize(lStmt) }
+                sqlite3_bind_text(lStmt, 1, cleanSlug, -1, Self.sqliteTransient)
+                sqlite3_bind_text(lStmt, 2, toSlug, -1, Self.sqliteTransient)
+                sqlite3_bind_text(lStmt, 3, info.relation, -1, Self.sqliteTransient)
+                sqlite3_bind_double(lStmt, 4, info.weight)
+                sqlite3_bind_int64(lStmt, 5, Int64(nowTs))
+                sqlite3_step(lStmt)
+            }
+        }
+        invalidatePromptCacheUnsafe()
+    }
+
+    func fetchVaultNotes(folder: VaultNoteFolder? = nil, query: String = "", limit: Int = 120) -> [ObsidianVaultNote] {
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return [] }
+
+        let sql: String
+        if folder != nil {
+            sql = """
+            SELECT id, slug, title, folder, summary, body_markdown, tags_csv, strength, recall_count, source, is_pinned, created_at, updated_at, last_recalled_at
+            FROM vault_notes
+            WHERE folder = ?
+            ORDER BY is_pinned DESC, strength DESC, updated_at DESC
+            LIMIT ?;
+            """
+        } else {
+            sql = """
+            SELECT id, slug, title, folder, summary, body_markdown, tags_csv, strength, recall_count, source, is_pinned, created_at, updated_at, last_recalled_at
+            FROM vault_notes
+            ORDER BY is_pinned DESC, strength DESC, updated_at DESC
+            LIMIT ?;
+            """
+        }
+
+        var notes: [ObsidianVaultNote] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            if let folder {
+                sqlite3_bind_text(stmt, 1, folder.rawValue, -1, Self.sqliteTransient)
+                sqlite3_bind_int(stmt, 2, Int32(limit))
+            } else {
+                sqlite3_bind_int(stmt, 1, Int32(limit))
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                notes.append(readVaultNoteRow(stmt))
+            }
+        }
+
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return notes }
+        return notes.filter { n in
+            n.title.lowercased().contains(q)
+                || n.summary.lowercased().contains(q)
+                || n.bodyMarkdown.lowercased().contains(q)
+                || n.tags.contains(where: { $0.lowercased().contains(q) })
+        }
+    }
+
+    func fetchVaultNote(slug: String) -> ObsidianVaultNote? {
+        let key = Self.normalizeSlug(slug)
+        guard !key.isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return nil }
+        let sql = """
+        SELECT id, slug, title, folder, summary, body_markdown, tags_csv, strength, recall_count, source, is_pinned, created_at, updated_at, last_recalled_at
+        FROM vault_notes WHERE slug = ? LIMIT 1;
+        """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, key, -1, Self.sqliteTransient)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                return readVaultNoteRow(stmt)
+            }
+        }
+        return nil
+    }
+
+    func fetchAllVaultLinks(limit: Int = 400) -> [VaultLinkEdge] {
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return [] }
+        var out: [VaultLinkEdge] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT from_slug, to_slug, relation, weight, updated_at FROM vault_links ORDER BY weight DESC, updated_at DESC LIMIT ?;", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(VaultLinkEdge(
+                    fromSlug: colString(stmt, 0),
+                    toSlug: colString(stmt, 1),
+                    relation: colString(stmt, 2),
+                    weight: sqlite3_column_double(stmt, 3),
+                    updatedAt: Int(sqlite3_column_int64(stmt, 4))
+                ))
+            }
+        }
+        return out
+    }
+
+    func fetchOutlinks(forSlug slug: String) -> [VaultLinkEdge] {
+        let key = Self.normalizeSlug(slug)
+        return fetchAllVaultLinks(limit: 400).filter { $0.fromSlug == key }
+    }
+
+    func fetchBacklinks(forSlug slug: String) -> [VaultLinkEdge] {
+        let key = Self.normalizeSlug(slug)
+        return fetchAllVaultLinks(limit: 400).filter { $0.toSlug == key }
+    }
+
+    /// A-MEM / Ebbinghaus 记忆强化：每次被 Graph-RAG 召回命中后提升回忆次数与稳定度
+    func reinforceVaultNotes(slugs: [String], boost: Double = 0.03) {
+        guard !slugs.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return }
+        let nowTs = Int(Date().timeIntervalSince1970)
+        let sql = "UPDATE vault_notes SET recall_count = recall_count + 1, strength = MIN(1.0, strength + ?), last_recalled_at = ? WHERE slug = ?;"
+        for raw in slugs {
+            let key = Self.normalizeSlug(raw)
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+                defer { sqlite3_finalize(stmt) }
+                sqlite3_bind_double(stmt, 1, boost)
+                sqlite3_bind_int64(stmt, 2, Int64(nowTs))
+                sqlite3_bind_text(stmt, 3, key, -1, Self.sqliteTransient)
+                sqlite3_step(stmt)
+            }
+        }
+    }
+
+    func togglePinVaultNote(slug: String) {
+        let key = Self.normalizeSlug(slug)
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "UPDATE vault_notes SET is_pinned = CASE WHEN is_pinned = 1 THEN 0 ELSE 1 END WHERE slug = ?;", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, key, -1, Self.sqliteTransient)
+            sqlite3_step(stmt)
+        }
+        invalidatePromptCacheUnsafe()
+    }
+
+    func deleteVaultNote(slug: String) {
+        let key = Self.normalizeSlug(slug)
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return }
+        for sql in [
+            "DELETE FROM vault_notes WHERE slug = ?;",
+            "DELETE FROM vault_links WHERE from_slug = ? OR to_slug = ?;"
+        ] {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+                defer { sqlite3_finalize(stmt) }
+                sqlite3_bind_text(stmt, 1, key, -1, Self.sqliteTransient)
+                if sql.contains("OR") {
+                    sqlite3_bind_text(stmt, 2, key, -1, Self.sqliteTransient)
+                }
+                sqlite3_step(stmt)
+            }
+        }
+        invalidatePromptCacheUnsafe()
+    }
+
+    /// 合并两条重复原子笔记并无损重定向全部反向链接
+    @discardableResult
+    func mergeVaultNotes(keepSlug: String, dropSlug: String, mergedBody: String, mergedSummary: String? = nil) -> Bool {
+        let keepKey = Self.normalizeSlug(keepSlug)
+        let dropKey = Self.normalizeSlug(dropSlug)
+        guard !keepKey.isEmpty, !dropKey.isEmpty, keepKey != dropKey,
+              var keepNote = fetchVaultNote(slug: keepKey) else { return false }
+        keepNote.bodyMarkdown = mergedBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let s = mergedSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+            keepNote.summary = s
+        }
+        keepNote.strength = min(1.0, keepNote.strength + 0.08)
+        upsertVaultNote(keepNote)
+
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        if let db {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE OR IGNORE vault_links SET to_slug = ? WHERE to_slug = ? AND from_slug != ?;", -1, &stmt, nil) == SQLITE_OK, let stmt {
+                defer { sqlite3_finalize(stmt) }
+                sqlite3_bind_text(stmt, 1, keepKey, -1, Self.sqliteTransient)
+                sqlite3_bind_text(stmt, 2, dropKey, -1, Self.sqliteTransient)
+                sqlite3_bind_text(stmt, 3, keepKey, -1, Self.sqliteTransient)
+                sqlite3_step(stmt)
+            }
+        }
+        deleteVaultNote(slug: dropKey)
+        return true
+    }
+
+    func appendEvolutionLog(action: String, noteTitle: String, detail: String, source: String = "ai_llm") {
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return }
+        let nowTs = Int(Date().timeIntervalSince1970)
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "INSERT INTO vault_evolution_log (created_at, action, note_title, detail, source) VALUES (?, ?, ?, ?, ?);", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, Int64(nowTs))
+            sqlite3_bind_text(stmt, 2, action, -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 3, String(noteTitle.prefix(60)), -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 4, String(detail.prefix(220)), -1, Self.sqliteTransient)
+            sqlite3_bind_text(stmt, 5, source, -1, Self.sqliteTransient)
+            sqlite3_step(stmt)
+        }
+        execUnsafe("DELETE FROM vault_evolution_log WHERE id NOT IN (SELECT id FROM vault_evolution_log ORDER BY id DESC LIMIT 150);")
+    }
+
+    func fetchEvolutionLogs(limit: Int = 50) -> [VaultEvolutionLogEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return [] }
+        var out: [VaultEvolutionLogEntry] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT id, created_at, action, note_title, detail, source FROM vault_evolution_log ORDER BY id DESC LIMIT ?;", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(VaultEvolutionLogEntry(
+                    id: Int(sqlite3_column_int(stmt, 0)),
+                    createdAt: Int(sqlite3_column_int64(stmt, 1)),
+                    action: colString(stmt, 2),
+                    noteTitle: colString(stmt, 3),
+                    detail: colString(stmt, 4),
+                    source: colString(stmt, 5)
+                ))
+            }
+        }
+        return out
+    }
+
+    func fetchRecentInteractions(limit: Int = 20) -> [(createdAt: Int, featureTag: String, scene: String, outcome: String, deltaNote: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        openAndMigrateIfNeeded()
+        guard let db else { return [] }
+        var out: [(Int, String, String, String, String)] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT created_at, feature_tag, scene, user_outcome, delta_note FROM ai_interaction_episodes ORDER BY id DESC LIMIT ?;", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append((
+                    Int(sqlite3_column_int64(stmt, 0)),
+                    colString(stmt, 1),
+                    colString(stmt, 2),
+                    colString(stmt, 3),
+                    colString(stmt, 4)
+                ))
+            }
+        }
+        return out
+    }
+
+    private func readVaultNoteRow(_ stmt: OpaquePointer) -> ObsidianVaultNote {
+        let folderRaw = colString(stmt, 3)
+        let tagsCSV = colString(stmt, 6)
+        let tags = tagsCSV.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return ObsidianVaultNote(
+            id: colString(stmt, 0),
+            slug: colString(stmt, 1),
+            title: colString(stmt, 2),
+            folder: VaultNoteFolder(rawValue: folderRaw) ?? .wiki,
+            summary: colString(stmt, 4),
+            bodyMarkdown: colString(stmt, 5),
+            tags: tags,
+            strength: sqlite3_column_double(stmt, 7),
+            recallCount: Int(sqlite3_column_int(stmt, 8)),
+            source: colString(stmt, 9),
+            isPinned: sqlite3_column_int(stmt, 10) != 0,
+            createdAt: Int(sqlite3_column_int64(stmt, 11)),
+            updatedAt: Int(sqlite3_column_int64(stmt, 12)),
+            lastRecalledAt: Int(sqlite3_column_int64(stmt, 13))
+        )
     }
 
     func clearAllData() {
@@ -838,6 +1415,9 @@ final class AICognitiveMemoryDB {
         execUnsafe("DELETE FROM vocab_learning_log;")
         execUnsafe("DELETE FROM ai_interaction_episodes;")
         execUnsafe("DELETE FROM autopilot_meta;")
+        execUnsafe("DELETE FROM vault_notes;")
+        execUnsafe("DELETE FROM vault_links;")
+        execUnsafe("DELETE FROM vault_evolution_log;")
         execUnsafe("PRAGMA wal_checkpoint(TRUNCATE);")
         invalidatePromptCacheUnsafe()
     }

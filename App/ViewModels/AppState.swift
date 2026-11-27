@@ -35,7 +35,9 @@ final class AppState: ObservableObject {
     @Published var aiInsightReport: AIAutoInsightReport? = AIAutoInsightService.loadCachedReport()
     @Published var isRunningAIInsight: Bool = false
     @Published var isRunningAutopilot: Bool = false
+    @Published var isRunningObsidianLearn: Bool = false
     @Published var lastAutopilotOutcome: AutopilotRunOutcome? = nil
+    @Published var lastObsidianOutcome: ObsidianLearningOutcome? = nil
     @Published var cognitiveStats: CognitiveDBStats = .empty
     @Published var isFetchingAIModels: Bool = false
     @Published var isCloningStyleDNA: Bool = false
@@ -701,12 +703,88 @@ final class AppState: ObservableObject {
             habitProfile: habitProfile,
             topUserWords: topWords
         )
+        _ = ObsidianMemoryVaultEngine.seedAndRefreshLocalVault(
+            db: .shared,
+            habitProfile: habitProfile,
+            topUserWords: topWords
+        )
         if copy != settings {
             settings = copy
         }
         lastAutopilotOutcome = outcome
         refreshCognitiveStats()
         return outcome
+    }
+
+    /// 调用用户自填 API 执行 Obsidian 风格双链记忆库自学习、自动建链与个性化调优
+    @discardableResult
+    func runObsidianAPISelfLearning(rawInboxText: String? = nil) async -> ObsidianLearningOutcome {
+        isRunningObsidianLearn = true
+        defer { isRunningObsidianLearn = false }
+        var copy = settings
+        let cfg = aiConfig
+        let currentHabit = TypingHabitTracker.shared.currentProfile()
+        habitProfile = currentHabit
+        let topWords = lexicon.allEntries(limit: 40).map(\.word)
+        let outcome = await ObsidianMemoryVaultEngine.consolidateWithUserAPI(
+            rawInboxText: rawInboxText,
+            settings: &copy,
+            aiConfig: cfg,
+            db: .shared,
+            habitProfile: currentHabit,
+            topUserWords: topWords
+        )
+        if copy != settings {
+            settings = copy
+        }
+        lastObsidianOutcome = outcome
+        refreshCognitiveStats()
+        return outcome
+    }
+
+    func saveManualVaultNote(
+        title: String,
+        folder: VaultNoteFolder,
+        summary: String,
+        bodyMarkdown: String,
+        tags: [String],
+        isPinned: Bool = true
+    ) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return }
+        let note = ObsidianVaultNote(
+            title: cleanTitle,
+            folder: folder,
+            summary: summary.isEmpty ? String(bodyMarkdown.prefix(50)) : summary,
+            bodyMarkdown: bodyMarkdown,
+            tags: tags,
+            strength: 0.95,
+            source: "user_manual",
+            isPinned: isPinned
+        )
+        AICognitiveMemoryDB.shared.upsertVaultNote(note)
+        AICognitiveMemoryDB.shared.appendEvolutionLog(
+            action: "user_teach",
+            noteTitle: cleanTitle,
+            detail: note.summary,
+            source: "user_manual"
+        )
+        refreshCognitiveStats()
+    }
+
+    func recordAcceptedAIInteractionAndMaybeLearn(featureTag: String, scene: String, outcome: String = "accepted", deltaNote: String = "") {
+        guard !settings.incognitoModeEnabled else { return }
+        AICognitiveMemoryDB.shared.recordAIInteraction(
+            featureTag: featureTag,
+            scene: scene,
+            outcome: outcome,
+            deltaNote: deltaNote
+        )
+        ObsidianMemoryVaultEngine.maybeRunPassiveAPISelfLearning(
+            settings: settings,
+            aiConfig: aiConfig,
+            db: .shared
+        )
     }
 
     /// 调用用户自己的大模型深度读取 SQLite 学习数据库并全权调优打字功能 + 沉淀「懂你」认知记忆
@@ -790,12 +868,22 @@ final class AppState: ObservableObject {
             isPinned: true
         )
         AICognitiveMemoryDB.shared.upsertMemory(fact)
-        refreshCognitiveStats()
+        // 同步沉淀为 Obsidian 置顶常青原子笔记，立即融入双链图谱
+        let noteTitle = String(clean.prefix(12)).replacingOccurrences(of: "\n", with: " ")
+        saveManualVaultNote(
+            title: noteTitle.isEmpty ? category : noteTitle,
+            folder: .persona,
+            summary: clean,
+            bodyMarkdown: "\(clean)\n\n相关节点：[[AI 个人记忆总览]]\n#\(category) #手动录入",
+            tags: [category, "手动录入"],
+            isPinned: true
+        )
     }
 
     func clearCognitiveDatabase() {
         AICognitiveMemoryDB.shared.clearAllData()
         lastAutopilotOutcome = nil
+        lastObsidianOutcome = nil
         refreshCognitiveStats()
     }
 }

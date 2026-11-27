@@ -3795,4 +3795,128 @@ final class LingxiTests: XCTestCase {
         XCTAssertEqual(db.loadStats().memoryCount, 0)
         XCTAssertEqual(db.loadStats().totalObservations, 0)
     }
+
+    func testV73ObsidianSelfLearningMemoryVaultAndGraphRAG() throws {
+        // 1. 解析 Obsidian [[双向链接]]（含别名与章节锚点）与 #标签
+        let md = """
+        # 主标题不应被识别为标签
+        平时给老板发汇报时遵循 [[职场汇报原则|结论先行]]，并结合 [[研发工作流#发版阶段]] 输出要点。
+        #表达习惯 #职场沟通
+        """
+        XCTAssertEqual(ObsidianMemoryVaultEngine.parseWikilinks(in: md), ["职场汇报原则", "研发工作流"])
+        XCTAssertEqual(ObsidianMemoryVaultEngine.parseHashtags(in: md), ["表达习惯", "职场沟通"])
+
+        // 2. 独立临时 SQLite 图谱双链建库 + 出链/反链 + 2-Hop Graph-RAG 按需召回 + 记忆强化
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi_obs_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let db = AICognitiveMemoryDB(url: tmpDir.appendingPathComponent("obsidian_vault.sqlite"))
+
+        db.upsertVaultNote(ObsidianVaultNote(
+            title: "职场汇报原则",
+            folder: .persona,
+            summary: "给老板汇报务必先说结论，再列 3 条数据支撑，不用感叹号",
+            bodyMarkdown: "汇报遵循结论先行，衔接 [[研发发版节奏]]。 #职场 #汇报",
+            tags: ["职场", "汇报"],
+            strength: 0.85,
+            source: "ai_llm"
+        ))
+        db.upsertVaultNote(ObsidianVaultNote(
+            title: "研发发版节奏",
+            folder: .wiki,
+            summary: "每周四晚回归测试并整理发版变更清单",
+            bodyMarkdown: "核心工作节奏：周四晚回归，关联 [[职场汇报原则]]。 #研发",
+            tags: ["研发"],
+            strength: 0.78,
+            source: "ai_llm"
+        ))
+        db.upsertVaultNote(ObsidianVaultNote(
+            title: "周末露营清单",
+            folder: .wiki,
+            summary: "帐篷与手冲咖啡器材",
+            bodyMarkdown: "户外休闲装备记录 #生活",
+            tags: ["生活"],
+            strength: 0.60,
+            source: "user_manual"
+        ))
+
+        let outEdges = db.fetchOutlinks(forSlug: "职场汇报原则")
+        let backEdges = db.fetchBacklinks(forSlug: "研发发版节奏")
+        XCTAssertTrue(outEdges.contains(where: { $0.toSlug == "研发发版节奏" }))
+        XCTAssertTrue(backEdges.contains(where: { $0.fromSlug == "职场汇报原则" }))
+
+        // 查询「给老板写周报」应直接命中 [[职场汇报原则]] 并经 1-Hop 图谱召回 [[研发发版节奏]]，排在无关的 [[周末露营清单]] 前面
+        let recalled = ObsidianMemoryVaultEngine.recallGraphNotes(
+            query: "帮我给老板写本周工作汇报",
+            scene: "老板客户",
+            db: db,
+            limit: 3,
+            reinforce: false
+        )
+        XCTAssertEqual(recalled.first?.note.title, "职场汇报原则")
+        XCTAssertTrue(recalled.prefix(2).contains(where: { $0.note.title == "研发发版节奏" }))
+        let ctxBlock = ObsidianMemoryVaultEngine.recallPromptContextBlock(query: "给老板写汇报", scene: "老板客户", db: db, limit: 3)
+        XCTAssertTrue(ctxBlock.contains("[[职场汇报原则]]"))
+
+        // 3. 用用户 API 提炼结果 JSON 解析（新增双链原子笔记 + 重复合并重定向反链 + 安全白名单调优 + log.md 留痕 + 隐私脱敏）
+        var settings = LingxiSettings()
+        settings.aiAutopilotMode = .fullAutopilot
+        settings.panguSpaceLetters = false
+        settings.incognitoModeEnabled = false
+
+        let apiJSON = """
+        ```json
+        {
+          "persona_digest": "偏重效率与数据化表达的 iOS 研发负责人。",
+          "summary": "提炼 1 篇双链笔记、合并 1 组重复节点并开启中英盘古空格。",
+          "notes_to_upsert": [
+            {
+              "title": "极简回复美学",
+              "folder": "persona",
+              "summary": "杜绝官腔客套，保留关键数字与截止时间，手机 13812345678 应脱敏",
+              "body_markdown": "所有回复保持干练，配合 [[职场汇报原则]] 使用。联系 13812345678 必须被脱敏。 #表达习惯",
+              "tags": ["表达习惯"],
+              "links": [{"to": "职场汇报原则", "relation": "prefers"}]
+            }
+          ],
+          "notes_to_merge": [
+            {
+              "keep_title": "研发发版节奏",
+              "drop_title": "周末露营清单",
+              "merged_summary": "周四晚回归与周末复盘安排",
+              "merged_body": "统一合并节奏记录，关联 [[职场汇报原则]]。"
+            }
+          ],
+          "setting_changes": [
+            {"key": "panguSpaceLetters", "value": true, "reason": "高频技术文档中英混输"},
+            {"key": "incognitoModeEnabled", "value": true, "reason": "越权隐私键必须被拦截"}
+          ]
+        }
+        ```
+        """
+        let outcome = ObsidianMemoryVaultEngine.applyConsolidationJSON(apiJSON, settings: &settings, db: db)
+        XCTAssertTrue(outcome.usedLLM)
+        XCTAssertEqual(outcome.upsertedNotesCount, 1)
+        XCTAssertEqual(outcome.mergedNotesCount, 1)
+        XCTAssertEqual(outcome.appliedSettingsCount, 1)
+        XCTAssertTrue(settings.panguSpaceLetters)
+        XCTAssertFalse(settings.incognitoModeEnabled, "越权隐私开关严禁被 API 修改")
+
+        let aesthetics = try XCTUnwrap(db.fetchVaultNote(slug: "极简回复美学"))
+        XCTAssertFalse(aesthetics.bodyMarkdown.contains("13812345678"), "笔记落库前必须经 AIPrivacyShield 脱敏敏感手机号")
+        XCTAssertNil(db.fetchVaultNote(slug: "周末露营清单"), "被合并的旧笔记应已移除")
+        XCTAssertFalse(db.fetchEvolutionLogs(limit: 20).isEmpty, "log.md 演化日志必须留痕")
+
+        // 4. 真实 Obsidian YAML Frontmatter + 反向链接 + 整库 Markdown 导出校验
+        let exportedVault = ObsidianMemoryVaultEngine.exportFullObsidianMarkdownVault(db: db)
+        XCTAssertTrue(exportedVault.contains("title: \"极简回复美学\""))
+        XCTAssertTrue(exportedVault.contains("## 反向链接 (Backlinks)"))
+        XCTAssertTrue(exportedVault.contains("FILE: log.md"))
+
+        // 5. Ebbinghaus 记忆强化与衰减单调性校验
+        let now = Date()
+        let fresh = ObsidianVaultNote(title: "新记忆", summary: "s", bodyMarkdown: "b", strength: 0.8, recallCount: 0, updatedAt: Int(now.timeIntervalSince1970))
+        let stale = ObsidianVaultNote(title: "久远记忆", summary: "s", bodyMarkdown: "b", strength: 0.8, recallCount: 0, updatedAt: Int(now.addingTimeInterval(-60 * 86400).timeIntervalSince1970))
+        XCTAssertGreaterThan(ObsidianMemoryVaultEngine.effectiveStrength(for: fresh, now: now), ObsidianMemoryVaultEngine.effectiveStrength(for: stale, now: now))
+    }
 }

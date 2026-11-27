@@ -241,6 +241,7 @@ def main() -> int:
         "LinkPrivacyCleaner", "DraftRecoveryStore", "PersonalFillCardStore",
         "SocialScriptBank", "SelectionTextTransform",
         "AICognitiveMemoryDB", "AIAutopilotController", "AIAutopilotMode",
+        "ObsidianMemoryVaultEngine", "VaultNoteFolder",
     ]
 
     for p in swift_files:
