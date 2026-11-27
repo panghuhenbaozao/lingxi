@@ -136,6 +136,7 @@ final class ClipboardPanelView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         pasteTarget.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
 
         let pad: CGFloat = 8
@@ -220,7 +221,12 @@ final class ClipboardPanelView: UIView {
             $0.removeFromSuperview()
         }
         guard let theme else { return }
-        for tab in Tab.allCases {
+        // 聚焦高频实用 4 栏（精简冗余话术标签，保持剪贴板/名片/草稿/短语清爽高效）
+        let visibleTabs: [Tab] = [.history, .cards, .drafts, .phrases]
+        if !visibleTabs.contains(currentTab) {
+            currentTab = .history
+        }
+        for tab in visibleTabs {
             let btn = ActionClosureButton(type: .system)
             btn.setTitle(tab.title, for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)

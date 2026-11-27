@@ -158,7 +158,7 @@ struct SustainabilityHubView: View {
             }
             .padding(.vertical, 6)
 
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+            HStack(spacing: 8) {
                 metricBox(label: "自学习词", value: healthReport.userWordCount)
                 metricBox(label: "偶然词", value: healthReport.lowFreqNoiseCount, highlight: healthReport.lowFreqNoiseCount > 15)
                 metricBox(label: "剪贴板", value: healthReport.clipboardItemCount, highlight: healthReport.clipboardItemCount > 35)

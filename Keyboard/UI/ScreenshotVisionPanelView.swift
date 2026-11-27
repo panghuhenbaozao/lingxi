@@ -24,7 +24,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
     private var streamTask: Task<Void, Never>?
 
     private var theme: ResolvedTheme?
-    private var settings = LingxiSettings.load()
+    private var settings = LingxiSettings()
     private var hasFullAccess = false
 
     private var currentPreset: ScreenshotVisionPreset = .smartReply

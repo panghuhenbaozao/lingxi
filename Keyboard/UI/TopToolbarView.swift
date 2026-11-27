@@ -631,8 +631,15 @@ final class TopToolbarView: UIView {
         setNeedsLayout()
     }
 
+    /// 键盘隐藏或切换面板时安全关闭临时浮层（如选词长按操作栏），避免再次唤起时残留在顶栏。
+    func dismissTransientOverlays() {
+        wordActionContainer.isHidden = true
+        pendingWordAction = nil
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         pasteTargetView.frame = CGRect(x: 2, y: 2, width: 4, height: 4)
         bottomHairline.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
 

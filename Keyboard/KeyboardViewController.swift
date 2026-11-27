@@ -34,16 +34,28 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private var activeDraftSessionBuffer = ""
     private var skipNextDraftCapture = false
 
-    // 配置与外观
-    private var settings = LingxiSettings.load(force: true)
-    private var themeCustomization = ThemeCustomization.load(force: true)
+    // 配置与外观（冷启动零磁盘 I/O：viewDidLoad 一次性加载并缓存，彻底消除键盘唤起时的多次重复读盘与壁纸解码）
+    private var settings = LingxiSettings()
+    private var themeCustomization = ThemeCustomization()
     /// 内存缓存 AI 键盘轻量偏好与自定义斜杠宏，彻底避免 refreshToolbar() 在主线程每键读盘解码 AIConfig
     private var cachedAITriggerPrefix: String = "@ai"
     private var cachedAIContextCharLimit: Int = 240
     private var cachedCustomPrompts: [CustomAIPromptTemplate] = []
     private var cachedAIPipelines: [AIPromptPipeline] = []
-    private var resolvedTheme = ResolvedTheme.resolve(isDarkAppearance: false, targetSize: CGSize(width: 430, height: 280))
+    private var resolvedTheme = ResolvedTheme.resolve(
+        customization: ThemeCustomization(),
+        isDarkAppearance: false,
+        targetSize: CGSize(width: 430, height: 280)
+    )
     private var lastResolvedDarkAppearance: Bool?
+    private var lastConfigLoadedAt: CFTimeInterval = 0
+    private var lastBridgeCheckedChangeCount: Int = -1
+    private var postAppearWorkItem: DispatchWorkItem?
+    private var hasDisappearedOnce = false
+    private var didAutoSwitchToNumbers = false
+    private var didAutoSwitchToEnglish = false
+    private var lastAppliedDockHeight: CGFloat = -1
+    private var lastAppliedTotalHeight: CGFloat = -1
     private var themeDarwinObserver: AppGroupNotifications.Observer?
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
     private var aiConfigDarwinObserver: AppGroupNotifications.Observer?
@@ -79,6 +91,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private lazy var t9Canvas: T9KeyboardCanvasView = {
         hasCreatedT9Canvas = true
         let v = T9KeyboardCanvasView()
+        v.clipsToBounds = false
         v.onEvent = { [weak self] event in self?.handleT9Event(event) }
         return v
     }()
@@ -311,6 +324,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         settings = LingxiSettings.load(force: true)
         themeCustomization = ThemeCustomization.load(force: true)
         refreshCachedAIPrefs()
+        lastConfigLoadedAt = CACurrentMediaTime()
         let darkNow = isDarkInterface
         lastResolvedDarkAppearance = darkNow
         resolvedTheme = ResolvedTheme.resolve(
@@ -348,16 +362,40 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        postAppearWorkItem?.cancel()
+        postAppearWorkItem = nil
+
         refreshHostContextSnapshot(includeSelection: true)
-        if !AppGroup.isAvailable && hasFullAccess {
-            tryImportBridgeTokenFromPasteboardIfPresent()
+        let now = CACurrentMediaTime()
+        if now - lastConfigLoadedAt >= 0.8 {
+            reloadConfigurationIfNeeded()
         }
-        KeyboardPermissionHeartbeat.record(hasFullAccess: hasFullAccess, aiConfigured: AIConfig.load().isConfigured)
-        reloadConfigurationIfNeeded()
-        lastHostFieldSignature = currentHostFieldSignature
+
+        // 重新唤起键盘时清理残留浮层与临时面板，确保每次打开都落到干净稳定的主键盘
+        let prevSig = lastHostFieldSignature
+        let newSig = currentHostFieldSignature
+        let fieldChangedSinceAppear = !prevSig.isEmpty && prevSig != newSig
+        lastHostFieldSignature = newSig
+
+        if hasDisappearedOnce {
+            toolbarView.dismissTransientOverlays()
+            isCandidatesExpanded = false
+            if fieldChangedSinceAppear && (!rawComposing.isEmpty || !englishComposing.isEmpty) {
+                hasActiveMarkedText = false
+                activeMarkedTextLength = 0
+                clearAllComposing(clearMarkedInHost: false)
+            }
+            switch activePanel {
+            case .quickSettings, .emoji, .editPad, .screenshot, .voice, .clipboard:
+                activePanel = .letters
+                updateVisiblePanel()
+            case .letters, .numbers, .ai:
+                break
+            }
+        }
+
         adaptToHostTraits()
-        feedback.prepare()
-        refreshClipboardState()
+        updatePreferredHeight()
         updateReturnKeyAppearance()
         autoCapitalizeIfNeeded()
         if activePanel == .ai && hasCreatedAIPanel {
@@ -365,15 +403,56 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         } else if activePanel == .voice && hasCreatedVoicePanel {
             voicePanel.refreshEngineStatus(hasFullAccess: hasFullAccess)
         }
-        registerPhotoScreenshotObserverIfNeeded()
-        checkPasteboardScreenshotOnAppearIfNeeded()
-        if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
-            triggerSideloadBridgeSync(force: false)
+
+        // 后台异步记录心跳，绝不阻塞 viewWillAppear 主线程首帧动画
+        let fullAccessNow = hasFullAccess
+        DispatchQueue.global(qos: .utility).async {
+            KeyboardPermissionHeartbeat.record(hasFullAccess: fullAccessNow, aiConfigured: AIConfig.load().isConfigured)
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        feedback.prepare()
+
+        // 延迟至键盘完全展示后再执行非关键剪贴板检测（零弹窗 detectPatterns）、相册监听与桥接同步，
+        // 彻底根治打开键盘瞬间的「允许粘贴」系统弹窗阻塞、相册 XPC 卡顿与截屏主线程解码崩溃！
+        postAppearWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.refreshClipboardState(force: true)
+            self.checkPasteboardScreenshotOnAppearIfNeeded()
+            if !AppGroup.isAvailable && self.hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
+                self.triggerSideloadBridgeSync(force: false)
+            }
+        }
+        postAppearWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.registerPhotoScreenshotObserverIfNeeded()
         }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        hasDisappearedOnce = true
+        postAppearWorkItem?.cancel()
+        postAppearWorkItem = nil
+        translateDebounceWorkItem?.cancel()
+        translateDebounceWorkItem = nil
+        translateTask?.cancel()
+        translateTask = nil
+        undoHideTimer?.invalidate()
+        undoHideTimer = nil
+
+        lettersCanvas.resetTransientTouches()
+        if hasCreatedT9Canvas {
+            t9Canvas.resetTransientTouches()
+        }
+        toolbarView.dismissTransientOverlays()
+        isCandidatesExpanded = false
+
         if hasCreatedVoicePanel {
             voicePanel.stopAllRecording(runFinalTranslate: false)
             voicePanel.teardownWebAudio()
@@ -388,19 +467,27 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     @discardableResult
-    private func tryImportBridgeTokenFromPasteboardIfPresent() -> Bool {
-        guard hasFullAccess,
-              UIPasteboard.general.hasStrings,
-              let text = UIPasteboard.general.string,
+    private func tryImportBridgeTokenFromPasteboardIfPresent(force: Bool = true) -> Bool {
+        guard hasFullAccess else { return false }
+        let pb = UIPasteboard.general
+        let currentCount = pb.changeCount
+        if !force && currentCount == lastBridgeCheckedChangeCount {
+            return false
+        }
+        lastBridgeCheckedChangeCount = currentCount
+        guard pb.hasStrings,
+              let text = pb.string,
               text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(SideloadConfigBridge.tokenPrefix) else {
             return false
         }
         let ok = SideloadConfigBridge.importPairingToken(text)
         if ok {
-            ClipboardStore.markChangeCountHandled(UIPasteboard.general.changeCount)
+            ClipboardStore.markChangeCountHandled(pb.changeCount)
             // 导入完成后立即清空剪贴板中的一次性密钥口令，防止敏感 Key 滞留系统剪贴板
-            UIPasteboard.general.string = ""
-            ClipboardStore.markChangeCountHandled(UIPasteboard.general.changeCount)
+            pb.string = ""
+            let clearedCount = pb.changeCount
+            lastBridgeCheckedChangeCount = clearedCount
+            ClipboardStore.markChangeCountHandled(clearedCount)
             reloadConfigurationIfNeeded()
             if activePanel == .ai {
                 aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
@@ -464,7 +551,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        updatePreferredHeight()
+        // 注意：绝不在 viewWillLayoutSubviews 内修改 view.heightAnchor，防止触发布局重入抖动与跳帧
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -654,18 +741,30 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         rootContainer.addSubview(toolbarView)
 
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
+        bodyContainer.clipsToBounds = false
+        lettersCanvas.clipsToBounds = false
         rootContainer.addSubview(bodyContainer)
 
         NSLayoutConstraint.activate([
             liveDockView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
             liveDockView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
             liveDockView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
-            { let c = liveDockView.heightAnchor.constraint(equalToConstant: 0); self.liveDockHeightConstraint = c; return c }(),
+            {
+                let c = liveDockView.heightAnchor.constraint(equalToConstant: 0)
+                c.priority = UILayoutPriority(998)
+                self.liveDockHeightConstraint = c
+                return c
+            }(),
 
             toolbarView.topAnchor.constraint(equalTo: liveDockView.bottomAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
             toolbarView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
-            { let c = toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight); self.toolbarHeightConstraint = c; return c }(),
+            {
+                let c = toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight)
+                c.priority = UILayoutPriority(998)
+                self.toolbarHeightConstraint = c
+                return c
+            }(),
 
             bodyContainer.topAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             bodyContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
@@ -701,9 +800,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func preloadEngine() {
+        let shouldSyncVaultVocab = !settings.incognitoModeEnabled && settings.userLearningEnabled
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let eng = PinyinEngine()
             eng.userLexicon.pruneStaleEntries()
+            if shouldSyncVaultVocab {
+                _ = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(eng.userLexicon)
+            }
             DispatchQueue.main.async {
                 self?.engine = eng
                 if self?.rawComposing.isEmpty == false || self?.englishComposing.isEmpty == false {
@@ -722,6 +825,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func reloadConfigurationIfNeeded() {
+        lastConfigLoadedAt = CACurrentMediaTime()
         refreshCachedAIPrefs()
         let newSettings = LingxiSettings.load(force: true)
         let newTheme = ThemeCustomization.load(force: true)
@@ -795,7 +899,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
     }
 
-    /// 根据宿主输入框的 `keyboardType` 与密码属性自动适配面板与隐私策略。
+    /// 根据宿主输入框的 `keyboardType` 与密码属性自动适配面板与隐私策略，离开特殊输入框时自动恢复默认中/英与字母键盘。
     private func adaptToHostTraits() {
         let kbType = cachedKeyboardType
         let sig = "\(kbType.rawValue)-\(isSecureField)"
@@ -805,21 +909,44 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         switch kbType {
         case .numberPad, .phonePad, .decimalPad, .numbersAndPunctuation, .asciiCapableNumberPad:
             if activePanel == .letters {
+                didAutoSwitchToNumbers = true
                 switchToPanel(.numbers)
             }
         case .emailAddress, .URL, .asciiCapable, .twitter, .webSearch:
-            if activePanel == .numbers {
+            if didAutoSwitchToNumbers && activePanel == .numbers {
+                didAutoSwitchToNumbers = false
+                switchToPanel(.letters)
+            } else if activePanel == .numbers {
                 switchToPanel(.letters)
             }
             if !isEnglishMode {
+                didAutoSwitchToEnglish = true
                 isEnglishMode = true
                 shiftState = .lowercase
                 refreshUI()
             }
         default:
-            if isSecureField && !isEnglishMode {
-                isEnglishMode = true
-                shiftState = .lowercase
+            var needsRefresh = false
+            if didAutoSwitchToNumbers && activePanel == .numbers {
+                didAutoSwitchToNumbers = false
+                switchToPanel(.letters)
+            }
+            if isSecureField {
+                if !isEnglishMode {
+                    didAutoSwitchToEnglish = true
+                    isEnglishMode = true
+                    shiftState = .lowercase
+                    needsRefresh = true
+                }
+            } else if didAutoSwitchToEnglish {
+                didAutoSwitchToEnglish = false
+                if isEnglishMode {
+                    isEnglishMode = false
+                    shiftState = .lowercase
+                    needsRefresh = true
+                }
+            }
+            if needsRefresh {
                 refreshUI()
             }
         }
@@ -864,6 +991,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         if let hc = heightConstraint, abs(hc.constant - totalH) > 0.5 {
             hc.constant = totalH
         }
+        lastAppliedDockHeight = dockH
+        lastAppliedTotalHeight = totalH
     }
 
     private var currentLiveComposingPreview: String {
@@ -901,58 +1030,57 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     // MARK: - 键盘内自动截屏监听（PHPhotoLibraryChangeObserver + 剪贴板图片变更）与键盘内语音/识图入口
 
     private func registerPhotoScreenshotObserverIfNeeded() {
-        guard hasFullAccess, !isObservingPhotoLibrary else { return }
         let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard st == .authorized || st == .limited else { return }
-        // 记录当前最新截屏 ID，防止刚打开键盘时把几小时前的旧截屏误判为新截屏
+        // 在后台线程执行 PHAsset 查询，绝不阻塞键盘启动主线程
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         opts.fetchLimit = 1
         opts.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0", PHAssetMediaSubtype.photoScreenshot.rawValue)
-        if let latest = PHAsset.fetchAssets(with: .image, options: opts).firstObject {
-            lastHandledScreenshotAssetID = latest.localIdentifier
+        let latestID = PHAsset.fetchAssets(with: .image, options: opts).firstObject?.localIdentifier
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.hasFullAccess, !self.isObservingPhotoLibrary else { return }
+            if let latestID {
+                self.lastHandledScreenshotAssetID = latestID
+            }
+            PHPhotoLibrary.shared().register(self)
+            self.isObservingPhotoLibrary = true
         }
-        PHPhotoLibrary.shared().register(self)
-        isObservingPhotoLibrary = true
     }
 
     private func checkPasteboardScreenshotOnAppearIfNeeded() {
-        guard hasFullAccess else { return }
+        // 仅在用户主动触发截屏识图或显式开启「新截屏自动识图」时才读取剪贴板图片，
+        // 避免每次打开键盘主动访问 pb.image 触发 iOS「允许粘贴」系统弹窗与主线程大图解码 Jetsam 闪退！
+        let shouldAutoOpen = awaitingShortcutScreenshot || settings.autoAnalyzeNewScreenshot
+        guard hasFullAccess, shouldAutoOpen else { return }
         let pb = UIPasteboard.general
         guard pb.hasImages else { return }
         let count = pb.changeCount
         guard count != lastHandledPasteboardImageChangeCount else { return }
         lastHandledPasteboardImageChangeCount = count
-        guard let img = pb.image,
-              let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img, maxDimension: 768, quality: 0.68) else { return }
-
-        let shouldAutoOpen = awaitingShortcutScreenshot || settings.autoAnalyzeNewScreenshot
         awaitingShortcutScreenshot = false
-        if shouldAutoOpen {
-            pendingDetectedScreenshot = nil
-            switchToPanel(.screenshot, autoPrepareScreenshot: false)
-            screenshotPanel.presentDetectedScreenshot(
-                image: img,
-                jpegData: jpeg,
-                sourceLabel: "剪贴板截屏 · 传完静默清空",
-                assetID: nil,
-                fromPasteboard: true,
-                theme: resolvedTheme,
-                settings: settings,
-                hasFullAccess: hasFullAccess,
-                autoStart: true
-            )
-        } else {
-            // 默认无打扰轻提示：在顶栏浮出「📷 剪贴板截屏 · ✨ 识图」，点一下即识，继续打字自动消失
-            pendingDetectedScreenshot = PendingDetectedScreenshot(
-                image: img,
-                jpegData: jpeg,
-                sourceLabel: "剪贴板截屏 · 传完静默清空",
-                assetID: nil,
-                fromPasteboard: true,
-                detectedAt: Date()
-            )
-            refreshToolbar()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let img = UIPasteboard.general.image,
+                  let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img, maxDimension: 768, quality: 0.68) else {
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.pendingDetectedScreenshot = nil
+                self.switchToPanel(.screenshot, autoPrepareScreenshot: false)
+                self.screenshotPanel.presentDetectedScreenshot(
+                    image: img,
+                    jpegData: jpeg,
+                    sourceLabel: "剪贴板截屏 · 传完静默清空",
+                    assetID: nil,
+                    fromPasteboard: true,
+                    theme: self.resolvedTheme,
+                    settings: self.settings,
+                    hasFullAccess: self.hasFullAccess,
+                    autoStart: true
+                )
+            }
         }
     }
 
@@ -1227,17 +1355,21 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func wireAIPanel(_ panel: AIAssistantPanelView) {
-        panel.onInsertText = { [weak self] text in
+        panel.onInsertText = { [weak self, weak panel] text in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            let featureTag = panel?.lastCompletedFeatureTag ?? "ai_insert"
+            self.recordAcceptedKeyboardAIInteraction(featureTag: featureTag, text: text, outcome: "accepted_insert")
             self.exitTransientAIAndTranslateModes()
             self.lastAIInsertedText = text
             self.insertDirectlyIntoHost(text)
             self.switchToPanel(.letters)
         }
-        panel.onReplaceBeforeCursor = { [weak self] deleteCount, replacement in
+        panel.onReplaceBeforeCursor = { [weak self, weak panel] deleteCount, replacement in
             guard let self else { return }
             self.feedback.triggerKeyFeedback(tone: .modifier, settings: self.settings, hasFullAccess: self.hasFullAccess)
+            let featureTag = panel?.lastCompletedFeatureTag ?? "ai_replace"
+            self.recordAcceptedKeyboardAIInteraction(featureTag: featureTag, text: replacement, outcome: "accepted_replace")
             self.exitTransientAIAndTranslateModes()
             self.lastAIInsertedText = replacement
             self.performEdit {
@@ -1308,6 +1440,31 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         panel.onClose = { [weak self] in
             self?.aiPromptDraft = nil
             self?.switchToPanel(.letters)
+        }
+    }
+
+    /// 键盘端 AI 采纳闭环：将用户实际插入/替换的脱敏交互记录沉淀进本地 SQLite 认知记忆库，并按节流策略触发 Obsidian 被动自学习。
+    private func recordAcceptedKeyboardAIInteraction(featureTag: String, text: String, outcome: String) {
+        guard !settings.incognitoModeEnabled, !isSecureField else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !ClipboardClassifier.isSensitiveContent(trimmed) else { return }
+        let settingsSnap = settings
+        let scene = cachedKeyboardType == .webSearch ? "search" : "keyboard"
+        let charLen = trimmed.count
+        DispatchQueue.global(qos: .utility).async {
+            let safePreview = String(AIPrivacyShield.sanitize(trimmed).sanitizedText.prefix(48))
+            AICognitiveMemoryDB.shared.recordAIInteraction(
+                featureTag: featureTag,
+                scene: scene,
+                outcome: outcome,
+                deltaNote: "采纳 \(charLen) 字：\(safePreview)"
+            )
+            let aiCfg = AIConfig.load()
+            ObsidianMemoryVaultEngine.maybeRunPassiveAPISelfLearning(
+                settings: settingsSnap,
+                aiConfig: aiCfg,
+                db: .shared
+            )
         }
     }
 
@@ -3771,7 +3928,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             refreshToolbar()
             return
         }
-        pasteMonitor.refresh(settings: settings, force: force) { [weak self] _ in
+        // 严格启用零弹窗模式（allowProactiveStringRead: false），防止打开键盘时弹出系统「允许粘贴」提示
+        pasteMonitor.refresh(settings: settings, force: force, allowProactiveStringRead: false) { [weak self] _ in
             self?.refreshToolbar()
         }
     }
@@ -3842,6 +4000,11 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     // MARK: - 面板切换与主题刷新
 
     private func switchToPanel(_ target: ActivePanel, autoPrepareScreenshot: Bool = true) {
+        lettersCanvas.resetTransientTouches()
+        if hasCreatedT9Canvas {
+            t9Canvas.resetTransientTouches()
+        }
+        toolbarView.dismissTransientOverlays()
         if activePanel == .voice && target != .voice && hasCreatedVoicePanel {
             voicePanel.stopAllRecording(runFinalTranslate: false)
         }
@@ -4055,8 +4218,11 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             )
             : nil
 
-        liveDockView.update(mode: currentLiveDockMode())
-        updatePreferredHeight()
+        let dockMode = currentLiveDockMode()
+        liveDockView.update(mode: dockMode)
+        if abs(dockMode.preferredHeight - lastAppliedDockHeight) > 0.5 {
+            updatePreferredHeight()
+        }
 
         if isActivelyComposing {
             pendingDetectedScreenshot = nil
@@ -4067,14 +4233,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             ? pendingDetectedScreenshot.map { $0.fromPasteboard ? "📷 剪贴板截屏" : "📷 刚截的屏" }
             : nil
 
-        let activeImpulseDraft: String? = {
-            guard !secureNow, !isActivelyComposing, activePanel == .letters else { return nil }
-            let beforeAll = hostSnapshot.beforeInput ?? ""
-            let trailingLine = String(beforeAll.split(separator: "\n", omittingEmptySubsequences: false).last ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trailingLine.count >= 6, trailingLine.count <= 260 else { return nil }
-            return CommunicationGuardEngine.analyzeEmotion(trailingLine).shouldWarnInKeyboard ? trailingLine : nil
-        }()
+        // 精简干扰：不再自动在顶栏弹出语气偏冲提醒，保持输入顶栏纯粹专注
+        let activeImpulseDraft: String? = nil
 
         let isIdlePredictionMode = !isActivelyComposing && !effectiveCandidates.isEmpty
         toolbarView.update(

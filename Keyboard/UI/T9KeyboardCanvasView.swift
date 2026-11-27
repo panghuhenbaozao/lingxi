@@ -49,7 +49,7 @@ final class T9KeyboardCanvasView: UIView {
     }
 
     private var theme: ResolvedTheme?
-    private var settings = LingxiSettings.load()
+    private var settings = LingxiSettings()
     private var isComposing = false
     private var needsGlobeKey = true
     private var returnTitle = "换行"
@@ -515,6 +515,20 @@ final class T9KeyboardCanvasView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches { finishTouch(touch, commit: false) }
+    }
+
+    /// 键盘隐藏或切面板时强制清理全部按压态、连删定时器与气泡，彻底杜绝再次打开键盘时按键粘滞。
+    func resetTransientTouches() {
+        for (_, work) in longPressWorkItems {
+            work.cancel()
+        }
+        longPressWorkItems.removeAll()
+        stopRepeatDelete()
+        for (_, track) in activeTouches {
+            keyViews[track.keyID]?.setPressed(false)
+        }
+        activeTouches.removeAll()
+        popupView.hide()
     }
 
     private func finishTouch(_ touch: UITouch, commit: Bool) {

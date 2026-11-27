@@ -75,23 +75,27 @@ struct TypingStatsView: View {
         let total = max(summary.totalChars, profile.totalChars)
 
         return Section {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                statTile("今日上屏", value: summary.todayChars.formatted(), unit: "字", icon: "keyboard")
-                statTile("累计上屏", value: total.formatted(), unit: "字", icon: "text.alignleft")
-                statTile(
-                    "平均速度",
-                    value: avgSpeed > 0.5 ? String(format: "%.0f", avgSpeed) : "--",
-                    unit: avgSpeed > 0.5 ? "字/分" : "",
-                    icon: "speedometer",
-                    detail: profile.peakCPM > 0.5 ? String(format: "最快 %.0f 字/分", profile.peakCPM) : nil
-                )
-                statTile(
-                    "连续打字",
-                    value: "\(summary.streakDays)",
-                    unit: "天",
-                    icon: "flame",
-                    detail: summary.dayCount > 0 ? "共 \(summary.dayCount) 天有记录" : nil
-                )
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    statTile("今日上屏", value: summary.todayChars.formatted(), unit: "字", icon: "keyboard")
+                    statTile("累计上屏", value: total.formatted(), unit: "字", icon: "text.alignleft")
+                }
+                HStack(spacing: 10) {
+                    statTile(
+                        "平均速度",
+                        value: avgSpeed > 0.5 ? String(format: "%.0f", avgSpeed) : "--",
+                        unit: avgSpeed > 0.5 ? "字/分" : "",
+                        icon: "speedometer",
+                        detail: profile.peakCPM > 0.5 ? String(format: "最快 %.0f 字/分", profile.peakCPM) : nil
+                    )
+                    statTile(
+                        "连续打字",
+                        value: "\(summary.streakDays)",
+                        unit: "天",
+                        icon: "flame",
+                        detail: summary.dayCount > 0 ? "共 \(summary.dayCount) 天有记录" : nil
+                    )
+                }
             }
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)

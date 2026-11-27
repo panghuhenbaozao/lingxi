@@ -363,8 +363,14 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         }
     }
 
+    /// 暴露最近一次完成的 AI 能力标签，供控制器写入本地认知记忆库与 Obsidian 自学习演化闭环
+    var lastCompletedFeatureTag: String {
+        lastAction?.rawValue ?? (lastRunPair?.title ?? "ai_ask")
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         let pad: CGFloat = 8
 
         // Row 1: 顶部输入框 + 粘贴 + 发送 + 返回
@@ -1013,24 +1019,28 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             actionsStack.addArrangedSubview(btn)
         }
 
-        addPill(title: "📷 截屏识图", selected: false) { [weak self] in
+        // 顶部只保留高价值实用能力：Obsidian 个人记忆库状态、截屏识图、核心写作技能与离线排版/脱敏
+        let vaultNotes = AICognitiveMemoryDB.shared.fetchVaultNotes(limit: 12)
+        if !vaultNotes.isEmpty {
+            addPill(title: "记忆库 · \(vaultNotes.count)", selected: false) { [weak self] in
+                guard let self else { return }
+                let previewLines = vaultNotes.prefix(5).map { "• \($0.title)：\($0.summary)" }.joined(separator: "\n")
+                self.showingHistory = false
+                self.historyScroll.isHidden = true
+                self.outputTextView.isHidden = false
+                self.outputTextView.text = "当前已挂载 \(vaultNotes.count) 条个人记忆笔记（AI 回复时自动按双链关联召回）：\n\n\(previewLines)"
+            }
+        }
+
+        addPill(title: "📷 识图", selected: false) { [weak self] in
             self?.onTriggerScreenshotVision?()
         }
 
-        let sceneTitle = activeScenePersona == .auto ? "🎭 场景" : activeScenePersona.shortTitle
-        addPill(title: sceneTitle, selected: activeScenePersona != .auto) { [weak self] in
-            self?.cycleScenePersona()
-        }
-
-        addPill(title: "✨ 三版", selected: lastRunPair?.title == "三版并发") { [weak self] in
-            self?.runThreeVariantsAction()
-        }
-
-        addPill(title: "✓ 离线排版", selected: lastRunPair?.title == "离线体检") { [weak self] in
+        addPill(title: "✓ 排版", selected: lastRunPair?.title == "离线体检") { [weak self] in
             self?.runOfflineLintInKeyboard()
         }
 
-        addPill(title: "🛡 离线脱敏", selected: lastRunPair?.title == "离线脱敏") { [weak self] in
+        addPill(title: "🛡 脱敏", selected: lastRunPair?.title == "离线脱敏") { [weak self] in
             self?.runOfflinePrivacyMaskInKeyboard()
         }
 

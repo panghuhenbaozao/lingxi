@@ -254,6 +254,34 @@ def main() -> int:
                         print(f"ERROR: Unresolved member '{member}' in {rel} ({m.group(0)})", file=sys.stderr)
                         return 1
 
+    # 4b. Keyboard cold-start, pasteboard prompt & SwiftUI List/Form LazyVGrid crash regressions
+    for p in swift_files:
+        rel = p.relative_to(root).as_posix()
+        text = p.read_text(encoding="utf-8")
+        if rel.startswith("Keyboard/"):
+            for i, line in enumerate(text.splitlines(), 1):
+                if re.match(r"^\s*private\s+(var|let)\s+\w+\s*=\s*(LingxiSettings|ThemeCustomization)\.load\(", line):
+                    print(f"ERROR: Sync disk load in Keyboard stored property initializer at {rel}:{i}", file=sys.stderr)
+                    return 1
+        if rel == "Keyboard/KeyboardViewController.swift":
+            m_vl = re.search(r"override func viewWillLayoutSubviews\(\)\s*\{([^}]*)\}", text, re.S)
+            if m_vl and "updatePreferredHeight(" in m_vl.group(1):
+                print("ERROR: updatePreferredHeight() must not be called inside viewWillLayoutSubviews()", file=sys.stderr)
+                return 1
+            m_va = re.search(r"override func viewWillAppear\(_ animated: Bool\)\s*\{(.*?)\n    \}", text, re.S)
+            if m_va and ("tryImportBridgeTokenFromPasteboardIfPresent" in m_va.group(1) or "checkPasteboardScreenshotOnAppearIfNeeded" in m_va.group(1)):
+                print("ERROR: Synchronous pasteboard read must not run inside viewWillAppear()", file=sys.stderr)
+                return 1
+        if rel.startswith("App/Views/") and "LazyVGrid(" in text:
+            # Verify no LazyVGrid is placed directly inside a Form/List Section
+            lines = text.splitlines()
+            for idx, line in enumerate(lines):
+                if "LazyVGrid(" in line:
+                    ctx_window = "\n".join(lines[max(0, idx - 12):idx])
+                    if re.search(r"\bSection(\s*\(|\s*\{)", ctx_window) and "ScrollView" not in ctx_window:
+                        print(f"ERROR: LazyVGrid inside List/Form Section in {rel}:{idx+1} (iOS 18 crash hazard)", file=sys.stderr)
+                        return 1
+
     print(
         f"OK  Swift Static Integrity Audit Passed ({len(swift_files)} files, 3 Xcode targets, 0 conflicts, 0 unresolved members)"
     )

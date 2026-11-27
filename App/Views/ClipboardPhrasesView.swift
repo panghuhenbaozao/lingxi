@@ -1039,8 +1039,6 @@ struct EmojiKaomojiCatalogSubView: View {
     @State private var copiedSymbolToast: String?
     @State private var recentSymbols: [String] = []
 
-    private let emojiColumns = [GridItem(.adaptive(minimum: 48, maximum: 64), spacing: 8)]
-
     var body: some View {
         let allHits = EmojiCatalog.search(emojiQuery, limit: 120)
         let emojis = allHits.filter { !$0.isSymbol }
@@ -1098,19 +1096,30 @@ struct EmojiKaomojiCatalogSubView: View {
 
             if showEmoji && !emojis.isEmpty {
                 Section("Emoji · \(emojis.count)") {
-                    LazyVGrid(columns: emojiColumns, spacing: 8) {
-                        ForEach(emojis, id: \.symbol) { entry in
-                            Button {
-                                copy(entry.symbol)
-                            } label: {
-                                Text(entry.symbol)
-                                    .font(.system(size: 28))
-                                    .frame(maxWidth: .infinity, minHeight: 48)
-                                    .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    let rowCount = (emojis.count + 5) / 6
+                    VStack(spacing: 8) {
+                        ForEach(0..<rowCount, id: \.self) { row in
+                            HStack(spacing: 8) {
+                                ForEach(0..<6, id: \.self) { col in
+                                    let idx = row * 6 + col
+                                    if idx < emojis.count {
+                                        let entry = emojis[idx]
+                                        Button {
+                                            copy(entry.symbol)
+                                        } label: {
+                                            Text(entry.symbol)
+                                                .font(.system(size: 26))
+                                                .frame(maxWidth: .infinity, minHeight: 46)
+                                                .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel("复制 \(entry.name)")
+                                    } else {
+                                        Color.clear.frame(maxWidth: .infinity, minHeight: 46)
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("复制 \(entry.name)")
                         }
                     }
                     .padding(.vertical, 6)
@@ -1127,20 +1136,31 @@ struct EmojiKaomojiCatalogSubView: View {
 
             if showSymbols && !symbols.isEmpty {
                 Section("符号 · \(symbols.count)") {
-                    LazyVGrid(columns: emojiColumns, spacing: 8) {
-                        ForEach(symbols, id: \.symbol) { entry in
-                            Button {
-                                copy(entry.symbol)
-                            } label: {
-                                Text(entry.symbol)
-                                    .font(.system(size: 20, weight: .medium))
-                                    .foregroundStyle(Color(Design.Palette.ink))
-                                    .frame(maxWidth: .infinity, minHeight: 48)
-                                    .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    let symRowCount = (symbols.count + 5) / 6
+                    VStack(spacing: 8) {
+                        ForEach(0..<symRowCount, id: \.self) { row in
+                            HStack(spacing: 8) {
+                                ForEach(0..<6, id: \.self) { col in
+                                    let idx = row * 6 + col
+                                    if idx < symbols.count {
+                                        let entry = symbols[idx]
+                                        Button {
+                                            copy(entry.symbol)
+                                        } label: {
+                                            Text(entry.symbol)
+                                                .font(.system(size: 20, weight: .medium))
+                                                .foregroundStyle(Color(Design.Palette.ink))
+                                                .frame(maxWidth: .infinity, minHeight: 46)
+                                                .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel("复制 \(entry.name)")
+                                    } else {
+                                        Color.clear.frame(maxWidth: .infinity, minHeight: 46)
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("复制 \(entry.name)")
                         }
                     }
                     .padding(.vertical, 6)

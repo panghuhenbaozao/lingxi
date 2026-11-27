@@ -3919,4 +3919,48 @@ final class LingxiTests: XCTestCase {
         let stale = ObsidianVaultNote(title: "久远记忆", summary: "s", bodyMarkdown: "b", strength: 0.8, recallCount: 0, updatedAt: Int(now.addingTimeInterval(-60 * 86400).timeIntervalSince1970))
         XCTAssertGreaterThan(ObsidianMemoryVaultEngine.effectiveStrength(for: fresh, now: now), ObsidianMemoryVaultEngine.effectiveStrength(for: stale, now: now))
     }
+
+    func testV74KeyboardStartupStabilityAndObsidianVocabLoop() throws {
+        // 1. 键盘内置默认 8 项 AI 技能聚焦实用办公与表达，不含花哨套话模块
+        let defaults = AIConfig.defaultKeyboardBuiltinActions
+        XCTAssertEqual(defaults.count, 8)
+        XCTAssertFalse(defaults.contains(.strategist))
+        XCTAssertFalse(defaults.contains(.eqReply))
+        XCTAssertFalse(defaults.contains(.xiaohongshu))
+        XCTAssertTrue(defaults.contains(.polish))
+        XCTAssertTrue(defaults.contains(.proofread))
+        XCTAssertTrue(defaults.contains(.translateEn))
+
+        // 2. 键盘主默认主题与 App 靛蓝设计语言统一且满足对比度要求
+        let pure = KeyboardThemePreset.find(id: "lingxi_pure")
+        let dark = KeyboardThemePreset.find(id: "midnight_geek")
+        XCTAssertEqual(pure.accentFill.hex, "#2F5BFF")
+        XCTAssertEqual(dark.accentFill.hex, "#5B82FF")
+        XCTAssertGreaterThan(pure.accentFill.contrastRatio(with: pure.accentText), 4.5)
+
+        // 3. 键盘快捷设置内嵌 AI 托管分段器标题完备
+        XCTAssertEqual(AIAutopilotMode.allCases.count, 3)
+        for mode in AIAutopilotMode.allCases {
+            XCTAssertFalse(mode.shortBadge.isEmpty)
+            XCTAssertFalse(mode.displayTitle.isEmpty)
+        }
+
+        // 4. 认知记忆库高频词条 -> UserLexicon 正向回流（单次偶然词与敏感手机号严禁回流）
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi_v74_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let db = AICognitiveMemoryDB(url: tmpDir.appendingPathComponent("v74_mem.sqlite"))
+
+        // 高频确认 2 次的专业词应成功同步
+        db.recordVocabLearning(word: "灵犀智脑", pinyin: "ling'xi'zhi'nao")
+        db.recordVocabLearning(word: "灵犀智脑", pinyin: "ling'xi'zhi'nao")
+        // 仅出现 1 次的偶然词不应同步
+        db.recordVocabLearning(word: "偶然生词", pinyin: "ou'ran'sheng'ci")
+        // 敏感手机号不应入库或回流
+        db.recordVocabLearning(word: "13800138000", pinyin: "yi'san'ba")
+
+        let lex = UserLexicon()
+        let synced = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(lex, db: db, minLearnCount: 2, limit: 20)
+        XCTAssertEqual(synced, 1, "仅达到 2 次确认且非敏感的高频专属词应同步回流至 UserLexicon")
+    }
 }

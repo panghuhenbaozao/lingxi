@@ -1173,7 +1173,7 @@ struct AIConfig: Codable, Equatable {
     static let defaultAnthropicBaseURL = "https://api.anthropic.com"
     static let defaultAnthropicModel = "claude-sonnet-4-20250514"
     static let defaultKeyboardBuiltinActions: [AIPresetAction] = [
-        .polish, .eqReply, .smartContinue, .strategist, .translateEn, .translateZh, .proofread, .summarize
+        .polish, .proofread, .smartContinue, .translateEn, .translateZh, .summarize, .organizeVoice, .structureList
     ]
 
     var provider: AIProvider = .gemini

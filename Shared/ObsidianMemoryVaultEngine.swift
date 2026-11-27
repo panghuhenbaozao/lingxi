@@ -761,6 +761,31 @@ enum ObsidianMemoryVaultEngine {
         }
     }
 
+    /// 记忆库 ↔ 词库正向回流：将认知学习数据库中高频确认的专属词条同步至本地 `UserLexicon`，
+    /// 让用户常打的项目名、专业术语和人名在 26 键/九宫格候选前排自然涌现（严格跳过隐私敏感词）。
+    @discardableResult
+    static func syncLearnedVocabToUserLexicon(
+        _ userLexicon: UserLexicon,
+        db: AICognitiveMemoryDB = .shared,
+        minLearnCount: Int = 2,
+        limit: Int = 40
+    ) -> Int {
+        let records = db.fetchTopVocab(limit: limit)
+        var synced = 0
+        for rec in records {
+            guard rec.learnCount >= minLearnCount else { continue }
+            let cleanWord = rec.word.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanPy = rec.pinyin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard cleanWord.count >= 2, cleanWord.count <= 8, !cleanPy.isEmpty else { continue }
+            guard !ClipboardClassifier.isSensitiveContent(cleanWord),
+                  !AIPrivacyShield.sanitize(cleanWord).hasRedactions else { continue }
+            if userLexicon.learn(word: cleanWord, py: cleanPy, prevWord: nil) != nil {
+                synced += 1
+            }
+        }
+        return synced
+    }
+
     // MARK: - Helpers
 
     private static func extractSemanticTokens(_ text: String) -> Set<String> {

@@ -59,7 +59,7 @@ final class KeyboardCanvasView: UIView {
     var onEvent: ((Event) -> Void)?
 
     private var theme: ResolvedTheme?
-    private var settings = LingxiSettings.load()
+    private var settings = LingxiSettings()
     private var isEnglishMode = false
     private var isComposing = false
     private var shiftState: ShiftState = .lowercase
@@ -117,6 +117,8 @@ final class KeyboardCanvasView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
+        clipsToBounds = false
+        keysContainer.clipsToBounds = false
         addSubview(keysContainer)
 
         glideTrailLayer.fillColor = UIColor.clear.cgColor
@@ -781,6 +783,23 @@ final class KeyboardCanvasView: UIView {
         }
     }
 
+    /// 键盘隐藏或切面板时立即清理全部按压态、连删定时器、滑行轨迹与气泡，彻底根治重开键盘时的按键粘滞与浮窗残留。
+    func resetTransientTouches() {
+        for (_, work) in longPressWorkItems {
+            work.cancel()
+        }
+        longPressWorkItems.removeAll()
+        stopRepeatDelete()
+        for (_, track) in activeTouches {
+            setKeyPressed(track.keyID, pressed: false)
+        }
+        activeTouches.removeAll()
+        popupView.hide()
+        glideTrailLayer.removeAllAnimations()
+        glideTrailLayer.opacity = 0.0
+        glideTrailLayer.path = nil
+    }
+
     private func finishTouch(_ touch: UITouch, commit: Bool) {
         cancelLongPress(for: touch)
         guard var track = activeTouches.removeValue(forKey: touch) else { return }
@@ -1226,14 +1245,16 @@ private final class KeyCapView: UIView {
             primaryLabel.textColor = theme.keyText
             if showHints, let secondary {
                 secondaryLabel.text = KeyboardSwipeCommand.keycapBadge(for: secondary)
-                secondaryLabel.textColor = KeyboardSwipeCommand.parse(secondary) != nil ? theme.candidateHighlight : theme.keyHintText
+                secondaryLabel.textColor = KeyboardSwipeCommand.parse(secondary) != nil
+                    ? theme.candidateHighlight.withAlphaComponent(0.82)
+                    : theme.keyHintText.withAlphaComponent(0.62)
                 secondaryLabel.isHidden = false
             }
             if showDownHints, let downPunct {
                 downHintLabel.text = KeyboardSwipeCommand.keycapBadge(for: downPunct)
                 downHintLabel.textColor = KeyboardSwipeCommand.parse(downPunct) != nil
-                    ? theme.candidateHighlight.withAlphaComponent(0.9)
-                    : theme.keyHintText.withAlphaComponent(0.7)
+                    ? theme.candidateHighlight.withAlphaComponent(0.82)
+                    : theme.keyHintText.withAlphaComponent(0.58)
                 downHintLabel.isHidden = false
             }
             if !isEnglishMode && showHints {
@@ -1299,9 +1320,13 @@ private final class KeyCapView: UIView {
             primaryLabel.font = .systemFont(ofSize: 14, weight: .semibold)
             primaryLabel.textColor = theme.keyText
         case .space:
-            primaryLabel.text = isEnglishMode ? "Lingxi · English" : "灵犀 · \(scheme.shortBadge)"
-            primaryLabel.font = .systemFont(ofSize: 14, weight: .regular)
-            primaryLabel.textColor = theme.keyHintText
+            if isEnglishMode {
+                primaryLabel.text = "English"
+            } else {
+                primaryLabel.text = scheme == .quanpin ? "灵犀" : "灵犀 · \(scheme.shortBadge)"
+            }
+            primaryLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
+            primaryLabel.textColor = theme.keyHintText.withAlphaComponent(0.85)
         case .returnKey:
             primaryLabel.text = returnTitle
             primaryLabel.font = .systemFont(ofSize: 15.5, weight: .semibold)

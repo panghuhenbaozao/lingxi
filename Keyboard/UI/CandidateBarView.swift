@@ -92,6 +92,7 @@ final class CandidateBarView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         // 栏高变化（设置页调节或拼音预览条显隐）后，实际生效字号可能随之收敛/恢复，需重建按钮
         if abs(bounds.height - lastLayoutHeight) > 0.5 {
             lastLayoutHeight = bounds.height

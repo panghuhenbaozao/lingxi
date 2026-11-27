@@ -12,8 +12,8 @@ final class QuickSettingsSheetView: UIView {
     private let scrollView = LingxiScrollView()
     private let stackView = UIStackView()
     private var theme: ResolvedTheme?
-    private var settings = LingxiSettings.load(force: true)
-    private var customization = ThemeCustomization.load(force: true)
+    private var settings = LingxiSettings()
+    private var customization = ThemeCustomization()
     private var isSystemDark: Bool = false
 
     override init(frame: CGRect) {
@@ -33,6 +33,7 @@ final class QuickSettingsSheetView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         scrollView.frame = bounds
         let pad: CGFloat = 10
         let w = max(100, bounds.width - pad * 2)
@@ -81,7 +82,7 @@ final class QuickSettingsSheetView: UIView {
         header.alignment = .center
         let title = UILabel()
         let todayChars = TypingStatsStore.shared.summary().todayChars
-        title.text = todayChars > 0 ? "⚙️ 灵犀快捷设置 · 今日 \(todayChars) 字" : "⚙️ 灵犀快捷设置"
+        title.text = todayChars > 0 ? "快捷设置 · 今日 \(todayChars) 字" : "快捷设置"
         title.font = .systemFont(ofSize: 14.5, weight: .bold)
         title.textColor = theme.keyText
         let closeBtn = ActionClosureButton(type: .system)
@@ -90,11 +91,25 @@ final class QuickSettingsSheetView: UIView {
         closeBtn.backgroundColor = theme.accentFill
         closeBtn.setTitleColor(theme.accentText, for: .normal)
         closeBtn.layer.cornerRadius = 8
+        closeBtn.layer.cornerCurve = .continuous
         closeBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 12, bottom: 5, right: 12)
         closeBtn.actionHandler = { [weak self] in self?.onClose?() }
         header.addArrangedSubview(title)
         header.addArrangedSubview(closeBtn)
         stackView.addArrangedSubview(header)
+
+        // AI 全权托管快捷切换（键盘内 1 键切换全权 / 建议 / 手动，无需跳转 App）
+        stackView.addArrangedSubview(makeSegmentedRow(
+            label: "AI 托管",
+            options: AIAutopilotMode.allCases.map(\.shortBadge),
+            selectedIndex: AIAutopilotMode.allCases.firstIndex(of: settings.aiAutopilotMode) ?? 0,
+            theme: theme
+        ) { [weak self] idx in
+            guard let self else { return }
+            self.settings.aiAutopilotMode = AIAutopilotMode.allCases[idx]
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+        })
 
         // 免费侧载沙盒隔离时：提供一键认领/同步主 App 外观与设置的云桥接横幅
         if !AppGroup.isAvailable {

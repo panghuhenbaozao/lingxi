@@ -723,24 +723,35 @@ struct CustomPromptEditorSheet: View {
                 }
 
                 Section("图标") {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 5), spacing: 10) {
-                        ForEach(icons, id: \.self) { sym in
-                            let selected = icon == sym
-                            Button {
-                                icon = sym
-                            } label: {
-                                Image(systemName: sym)
-                                    .font(.system(size: 17, weight: .semibold))
-                                    .frame(maxWidth: .infinity, minHeight: 44)
-                                    .foregroundStyle(selected ? Color.white : Color(Design.Palette.ink))
-                                    .background(
-                                        selected ? Color(Design.Palette.accent) : Color(Design.Palette.surface),
-                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    )
-                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    let rowCount = (icons.count + 4) / 5
+                    VStack(spacing: 10) {
+                        ForEach(0..<rowCount, id: \.self) { row in
+                            HStack(spacing: 10) {
+                                ForEach(0..<5, id: \.self) { col in
+                                    let idx = row * 5 + col
+                                    if idx < icons.count {
+                                        let sym = icons[idx]
+                                        let selected = icon == sym
+                                        Button {
+                                            icon = sym
+                                        } label: {
+                                            Image(systemName: sym)
+                                                .font(.system(size: 17, weight: .semibold))
+                                                .frame(maxWidth: .infinity, minHeight: 44)
+                                                .foregroundStyle(selected ? Color.white : Color(Design.Palette.ink))
+                                                .background(
+                                                    selected ? Color(Design.Palette.accent) : Color(Design.Palette.surface),
+                                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                )
+                                                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityAddTraits(selected ? .isSelected : [])
+                                    } else {
+                                        Color.clear.frame(maxWidth: .infinity, minHeight: 44)
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(selected ? .isSelected : [])
                         }
                     }
                     .padding(.vertical, 6)

@@ -69,7 +69,12 @@ final class PasteboardMonitor {
     private var lastCheckedAt: CFTimeInterval = 0
     private var lastObservedChangeCount: Int = -1
 
-    func refresh(settings: LingxiSettings, force: Bool = false, onChange: @escaping (ClipboardBannerState) -> Void) {
+    func refresh(
+        settings: LingxiSettings,
+        force: Bool = false,
+        allowProactiveStringRead: Bool = false,
+        onChange: @escaping (ClipboardBannerState) -> Void
+    ) {
         guard settings.clipboardBannerEnabled && !settings.incognitoModeEnabled else {
             if bannerState != .hidden {
                 bannerState = .hidden
@@ -141,7 +146,17 @@ final class PasteboardMonitor {
             return
         }
 
-        if settings.autoReadClipboardPreview || settings.smartOTPExtraction {
+        // 3.5 若 App Group / 跨屏接力已有待展示条目，直接展示零弹窗预览
+        if let pending = ClipboardStore.pendingBannerItem() {
+            activeChangeCount = currentCount
+            bannerState = .readyPreview(item: pending)
+            onChange(bannerState)
+            return
+        }
+
+        // 4. 仅在明确允许主动读取时才读取 pb.string；键盘冷启动/唤起默认走 Apple 零弹窗 detectPatterns + UIPasteControl，
+        // 彻底杜绝 iOS 16+ 每次打开键盘弹出「允许粘贴」系统弹窗阻塞焦点！
+        if allowProactiveStringRead && (settings.autoReadClipboardPreview || settings.smartOTPExtraction) {
             if let text = pb.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // L1 安全防线：若剪贴板为身份证号、银行卡号、私钥或显式密码，立即屏蔽并跳过横幅提示
                 if ClipboardClassifier.isSensitiveContent(text) {
@@ -151,8 +166,6 @@ final class PasteboardMonitor {
                     onChange(.hidden)
                     return
                 }
-                // 注意：此处仅入库历史并标记 pendingBannerItem，不提前标记 lastHandledChangeCount，
-                // 确保用户第一次复制后顶栏持续显示所复制内容，直到点击粘贴或关闭
                 if let item = ClipboardStore.record(text, changeCount: nil) {
                     activeChangeCount = currentCount
                     bannerState = .readyPreview(item: item)
@@ -165,7 +178,9 @@ final class PasteboardMonitor {
         let patterns: Set<UIPasteboard.DetectionPattern> = [.probableWebURL, .number, .probableWebSearch]
         pb.detectPatterns(for: patterns) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self,
+                      currentCount == self.lastObservedChangeCount,
+                      currentCount != self.dismissedChangeCount else { return }
                 let matched = (try? result.get()) ?? []
                 self.activeChangeCount = currentCount
                 let state = ClipboardBannerState.detectedNewContent(
