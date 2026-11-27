@@ -2570,10 +2570,13 @@ final class LingxiTests: XCTestCase {
         cfg.customHeaders = ["X-Title": "Lingxi"]
         cfg.saveCurrentAsProfile(name: "OpenRouter 备用", createNew: true)
         XCTAssertEqual(cfg.profiles.count, 2, "createNew: true 必须新增档案而非覆盖原档案")
-        XCTAssertEqual(cfg.profiles[0].visionModel, "gpt-4o")
-        XCTAssertEqual(cfg.profiles[0].customHeaders["HTTP-Referer"], "https://lingxi.ime")
+        let openRouterProfile = try XCTUnwrap(cfg.profiles.first(where: { $0.name == "OpenRouter 备用" }))
+        let deepSeekProfile = try XCTUnwrap(cfg.profiles.first(where: { $0.name == "DeepSeek 主力" }))
+        XCTAssertEqual(cfg.profiles.first?.id, openRouterProfile.id, "最新保存的渠道档案应置顶显示")
+        XCTAssertEqual(deepSeekProfile.visionModel, "gpt-4o")
+        XCTAssertEqual(deepSeekProfile.customHeaders["HTTP-Referer"], "https://lingxi.ime")
 
-        let applied = cfg.applying(profile: cfg.profiles[0])
+        let applied = cfg.applying(profile: deepSeekProfile)
         XCTAssertEqual(applied.openAIModel, "deepseek-chat")
         XCTAssertEqual(applied.resolvedVisionModel(), "gpt-4o")
         XCTAssertEqual(applied.resolvedSTTModel(baseURL: "https://api.openai.com/v1"), "whisper-large-v3")
