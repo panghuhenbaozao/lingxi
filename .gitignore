@@ -22,3 +22,5 @@ Tools/data/rime_wubi/
 
 # Runtime server SQLite database
 Server/*.sqlite3*
+.lingxi_ui_backup/
+推送到GitHub.bat

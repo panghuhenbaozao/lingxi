@@ -1225,13 +1225,15 @@ private final class KeyCapView: UIView {
             primaryLabel.font = .systemFont(ofSize: 22, weight: weight)
             primaryLabel.textColor = theme.keyText
             if showHints, let secondary {
-                secondaryLabel.text = secondary
-                secondaryLabel.textColor = theme.keyHintText
+                secondaryLabel.text = KeyboardSwipeCommand.keycapBadge(for: secondary)
+                secondaryLabel.textColor = KeyboardSwipeCommand.parse(secondary) != nil ? theme.candidateHighlight : theme.keyHintText
                 secondaryLabel.isHidden = false
             }
             if showDownHints, let downPunct {
-                downHintLabel.text = downPunct
-                downHintLabel.textColor = theme.keyHintText.withAlphaComponent(0.7)
+                downHintLabel.text = KeyboardSwipeCommand.keycapBadge(for: downPunct)
+                downHintLabel.textColor = KeyboardSwipeCommand.parse(downPunct) != nil
+                    ? theme.candidateHighlight.withAlphaComponent(0.9)
+                    : theme.keyHintText.withAlphaComponent(0.7)
                 downHintLabel.isHidden = false
             }
             if !isEnglishMode && showHints {

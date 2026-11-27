@@ -1,3 +1,4 @@
+import AVFoundation
 import Photos
 import UIKit
 
@@ -27,10 +28,20 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private var engine: PinyinEngine?
     private let feedback = FeedbackManager()
     private let pasteMonitor = PasteboardMonitor()
+    /// 懒加载选词轻声播报器（仅在用户开启「长辈选词播报」时实例化，零常驻内存）
+    private lazy var candidateSpeaker = AVSpeechSynthesizer()
+    /// 草稿防丢黑匣子当前会话缓冲（仅缓存普通输入框长草稿，严禁采集密码框/无痕模式/强密码）
+    private var activeDraftSessionBuffer = ""
+    private var skipNextDraftCapture = false
 
     // 配置与外观
     private var settings = LingxiSettings.load(force: true)
     private var themeCustomization = ThemeCustomization.load(force: true)
+    /// 内存缓存 AI 键盘轻量偏好与自定义斜杠宏，彻底避免 refreshToolbar() 在主线程每键读盘解码 AIConfig
+    private var cachedAITriggerPrefix: String = "@ai"
+    private var cachedAIContextCharLimit: Int = 240
+    private var cachedCustomPrompts: [CustomAIPromptTemplate] = []
+    private var cachedAIPipelines: [AIPromptPipeline] = []
     private var resolvedTheme = ResolvedTheme.resolve(isDarkAppearance: false, targetSize: CGSize(width: 430, height: 280))
     private var lastResolvedDarkAppearance: Bool?
     private var themeDarwinObserver: AppGroupNotifications.Observer?
@@ -107,10 +118,14 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let v = EmojiSymbolPanelView()
         v.onInsertText = { [weak self] text in
             guard let self else { return }
+            if let swipeCmd = KeyboardSwipeCommand.parse(text) {
+                self.executeSwipeCommand(swipeCmd)
+                return
+            }
             self.markUserKeystroke()
             self.lastSpaceTapTime = 0
             self.feedback.triggerKeyFeedback(tone: .letter, settings: self.settings, hasFullAccess: self.hasFullAccess)
-            self.insertFinalText(text, checkPairing: false)
+            self.insertFinalText(text, checkPairing: true)
             self.updateIdleSuggestions()
         }
         v.onBackspace = { [weak self] in
@@ -289,6 +304,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         super.viewDidLoad()
         settings = LingxiSettings.load(force: true)
         themeCustomization = ThemeCustomization.load(force: true)
+        refreshCachedAIPrefs()
         let darkNow = isDarkInterface
         lastResolvedDarkAppearance = darkNow
         resolvedTheme = ResolvedTheme.resolve(
@@ -312,7 +328,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
         aiConfigDarwinObserver = AppGroupNotifications.Observer(name: AppGroupNotifications.aiConfigChanged) { [weak self] in
             guard let self else { return }
-            KeyboardPermissionHeartbeat.record(hasFullAccess: self.hasFullAccess, aiConfigured: AIConfig.load().isConfigured)
+            let aiCfg = AIConfig.load()
+            self.cachedAITriggerPrefix = aiCfg.aiTriggerPrefix
+            self.cachedAIContextCharLimit = aiCfg.aiContextCharLimit
+            self.cachedCustomPrompts = aiCfg.customPrompts
+            self.cachedAIPipelines = aiCfg.aiPipelines
+            KeyboardPermissionHeartbeat.record(hasFullAccess: self.hasFullAccess, aiConfigured: aiCfg.isConfigured)
             if self.activePanel == .ai {
                 self.aiPanel.refreshAfterConfigChange(hasFullAccess: self.hasFullAccess)
             }
@@ -353,6 +374,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
         TypingStatsStore.shared.flush()
         flushTypingHabitSessionIfNeeded()
+        flushDraftRecoveryIfNeeded()
         TouchOffsetCalibrator.shared.flush()
         if !AppGroup.isAvailable && hasFullAccess && SideloadConfigBridge.isPairedInThisProcess {
             triggerSideloadBridgeSync(force: false)
@@ -685,7 +707,16 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
     }
 
+    private func refreshCachedAIPrefs() {
+        let aiCfg = AIConfig.load()
+        cachedAITriggerPrefix = aiCfg.aiTriggerPrefix
+        cachedAIContextCharLimit = aiCfg.aiContextCharLimit
+        cachedCustomPrompts = aiCfg.customPrompts
+        cachedAIPipelines = aiCfg.aiPipelines
+    }
+
     private func reloadConfigurationIfNeeded() {
+        refreshCachedAIPrefs()
         let newSettings = LingxiSettings.load(force: true)
         let newTheme = ThemeCustomization.load(force: true)
         let darkNow = isDarkInterface
@@ -855,10 +886,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func readLatestClipboardForDock() -> String? {
-        if hasFullAccess,
-           let sys = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !sys.isEmpty,
-           !ClipboardClassifier.isSensitiveContent(sys) {
+        if let sys = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess) {
             return sys
         }
         return ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1571,7 +1599,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             var reordered: [PinyinCandidate] = []
             var seen = Set<String>()
             for gc in glideCands {
-                let word = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(gc.word) : gc.word
+                let word = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(gc.word, variant: settings.traditionalVariant) : gc.word
                 let cand = PinyinCandidate(
                     word: word,
                     py: gc.py,
@@ -1853,7 +1881,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             pasteMonitor.dismissCurrent()
             refreshToolbar()
         case .directPasteFallback:
-            if let text = UIPasteboard.general.string, !text.isEmpty {
+            if !ConcealedPasteboard.isConcealed(),
+               let text = UIPasteboard.general.string, !text.isEmpty {
                 handleCapturedPasteFromToolbar(text)
             }
         case .askAIForClipboard(let text):
@@ -1885,16 +1914,74 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 theme: resolvedTheme,
                 hasFullAccess: hasFullAccess
             )
-        case .executeInlineAICommand(let command, let replaceCount):
+        case .selectionLocalTransform(let transform):
+            let sel = textDocumentProxy.selectedText ?? ""
+            guard !sel.isEmpty else { return }
+            let transformed = transform.apply(to: sel)
+            guard transformed != sel else { return }
+            setUndoBuffer(text: sel, wasComposing: false)
+            KeyboardVibrator.shared.mediumTap()
+            performEdit {
+                self.textDocumentProxy.insertText(transformed)
+            }
+            invalidateHostContextSnapshot()
+            refreshUI()
+        case .executeInlineAICommand(let match):
+            if let offline = match.offlineMacro {
+                commitRawIfNeeded()
+                let originalFull = String((textDocumentProxy.documentContextBeforeInput ?? "").suffix(match.fullMatchCount))
+                let transformed: String
+                switch offline {
+                case .lintFix:
+                    transformed = OfflineTextLinter.autoFix(match.command)
+                case .privacyMask:
+                    transformed = AIPrivacyShield.sanitize(match.command, customTerms: AIConfig.load().privacyCustomTerms).sanitizedText
+                case .toggleTraditional:
+                    let trad = ChineseScriptConverter.toTraditional(match.command, variant: settings.traditionalVariant)
+                    transformed = (trad != match.command)
+                        ? trad
+                        : ChineseScriptConverter.toSimplified(match.command, normalizeRegionalTerms: true)
+                case .cleanURL:
+                    let res = LinkPrivacyCleaner.clean(match.command)
+                    transformed = res.extractedCleanURL ?? res.cleanedText
+                case .platformSafe:
+                    transformed = OfflineTextLinter.autoReplacePlatformRisks(match.command)
+                }
+                if !transformed.isEmpty {
+                    setUndoBuffer(text: originalFull.isEmpty ? match.command : originalFull, wasComposing: false)
+                    KeyboardVibrator.shared.mediumTap()
+                    performEdit {
+                        for _ in 0..<match.fullMatchCount {
+                            self.textDocumentProxy.deleteBackward()
+                        }
+                        self.textDocumentProxy.insertText(transformed)
+                    }
+                    invalidateHostContextSnapshot()
+                    refreshUI()
+                }
+                return
+            }
             switchToPanel(.ai)
-            aiPanel.runDirectInstruction(
-                title: "@ai 随打即唤",
-                instruction: "请严格按用户的直接指令完成写作或回答，只直接输出可直接发送的结果正文，不要多余解释与引号。",
-                sourceText: command,
-                replaceCount: replaceCount,
-                theme: resolvedTheme,
-                hasFullAccess: hasFullAccess
-            )
+            if match.isThreeVariants {
+                aiPanel.runThreeVariantsDirect(
+                    sourceText: match.command,
+                    replaceCount: match.fullMatchCount,
+                    theme: resolvedTheme,
+                    hasFullAccess: hasFullAccess
+                )
+            } else {
+                let defaultInst = "请严格按用户的直接指令完成写作或回答，只直接输出可直接发送的结果正文，不要多余解释与引号。"
+                aiPanel.runDirectInstruction(
+                    title: match.actionTitle,
+                    instruction: match.systemInstruction ?? defaultInst,
+                    sourceText: match.command,
+                    replaceCount: match.fullMatchCount,
+                    theme: resolvedTheme,
+                    hasFullAccess: hasFullAccess,
+                    preferFast: match.preferFast,
+                    preferDeep: match.preferDeep
+                )
+            }
         case .tapComposingSyllable(let idx):
             enterRetroactiveSyllableEdit(at: idx)
         case .askAIForWord(let word):
@@ -1945,6 +2032,37 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             aiPromptDraft = nil
             clearAllComposing()
             switchToPanel(.ai)
+        case .exitIncognito:
+            settings.incognitoModeEnabled = false
+            settings.save()
+            KeyboardVibrator.shared.mediumTap()
+            refreshUI()
+        case .coolDownImpulse(let draft):
+            commitRawIfNeeded()
+            if hasFullAccess && AIConfig.load().isConfigured {
+                switchToPanel(.ai)
+                aiPanel.runDirectInstruction(
+                    title: "🧊 保底线降火",
+                    instruction: CommunicationGuardEngine.coolingSystemPrompt,
+                    sourceText: draft,
+                    replaceCount: draft.count,
+                    theme: resolvedTheme,
+                    hasFullAccess: hasFullAccess
+                )
+            } else {
+                let report = CommunicationGuardEngine.analyzeEmotion(draft)
+                if let calm = report.quickCalmSuggestions.first {
+                    setUndoBuffer(text: draft, wasComposing: false)
+                    for _ in 0..<draft.count {
+                        textDocumentProxy.deleteBackward()
+                    }
+                    insertFinalText(calm, checkPairing: false)
+                    KeyboardVibrator.shared.mediumTap()
+                    refreshUI()
+                } else {
+                    openAIPanel(preferredAction: .polish, explicitClipboard: nil)
+                }
+            }
         case .dismissSuggestions:
             isCandidatesExpanded = false
             currentCandidates = []
@@ -1955,9 +2073,135 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
     }
 
+    // MARK: - 仓输入法级按键划动动作命令执行
+
+    private func executeSwipeCommand(_ cmd: KeyboardSwipeCommand) {
+        switch cmd {
+        case .firstChar, .lastChar:
+            if let top = currentCandidates.first, !top.word.isEmpty {
+                let picked = (cmd == .firstChar) ? String(top.word.prefix(1)) : String(top.word.suffix(1))
+                KeyboardVibrator.shared.candidateTick()
+                insertFinalText(picked, checkPairing: false)
+                clearAllComposing()
+                updateIdleSuggestions()
+                refreshUI()
+            }
+        case .paste:
+            let pasted = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess)
+                ?? ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pasted, !pasted.isEmpty {
+                commitRawIfNeeded()
+                insertFinalText(pasted, checkPairing: false)
+                refreshUI()
+            }
+        case .undo:
+            restoreUndoBuffer()
+        case .clear:
+            if !rawComposing.isEmpty {
+                setUndoBuffer(text: rawComposing, wasComposing: true)
+                clearAllComposing()
+                refreshUI()
+            } else {
+                performBackspace(isRepeat: false)
+            }
+        case .cursorLeft:
+            commitRawIfNeeded()
+            KeyboardVibrator.shared.spaceTick()
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1) }
+            invalidateHostContextSnapshot()
+            refreshToolbar()
+        case .cursorRight:
+            commitRawIfNeeded()
+            KeyboardVibrator.shared.spaceTick()
+            performEdit { self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1) }
+            invalidateHostContextSnapshot()
+            refreshToolbar()
+        case .toggleLang:
+            commitRawIfNeeded()
+            isEnglishMode.toggle()
+            shiftState = .lowercase
+            refreshUI()
+        case .toggleTrad:
+            settings.traditionalChineseEnabled.toggle()
+            settings.save()
+            if !rawComposing.isEmpty {
+                recomputeCandidates()
+            } else {
+                refreshUI()
+            }
+        case .aiPanel:
+            openAIPanel(preferredAction: nil, explicitClipboard: nil)
+        case .aiPolish:
+            openAIPanel(preferredAction: .polish, explicitClipboard: nil)
+        case .aiThreeVariants:
+            commitRawIfNeeded()
+            let hostBefore = textDocumentProxy.documentContextBeforeInput ?? ""
+            let clean = hostBefore.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clipped = clean.count > cachedAIContextCharLimit ? String(clean.suffix(cachedAIContextCharLimit)) : clean
+            switchToPanel(.ai)
+            aiPanel.runThreeVariantsDirect(
+                sourceText: clipped,
+                replaceCount: clipped.count,
+                theme: resolvedTheme,
+                hasFullAccess: hasFullAccess
+            )
+        case .lintFix:
+            commitRawIfNeeded()
+            let hostBefore = textDocumentProxy.documentContextBeforeInput ?? ""
+            let tail = String(hostBefore.suffix(min(300, max(120, cachedAIContextCharLimit))))
+            let targetLine = tail.components(separatedBy: .newlines).last ?? tail
+            guard !targetLine.isEmpty else { return }
+            let fixed = OfflineTextLinter.autoFix(targetLine)
+            if fixed != targetLine && !fixed.isEmpty {
+                setUndoBuffer(text: targetLine, wasComposing: false)
+                KeyboardVibrator.shared.mediumTap()
+                performEdit {
+                    for _ in 0..<targetLine.count {
+                        self.textDocumentProxy.deleteBackward()
+                    }
+                    self.textDocumentProxy.insertText(fixed)
+                }
+                invalidateHostContextSnapshot()
+                refreshUI()
+            }
+        case .translate:
+            toggleTranslateMode()
+        case .insertDate:
+            commitRawIfNeeded()
+            let dates = DateTimeHelper.candidates(forNormalizedPinyin: "riqi")
+            let chosen = dates.count > 1 ? dates[1] : (dates.first ?? "")
+            if !chosen.isEmpty {
+                insertFinalText(chosen, checkPairing: false)
+                refreshUI()
+            }
+        case .insertTime:
+            commitRawIfNeeded()
+            if let t = DateTimeHelper.candidates(forNormalizedPinyin: "shijian").first {
+                insertFinalText(t, checkPairing: false)
+                refreshUI()
+            }
+        case .newline:
+            commitRawIfNeeded()
+            insertFinalText("\n", checkPairing: false)
+            refreshUI()
+        case .toggleIncognito:
+            settings.incognitoModeEnabled.toggle()
+            settings.save()
+            if settings.incognitoModeEnabled {
+                pasteMonitor.dismissCurrent()
+            }
+            KeyboardVibrator.shared.mediumTap()
+            refreshUI()
+        }
+    }
+
     // MARK: - 拼音 / 英文 / 纠错处理核心
 
     private func handleCharacterInput(_ ch: String) {
+        if let swipeCmd = KeyboardSwipeCommand.parse(ch) {
+            executeSwipeCommand(swipeCmd)
+            return
+        }
         markUserKeystroke()
         lastSpaceTapTime = 0
         clearUndoBuffer()
@@ -2199,6 +2443,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
            !finalBefore.isEmpty, finalBefore != aiOrig, finalBefore.count <= 400 {
             DispatchQueue.global(qos: .utility).async {
                 var cfg = AIConfig.load()
+                guard cfg.autoDiffLearnEnabled else { return }
                 AIAutoInsightService.learnFromUserEditDiff(aiOriginal: aiOrig, userFinal: finalBefore, into: &cfg.styleDNA)
                 cfg.save()
             }
@@ -2279,12 +2524,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         clearMarkedTextIfNeeded()
         sessionDeleteCount += 1
         performEdit {
-            // 成对括号智能退格连删：光标位于空括号中间（如 `（|）`、`(|)`）按 ⌫ 一次删掉整对
+            // 成对括号智能退格连删：光标位于空括号中间（如 `（|）`、`(|)`、`{|}`、`「|」`）按 ⌫ 一次删掉整对
             if !isRepeat,
                self.settings.autoPairPunctuation,
                let left = self.textDocumentProxy.documentContextBeforeInput?.last,
                let right = self.textDocumentProxy.documentContextAfterInput?.first,
-               Self.isMatchingBracketPair(left: left, right: right) {
+               PairedBracketHelper.isMatchingPair(left: left, right: right) {
                 self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
                 self.textDocumentProxy.deleteBackward()
                 self.textDocumentProxy.deleteBackward()
@@ -2303,15 +2548,6 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             refreshToolbar()
         }
         autoCapitalizeIfNeeded()
-    }
-
-    private static func isMatchingBracketPair(left: Character, right: Character) -> Bool {
-        switch (left, right) {
-        case ("(", ")"), ("[", "]"), ("（", "）"), ("「", "」"), ("【", "】"), ("《", "》"), ("“", "”"), ("‘", "’"):
-            return true
-        default:
-            return false
-        }
     }
 
     private func performSwipeDelete() {
@@ -2617,7 +2853,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         // 若开启繁体中文输出，保持英文/数字/符号不变，对中文候选实时转为繁体（保留五笔编码提示）
         if settings.traditionalChineseEnabled {
             merged = merged.map { c in
-                let converted = (c.source == .englishDirect) ? c.word : ChineseScriptConverter.toTraditional(c.word)
+                let converted = (c.source == .englishDirect) ? c.word : ChineseScriptConverter.toTraditional(c.word, variant: settings.traditionalVariant)
                 return PinyinCandidate(
                     word: converted,
                     py: c.py,
@@ -2676,6 +2912,10 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         feedback.triggerCursorSound(settings: settings)
         clearUndoBuffer()
         let cand = currentCandidates[index]
+        if rawComposing.count >= 2 && VModeToolEngine.isPasswordQuery(String(rawComposing.dropFirst())) {
+            skipNextDraftCapture = true
+        }
+        speakSelectedCandidateIfEnabled(cand.word)
 
         // 点击拼音条音节「免退格局部换字」：把选中的同音单字直接拼回整句第 idx 位并恢复整句首位！
         if let editIdx = editingSyllableIndex, !savedSentenceCandidatesBeforeEdit.isEmpty {
@@ -2778,7 +3018,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let wasInTranslate = isTranslateMode
         let prevWord = lastCommittedWord
         let outputWord = (settings.traditionalChineseEnabled && cand.source != .englishDirect)
-            ? ChineseScriptConverter.toTraditional(cand.word)
+            ? ChineseScriptConverter.toTraditional(cand.word, variant: settings.traditionalVariant)
             : cand.word
         // 关键防吞字优化：当直接上屏到宿主输入框时，绝不先发 setMarkedText("") + unmarkText() 再 insertText（3次异步XPC易丢字），
         // 而是由 insertText 单次原子替换并取消 markedText；仅重定向到 AI 草稿/翻译框时才单独清理宿主 markedText。
@@ -2815,7 +3055,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
         var learnedRecord: UserLearnRecord?
         var combinedLearnRecord: UserLearnRecord?
-        if settings.userLearningEnabled && !isSecureField && cand.source != .wubi, !cand.py.isEmpty {
+        let allowPrivacyLearning = settings.userLearningEnabled && !isSecureField && !settings.incognitoModeEnabled
+        if allowPrivacyLearning && cand.source != .wubi, !cand.py.isEmpty {
             let recordBigram = settings.bigramPredictionEnabled && prevWord != nil && (rawComposing.isEmpty || pendingPhraseSegments.isEmpty)
             let prevForRecord = recordBigram ? prevWord : nil
             learnedRecord = engine?.userLexicon.learn(word: cand.word, py: cand.py, prevWord: prevForRecord)
@@ -2843,7 +3084,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             wubiDisplayBuffer = nil
             uModeDisplayBuffer = nil
             isLastInputFromGlide = false
-            if settings.userLearningEnabled && !isSecureField && cand.source != .wubi && pendingPhraseSegments.count >= 2 {
+            if allowPrivacyLearning && cand.source != .wubi && pendingPhraseSegments.count >= 2 {
                 let combinedWord = pendingPhraseSegments.map(\.word).joined()
                 let combinedPy = pendingPhraseSegments.map(\.py).joined(separator: "'")
                 // 对齐 WowType COMPOSED_WORD_MAX_CHARS = 4：仅将 4 字以内分段拼出的新词（人名/术语/成语）收入自造词库
@@ -2923,7 +3164,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             if settings.bigramPredictionEnabled,
                let nextWords = engine?.predictNext(after: lastWord, userLearning: settings.userLearningEnabled, limit: 10) {
                 for (idx, w) in nextWords.enumerated() {
-                    let word = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(w) : w
+                    let word = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(w, variant: settings.traditionalVariant) : w
                     suggestions.append(PinyinCandidate(
                         word: word,
                         py: "",
@@ -2971,19 +3212,22 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         var inserted = text
         performEdit {
             if checkPairing && self.settings.autoPairPunctuation {
-                // 若光标右侧紧邻即将输入的闭括号（自动配对生成的），直接越过不重复插入
-                let closers: Set<String> = [")", "]", "）", "」", "】", "》"]
-                if closers.contains(text),
-                   let nextChar = self.textDocumentProxy.documentContextAfterInput?.first,
-                   String(nextChar) == text {
+                // 1) 光标右侧紧邻即将输入的闭括号时，直接越过不重复插入
+                let nextChar = self.textDocumentProxy.documentContextAfterInput?.first
+                if PairedBracketHelper.shouldSkipCloser(text, nextChar: nextChar) {
                     self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
                     inserted = ""
                     return
                 }
-                let pairs: [String: String] = [
-                    "（": "（）", "「": "「」", "【": "【】", "《": "《》", "(": "()", "[": "[]",
-                ]
-                if let paired = pairs[text] {
+                // 2) 符号面板/下划映射直接输入成对符号（如 `()` `{}` `[]` `「」` `《》`）时自动将光标置入括号中央
+                if PairedBracketHelper.shouldAutoPlaceCursorInside(text) {
+                    self.textDocumentProxy.insertText(text)
+                    self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
+                    inserted = text
+                    return
+                }
+                // 3) 单个开括号自动补全整对并将光标置中
+                if let paired = PairedBracketHelper.expandedPair(for: text) {
                     self.textDocumentProxy.insertText(paired)
                     self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
                     inserted = paired
@@ -3019,25 +3263,85 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             hostSnapshot.beforeInput = (hostSnapshot.beforeInput ?? "") + inserted
             hostSnapshot.selectedText = nil
         }
-        // 打字统计与实时习惯画像采样：仅统计真实上屏文本；密码/邮箱/网址等隐私框与换行键不统计
-        if self.shouldAllowPanguSpace, !inserted.isEmpty, inserted != "\n" {
-            if self.settings.typingStatsEnabled {
-                TypingStatsStore.shared.recordCommit(text: inserted)
+        // 打字统计、习惯画像与草稿防丢黑匣子：无痕模式/密码/邮箱/网址框与强密码绝不采集
+        if self.shouldAllowPanguSpace, !self.settings.incognitoModeEnabled, !inserted.isEmpty {
+            if skipNextDraftCapture {
+                skipNextDraftCapture = false
+            } else if settings.draftRecoveryEnabled {
+                if inserted == "\n" {
+                    flushDraftRecoveryIfNeeded()
+                } else {
+                    activeDraftSessionBuffer += inserted
+                    if activeDraftSessionBuffer.count > DraftRecoveryStore.maxDraftChars {
+                        activeDraftSessionBuffer = String(activeDraftSessionBuffer.suffix(DraftRecoveryStore.maxDraftChars))
+                    }
+                    if activeDraftSessionBuffer.count >= DraftRecoveryStore.minCaptureLength,
+                       let lastCh = inserted.last, "。！？!?；;\n".contains(lastCh) {
+                        DraftRecoveryStore.record(
+                            activeDraftSessionBuffer,
+                            isSecureField: isSecureField,
+                            isIncognito: settings.incognitoModeEnabled,
+                            enabled: settings.draftRecoveryEnabled
+                        )
+                    }
+                }
             }
-            if self.sessionHabitStartedAt == nil {
-                self.sessionHabitStartedAt = Date()
+            if inserted != "\n" {
+                if self.settings.typingStatsEnabled {
+                    TypingStatsStore.shared.recordCommit(text: inserted)
+                }
+                if self.sessionHabitStartedAt == nil {
+                    self.sessionHabitStartedAt = Date()
+                }
+                self.sessionCommittedChars += inserted.count
+                self.sessionCommittedWords += 1
+                if self.sessionCommittedChars >= 8 {
+                    self.flushTypingHabitSessionIfNeeded()
+                }
             }
-            self.sessionCommittedChars += inserted.count
-            self.sessionCommittedWords += 1
-            if self.sessionCommittedChars >= 8 {
-                self.flushTypingHabitSessionIfNeeded()
-            }
+        } else {
+            skipNextDraftCapture = false
         }
         return inserted
     }
 
+    private func flushDraftRecoveryIfNeeded() {
+        guard settings.draftRecoveryEnabled, !isSecureField, !settings.incognitoModeEnabled else {
+            activeDraftSessionBuffer = ""
+            return
+        }
+        let candidate = activeDraftSessionBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hostBefore = (hostSnapshot.beforeInput ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let best = hostBefore.count > candidate.count ? hostBefore : candidate
+        if best.count >= DraftRecoveryStore.minCaptureLength {
+            DraftRecoveryStore.record(
+                best,
+                isSecureField: isSecureField,
+                isIncognito: settings.incognitoModeEnabled,
+                enabled: settings.draftRecoveryEnabled
+            )
+        }
+        activeDraftSessionBuffer = ""
+    }
+
+    private func speakSelectedCandidateIfEnabled(_ word: String) {
+        guard settings.speakSelectedCandidateEnabled,
+              !settings.incognitoModeEnabled,
+              !isSecureField else { return }
+        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 16 else { return }
+        if candidateSpeaker.isSpeaking {
+            candidateSpeaker.stopSpeaking(at: .immediate)
+        }
+        let utterance = AVSpeechUtterance(string: trimmed)
+        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
+        utterance.volume = 0.65
+        candidateSpeaker.speak(utterance)
+    }
+
     private func flushTypingHabitSessionIfNeeded() {
-        guard sessionCommittedChars > 0 else { return }
+        guard sessionCommittedChars > 0, !settings.incognitoModeEnabled else { return }
         let start = sessionHabitStartedAt ?? Date()
         let dur = max(1, min(300, Int(Date().timeIntervalSince(start))))
         let event = TypingHabitEventPayload(
@@ -3091,7 +3395,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 }
             }
         }
-        if shouldAllowPanguSpace, settings.typingStatsEnabled, text != "\n", !text.isEmpty {
+        if shouldAllowPanguSpace, !settings.incognitoModeEnabled, settings.typingStatsEnabled, text != "\n", !text.isEmpty {
             TypingStatsStore.shared.recordCommit(text: text)
         }
     }
@@ -3109,7 +3413,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     private func commitPickedSingleCharacter(_ ch: String) {
         isCandidatesExpanded = false
-        let chosen = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(ch) : ch
+        let chosen = settings.traditionalChineseEnabled ? ChineseScriptConverter.toTraditional(ch, variant: settings.traditionalVariant) : ch
         clearAllComposing()
         _ = insertFinalText(chosen, checkPairing: false)
         lastCommittedWord = ch
@@ -3402,11 +3706,15 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private func openAIPanel(preferredAction: AIPresetAction?, explicitClipboard: String?) {
         commitRawIfNeeded()
         if !AppGroup.isAvailable && hasFullAccess {
-            _ = tryImportBridgeTokenFromPasteboardIfPresent()
+            if tryImportBridgeTokenFromPasteboardIfPresent() {
+                refreshCachedAIPrefs()
+            }
         }
         switchToPanel(.ai)
         let hostBefore = textDocumentProxy.documentContextBeforeInput ?? ""
-        let before = (hostBefore.isEmpty && isTranslateMode && !translateSourceBuffer.isEmpty) ? translateSourceBuffer : hostBefore
+        let rawBefore = (hostBefore.isEmpty && isTranslateMode && !translateSourceBuffer.isEmpty) ? translateSourceBuffer : hostBefore
+        let ctxLimit = cachedAIContextCharLimit
+        let before = rawBefore.count > ctxLimit ? String(rawBefore.suffix(ctxLimit)) : rawBefore
         aiPanel.prepare(
             theme: resolvedTheme,
             hasFullAccess: hasFullAccess,
@@ -3484,7 +3792,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
         switch target {
         case .emoji:
-            emojiPanel.configure(theme: resolvedTheme)
+            emojiPanel.configure(theme: resolvedTheme, packQuickTokens: activeLayoutPackQuickTokens)
         case .clipboard:
             clipboardPanel.configure(
                 theme: resolvedTheme,
@@ -3500,7 +3808,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             )
         case .numbers:
             let (retTitle, _) = returnKeyAppearance()
-            numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
+            numberPad.configure(
+                theme: resolvedTheme,
+                isChineseMode: !isEnglishMode,
+                returnTitle: retTitle,
+                packQuickTokens: activeLayoutPackQuickTokens
+            )
         case .editPad:
             editPadPanel.apply(theme: resolvedTheme)
         case .voice:
@@ -3556,10 +3869,15 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         }
         if hasCreatedNumberPad {
             let (retTitle, _) = returnKeyAppearance()
-            numberPad.configure(theme: resolvedTheme, isChineseMode: !isEnglishMode, returnTitle: retTitle)
+            numberPad.configure(
+                theme: resolvedTheme,
+                isChineseMode: !isEnglishMode,
+                returnTitle: retTitle,
+                packQuickTokens: activeLayoutPackQuickTokens
+            )
         }
         if hasCreatedEmojiPanel && activePanel == .emoji {
-            emojiPanel.configure(theme: resolvedTheme)
+            emojiPanel.configure(theme: resolvedTheme, packQuickTokens: activeLayoutPackQuickTokens)
         }
         if activePanel == .quickSettings && hasCreatedQuickSettingsPanel {
             quickSettingsPanel.updateTheme(
@@ -3597,7 +3915,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         } else if !isEnglishMode && !isUsingT9Layout && SmartCandidateHelper.isVToolQuery(rawComposing, scheme: settings.inputScheme) {
             if rawComposing.count == 1 && CustomWordStore.match(rawInput: rawComposing).isEmpty {
                 let keyHint = settings.inputScheme == .quanpin ? "v" : "V"
-                composingDisplay = "🧰 \(keyHint)模式 · 输数字转大写 / 算式 / rq时间"
+                composingDisplay = "🧰 \(keyHint)模式 · vdz名片 / vkp开票 / vaa368/4 / vdk100/30/3.5 / vpw16"
             } else {
                 composingDisplay = "🧰 \(rawComposing)"
             }
@@ -3644,7 +3962,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             ? hostSnapshot.selectedText
             : nil
         let inlineAICmd: InlineAICommandMatch? = (!secureNow && !isActivelyComposing && activePanel == .letters)
-            ? InlineAICommandDetector.detect(in: hostSnapshot.beforeInput ?? "")
+            ? InlineAICommandDetector.detect(
+                in: hostSnapshot.beforeInput ?? "",
+                customPrefix: cachedAITriggerPrefix,
+                customPrompts: cachedCustomPrompts,
+                pipelines: cachedAIPipelines,
+                translateTargetLang: settings.translateTargetLang
+            )
             : nil
 
         liveDockView.update(mode: currentLiveDockMode())
@@ -3658,6 +3982,15 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let screenshotPillLabel: String? = (!isActivelyComposing && activePanel == .letters)
             ? pendingDetectedScreenshot.map { $0.fromPasteboard ? "📷 剪贴板截屏" : "📷 刚截的屏" }
             : nil
+
+        let activeImpulseDraft: String? = {
+            guard !secureNow, !isActivelyComposing, activePanel == .letters else { return nil }
+            let beforeAll = hostSnapshot.beforeInput ?? ""
+            let trailingLine = String(beforeAll.split(separator: "\n", omittingEmptySubsequences: false).last ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trailingLine.count >= 6, trailingLine.count <= 260 else { return nil }
+            return CommunicationGuardEngine.analyzeEmotion(trailingLine).shouldWarnInKeyboard ? trailingLine : nil
+        }()
 
         let isIdlePredictionMode = !isActivelyComposing && !effectiveCandidates.isEmpty
         toolbarView.update(
@@ -3678,7 +4011,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             toolbarLayout: settings.toolbarLayout,
             showComposingStrip: settings.showComposingStrip,
             isIdlePredictionMode: isIdlePredictionMode,
-            screenshotDetectedLabel: screenshotPillLabel
+            screenshotDetectedLabel: screenshotPillLabel,
+            isIncognito: settings.incognitoModeEnabled,
+            impulseDraft: activeImpulseDraft
         )
     }
 
@@ -3706,6 +4041,102 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             syncExpandedCandidatesIfVisible()
         }
         refreshUI()
+    }
+
+    private var activeLayoutPackQuickTokens: [String] {
+        CustomKeyboardLayoutPack.find(id: settings.activeLayoutPackID)?.quickStripTokens ?? []
+    }
+
+    private func transformSelectedOrLastLine(using transform: (String) -> String) {
+        commitRawIfNeeded()
+        if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
+            let out = transform(sel)
+            if out != sel && !out.isEmpty {
+                setUndoBuffer(text: sel, wasComposing: false)
+                KeyboardVibrator.shared.mediumTap()
+                performEdit {
+                    self.textDocumentProxy.deleteBackward()
+                    self.textDocumentProxy.insertText(out)
+                }
+            }
+            return
+        }
+        if let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty {
+            let tail = String(before.suffix(min(300, max(120, cachedAIContextCharLimit))))
+            let targetLine = tail.components(separatedBy: .newlines).last ?? tail
+            guard !targetLine.isEmpty else { return }
+            let out = transform(targetLine)
+            if out != targetLine && !out.isEmpty {
+                setUndoBuffer(text: targetLine, wasComposing: false)
+                KeyboardVibrator.shared.mediumTap()
+                performEdit {
+                    for _ in 0..<targetLine.count { self.textDocumentProxy.deleteBackward() }
+                    self.textDocumentProxy.insertText(out)
+                }
+            }
+        }
+    }
+
+    private func deleteWordBeforeCursor() {
+        if !rawComposing.isEmpty {
+            setUndoBuffer(text: rawComposing, wasComposing: true)
+            clearAllComposing()
+            refreshUI()
+            return
+        }
+        guard let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty else { return }
+        let chars = Array(before)
+        var idx = chars.count - 1
+        // 1. 跳过末尾连续空格/制表符（但不跨换行）
+        while idx >= 0 && (chars[idx] == " " || chars[idx] == "\t") {
+            idx -= 1
+        }
+        if idx < 0 {
+            // 光标前全是空白，一次性删掉这段空白
+            let count = chars.count
+            setUndoBuffer(text: before, wasComposing: false)
+            performEdit {
+                for _ in 0..<count { self.textDocumentProxy.deleteBackward() }
+            }
+            refreshToolbar()
+            return
+        }
+        let anchor = chars[idx]
+        if anchor == "\n" {
+            // 仅删掉一个换行符
+            idx -= 1
+        } else if anchor.isASCII && (anchor.isLetter || anchor.isNumber || anchor == "_") {
+            // 英文/数字/标识符：整词回删
+            while idx >= 0 && chars[idx].isASCII && (chars[idx].isLetter || chars[idx].isNumber || chars[idx] == "_") {
+                idx -= 1
+            }
+        } else if anchor.isPunctuation || anchor.isSymbol {
+            // 连续标点符号：删掉同一组标点（最多 4 个）
+            var steps = 0
+            while idx >= 0 && (chars[idx].isPunctuation || chars[idx].isSymbol) && steps < 4 {
+                idx -= 1
+                steps += 1
+            }
+        } else {
+            // 中文/其他文字：按短词片段回删（最多 4 字，遇到空白/换行/标点停止）
+            var steps = 0
+            while idx >= 0 && steps < 4 {
+                let c = chars[idx]
+                if c.isWhitespace || c == "\n" || c.isPunctuation || c.isSymbol || (c.isASCII && (c.isLetter || c.isNumber)) {
+                    break
+                }
+                idx -= 1
+                steps += 1
+            }
+        }
+        let deleteCount = chars.count - 1 - idx
+        guard deleteCount > 0 else { return }
+        let deleted = String(chars[(chars.count - deleteCount)..<chars.count])
+        setUndoBuffer(text: deleted, wasComposing: false)
+        performEdit {
+            for _ in 0..<deleteCount { self.textDocumentProxy.deleteBackward() }
+        }
+        refreshToolbar()
     }
 
     private func handleEditPadAction(_ action: TextEditingPadView.EditAction) {
@@ -3737,41 +4168,54 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
                 UIPasteboard.general.string = sel
                 _ = ClipboardStore.record(sel)
+                setUndoBuffer(text: sel, wasComposing: false)
                 performEdit { self.textDocumentProxy.deleteBackward() }
             }
         case .paste:
-            if let txt = UIPasteboard.general.string ?? ClipboardStore.items().first?.text, !txt.isEmpty {
+            let safePaste = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess)
+                ?? ClipboardStore.items().first?.text
+            if let txt = safePaste, !txt.isEmpty {
                 insertDirectlyIntoHost(txt)
             }
         case .selectAll:
             break
         case .deleteBackward:
             performBackspace(isRepeat: false)
-        case .formatPanguSpace:
-            if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
-                let formatted = TextFormatterToolbox.addPanguSpaces(sel)
-                performEdit {
-                    self.textDocumentProxy.deleteBackward()
-                    self.textDocumentProxy.insertText(formatted)
-                }
-            } else if let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty {
-                let chunk = String(before.suffix(120))
-                let formatted = TextFormatterToolbox.addPanguSpaces(chunk)
-                if formatted != chunk {
-                    performEdit {
-                        for _ in 0..<chunk.count { self.textDocumentProxy.deleteBackward() }
-                        self.textDocumentProxy.insertText(formatted)
-                    }
-                }
+        case .undo:
+            restoreUndoBuffer()
+            refreshToolbar()
+        case .deleteWordBefore:
+            deleteWordBeforeCursor()
+        case .offlineLintFix:
+            transformSelectedOrLastLine { OfflineTextLinter.autoFix($0) }
+            refreshToolbar()
+        case .privacyRedact:
+            let customTerms = AIConfig.load().privacyCustomTerms
+            transformSelectedOrLastLine { AIPrivacyShield.sanitize($0, customTerms: customTerms).sanitizedText }
+            refreshToolbar()
+        case .toggleTraditional:
+            let variant = settings.traditionalVariant
+            transformSelectedOrLastLine { text in
+                let trad = ChineseScriptConverter.toTraditional(text, variant: variant)
+                if trad != text { return trad }
+                let simp = ChineseScriptConverter.toSimplified(text, normalizeRegionalTerms: true)
+                return simp != text ? simp : trad
             }
+            refreshToolbar()
+        case .formatPanguSpace:
+            transformSelectedOrLastLine { TextFormatterToolbox.addPanguSpaces($0) }
+            refreshToolbar()
         case .formatCollapseLines:
             if let sel = textDocumentProxy.selectedText, !sel.isEmpty {
                 let formatted = TextFormatterToolbox.collapseBlankLines(sel)
-                performEdit {
-                    self.textDocumentProxy.deleteBackward()
-                    self.textDocumentProxy.insertText(formatted)
+                if formatted != sel {
+                    setUndoBuffer(text: sel, wasComposing: false)
+                    performEdit {
+                        self.textDocumentProxy.deleteBackward()
+                        self.textDocumentProxy.insertText(formatted)
+                    }
                 }
-            } else if let clip = UIPasteboard.general.string ?? ClipboardStore.items().first?.text, !clip.isEmpty {
+            } else if let clip = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess) ?? ClipboardStore.items().first?.text, !clip.isEmpty {
                 insertDirectlyIntoHost(TextFormatterToolbox.collapseBlankLines(clip))
             }
         }

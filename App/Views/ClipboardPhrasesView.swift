@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct ClipboardPhrasesView: View {
     @EnvironmentObject private var appState: AppState
@@ -11,6 +12,7 @@ struct ClipboardPhrasesView: View {
     @State private var historySearchQuery = ""
     @State private var historyCategoryFilter = 0 // 0=全部, 1=验证码, 2=链接, 3=置顶
     @State private var toolboxToast: String?
+    @State private var showClearConfirm = false
     @State private var relaySSETask: Task<Void, Never>?
 
     // BigBang 炸词提取 Sheet
@@ -25,12 +27,13 @@ struct ClipboardPhrasesView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 Picker("内容类型", selection: $segment) {
-                    Text("剪贴板").tag(0)
-                    Text("快捷短语").tag(1)
+                    Text("剪贴板 · \(appState.clipboardItems.count)").tag(0)
+                    Text("快捷短语 · \(appState.quickPhrases.count)").tag(1)
                 }
                 .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 10)
+                .padding(.horizontal, Design.Spacing.md)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
 
                 if segment == 0 {
                     clipboardList
@@ -38,7 +41,9 @@ struct ClipboardPhrasesView: View {
                     phrasesList
                 }
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("工具")
+            .lxToast($toolboxToast)
             .onAppear {
                 let relayConfig = ClipboardRelayConfig.load()
                 if relayConfig.autoRelayEnabled, !relayConfig.pairCode.isEmpty {
@@ -47,7 +52,7 @@ struct ClipboardPhrasesView: View {
                         appState.reloadClipboard()
                         if let first = items.first {
                             UIPasteboard.general.string = first.contentText
-                            toolboxToast = "⚡ 跨屏收到：「\(first.contentText.prefix(24))」"
+                            toolboxToast = "跨屏收到：「\(first.contentText.prefix(24))」"
                         }
                     }
                 }
@@ -60,25 +65,41 @@ struct ClipboardPhrasesView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     if segment == 0 {
                         Menu {
-                            Button("从系统剪贴板导入当前内容") {
-                                if let text = UIPasteboard.general.string, !text.isEmpty {
-                                    appState.addClipboardEntry(text)
-                                }
+                            Button {
+                                importSystemClipboard()
+                            } label: {
+                                Label("导入系统剪贴板当前内容", systemImage: "square.and.arrow.down")
                             }
-                            Button("清空未置顶记录", role: .destructive) {
-                                appState.clearUnpinnedClipboard()
+                            Button(role: .destructive) {
+                                showClearConfirm = true
+                            } label: {
+                                Label("清空未置顶记录", systemImage: "trash")
                             }
+                            .disabled(!appState.clipboardItems.contains(where: { !$0.isPinned }))
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
+                        .accessibilityLabel("剪贴板操作")
                     } else {
                         Button {
+                            newPhraseTitle = ""
+                            newPhraseContent = ""
+                            newPhraseCategory = "常用"
                             showAddPhrase = true
                         } label: {
                             Image(systemName: "plus")
                         }
+                        .accessibilityLabel("新建快捷短语")
                     }
                 }
+            }
+            .confirmationDialog("清空未置顶的剪贴板记录？", isPresented: $showClearConfirm, titleVisibility: .visible) {
+                Button("清空", role: .destructive) {
+                    appState.clearUnpinnedClipboard()
+                    toolboxToast = "已清空未置顶记录"
+                }
+            } message: {
+                Text("置顶的记录会保留，此操作无法撤销。")
             }
             .sheet(isPresented: $showAddPhrase) {
                 addPhraseSheet
@@ -98,189 +119,413 @@ struct ClipboardPhrasesView: View {
         }
     }
 
+    private func importSystemClipboard() {
+        if let text = ConcealedPasteboard.readNonConcealedStringForUserPaste() {
+            appState.addClipboardEntry(text)
+            toolboxToast = "已导入当前剪贴板内容"
+        } else {
+            toolboxToast = ConcealedPasteboard.isConcealed() ? "当前剪贴板为保险箱受保护内容，已拒绝记入明文历史" : "系统剪贴板是空的"
+        }
+    }
+
+    private func copyToPasteboard(_ text: String, message: String) {
+        UIPasteboard.general.string = text
+        toolboxToast = message
+    }
+
+    private func openBigBang(_ text: String) {
+        selectedBigBangTokens = []
+        bigBangCustomCode = ""
+        bigBangSourceText = text
+    }
+
     // MARK: - 1. 剪贴板历史（L1 主列表）+ 效率工具箱 L2 入口
+
+    private var filteredClipboardItems: [ClipboardItem] {
+        let q = historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return appState.clipboardItems.filter { item in
+            guard matchesFilter(item, historyCategoryFilter) else { return false }
+            if q.isEmpty { return true }
+            return item.text.lowercased().contains(q) || (item.extractedCode?.contains(q) ?? false)
+        }
+    }
+
+    private func matchesFilter(_ item: ClipboardItem, _ filter: Int) -> Bool {
+        switch filter {
+        case 1: return item.category == .code || item.extractedCode != nil
+        case 2: return item.category == .url
+        case 3: return item.isPinned
+        default: return true
+        }
+    }
 
     private var clipboardList: some View {
         List {
-            if let toast = toolboxToast {
-                Section {
-                    Label(toast, systemImage: "checkmark.circle.fill")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
-            }
-
             if appState.clipboardItems.isEmpty {
-                Section("本机剪贴板历史") {
-                    Text("暂无剪贴板历史。复制任意内容切出键盘或点右上角导入，自动识别验证码、链接与语境动作。")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 6)
+                Section {
+                    VStack(spacing: 12) {
+                        LXEmptyState(
+                            icon: "doc.on.clipboard",
+                            title: "还没有剪贴板记录",
+                            message: "复制任意内容后切到灵犀键盘，或点下面的按钮导入。会自动识别验证码和链接。"
+                        )
+                        Button {
+                            importSystemClipboard()
+                        } label: {
+                            Label("导入当前剪贴板", systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true))
+                        .padding(.bottom, 10)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             } else {
-                let q = historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                let filtered = appState.clipboardItems.filter { item in
-                    switch historyCategoryFilter {
-                    case 1: if item.category != .code && item.extractedCode == nil { return false }
-                    case 2: if item.category != .url { return false }
-                    case 3: if !item.isPinned { return false }
-                    default: break
-                    }
-                    if q.isEmpty { return true }
-                    return item.text.lowercased().contains(q) || (item.extractedCode?.contains(q) ?? false)
-                }
-                Section("剪贴板历史 (\(filtered.count))") {
-                    TextField("搜索历史或验证码…", text: $historySearchQuery)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    Picker("筛选", selection: $historyCategoryFilter) {
-                        Text("全部").tag(0)
-                        Text("验证码").tag(1)
-                        Text("链接").tag(2)
-                        Text("置顶").tag(3)
-                    }
-                    .pickerStyle(.segmented)
-
-                    ForEach(filtered) { item in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(item.text)
-                                .font(.body)
-                                .lineLimit(4)
-                            HStack(spacing: 8) {
-                                Label(item.category.badgeText, systemImage: item.category.systemIconName)
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
-                                if let code = item.extractedCode {
-                                    Text("验证码: \(code)")
-                                        .font(.caption.bold())
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color(Design.Palette.accentSoft))
-                                        .foregroundStyle(Color(Design.Palette.accent))
-                                        .clipShape(Capsule())
-                                }
-                                if item.isPinned {
-                                    Image(systemName: "pin.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.orange)
-                                }
-                                Spacer()
-
-                                Button {
-                                    selectedBigBangTokens = []
-                                    bigBangCustomCode = ""
-                                    bigBangSourceText = item.text
-                                } label: {
-                                    Label("炸词", systemImage: "scissors")
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Color(Design.Palette.surface))
-                                        .foregroundStyle(Color(Design.Palette.ink))
-                                        .clipShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-
-                                Text(item.createdAt, style: .relative)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                        .swipeActions(edge: .leading) {
+                let filtered = filteredClipboardItems
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.subheadline)
+                            .foregroundStyle(Color(Design.Palette.muted))
+                        TextField("搜索历史或验证码", text: $historySearchQuery)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !historySearchQuery.isEmpty {
                             Button {
-                                appState.togglePinClipboard(id: item.id)
+                                historySearchQuery = ""
                             } label: {
-                                Label(item.isPinned ? "取消置顶" : "置顶", systemImage: item.isPinned ? "pin.slash" : "pin")
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(Color(Design.Palette.muted))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
                             }
-                            .tint(.orange)
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("清除搜索")
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                appState.deleteClipboard(id: item.id)
+                    }
+                    .frame(minHeight: 36)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            filterChip("全部", tag: 0)
+                            filterChip("验证码", tag: 1)
+                            filterChip("链接", tag: 2)
+                            filterChip("置顶", tag: 3)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                }
+
+                Section {
+                    if filtered.isEmpty {
+                        LXEmptyState(
+                            icon: "magnifyingglass",
+                            title: "没有匹配的记录",
+                            message: "换个关键词，或切回「全部」。"
+                        )
+                    } else {
+                        ForEach(filtered) { item in
+                            clipboardRow(item)
+                        }
+                    }
+                } header: {
+                    Text("剪贴板历史 · \(filtered.count)")
+                } footer: {
+                    Text("点按复制；右滑置顶，左滑删除，长按有更多排版操作。")
+                }
+            }
+
+            toolsSection
+            formatSection
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    private func filterChip(_ title: String, tag: Int) -> some View {
+        let active = historyCategoryFilter == tag
+        let count = appState.clipboardItems.filter { matchesFilter($0, tag) }.count
+        return Button {
+            withAnimation(.easeOut(duration: 0.15)) { historyCategoryFilter = tag }
+        } label: {
+            HStack(spacing: 4) {
+                Text(title)
+                Text("\(count)")
+                    .monospacedDigit()
+                    .opacity(0.7)
+            }
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+            .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    private func clipboardRow(_ item: ClipboardItem) -> some View {
+        let parsedInfo = SmartInfoParser.parse(item.text)
+        let scamReport = CommunicationGuardEngine.analyzeScam(item.text)
+        let linkReport = LinkPrivacyCleaner.clean(item.text)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(item.text)
+                .font(.subheadline)
+                .foregroundStyle(Color(Design.Palette.ink))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let parsedInfo, !parsedInfo.fields.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        LXTag(text: parsedInfo.kind.badgeLabel, tint: Color(Design.Palette.slate))
+                        ForEach(parsedInfo.fields) { field in
+                            Button {
+                                copyToPasteboard(field.value, message: "已复制\(field.label)：\(field.value.prefix(24))")
                             } label: {
-                                Label("删除", systemImage: "trash")
+                                LXTag(
+                                    text: "填\(field.label)",
+                                    icon: "doc.on.doc",
+                                    tint: Color(Design.Palette.accent),
+                                    filled: true
+                                )
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("仅复制\(field.label)")
                         }
-                        .contextMenu {
-                            Button("复制原文") { UIPasteboard.general.string = item.text }
-                            Button("加盘古空格并复制") {
-                                UIPasteboard.general.string = TextFormatterToolbox.addPanguSpaces(item.text)
+                        Button {
+                            if let card = PersonalFillCardStore.buildCardFromRawText(item.text) {
+                                PersonalFillCardStore.upsert(card)
+                                toolboxToast = "已存入个人速填名片夹「\(card.title)」"
                             }
-                            Button("去多余空行并复制") {
-                                UIPasteboard.general.string = TextFormatterToolbox.collapseBlankLines(item.text)
-                            }
-                            Button("整理为编号清单并复制") {
-                                UIPasteboard.general.string = TextFormatterToolbox.toNumberedList(item.text)
-                            }
-                            Button("BigBang 炸词提取") {
-                                selectedBigBangTokens = []
-                                bigBangCustomCode = ""
-                                bigBangSourceText = item.text
-                            }
-                            Button(item.isPinned ? "取消置顶" : "置顶") { appState.togglePinClipboard(id: item.id) }
-                            Button("删除", role: .destructive) { appState.deleteClipboard(id: item.id) }
+                        } label: {
+                            LXTag(text: "+存名片", icon: "plus.circle", tint: Color(Design.Palette.success), filled: true)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
 
-            // 效率工具箱（L2 专项子页收口，告别 4 段拥挤切换条）
-            Section("更多工具") {
-                NavigationLink {
-                    CrossDeviceRelaySubView()
-                } label: {
-                    toolHubRow(icon: "laptopcomputer.and.iphone", title: "跨屏剪贴板接力", badge: "6位码")
+            HStack(spacing: 6) {
+                if item.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Color(Design.Palette.accent))
+                        .accessibilityLabel("已置顶")
                 }
-
-                NavigationLink {
-                    EmojiKaomojiCatalogSubView()
-                } label: {
-                    toolHubRow(icon: "face.smiling", title: "表情与颜文字库", badge: "搜索")
+                LXTag(text: item.category.badgeText, icon: item.category.systemIconName)
+                if scamReport.isRisky {
+                    LXTag(
+                        text: scamReport.level == .highRisk ? "高危防诈" : "风险提醒",
+                        icon: "exclamationmark.shield.fill",
+                        tint: scamReport.level == .highRisk ? Color(Design.Palette.error) : Color(Design.Palette.warning),
+                        filled: true
+                    )
                 }
-
-                Button {
-                    showVoiceStudio = true
-                } label: {
-                    toolHubRow(icon: "mic.fill", title: "实时语音同传转换", badge: "中⇄英 · 朗读")
-                }
-                .buttonStyle(.plain)
-
-                NavigationLink {
-                    SecureVaultSubView()
-                } label: {
-                    toolHubRow(icon: "lock.shield.fill", title: "Face ID 本地保险箱", badge: "\(appState.secureVaultItems.count) 条")
-                }
-
-                DisclosureGroup("剪贴板一键排版") {
-                    HStack(spacing: 8) {
-                        formatButton("盘古空格") { TextFormatterToolbox.addPanguSpaces($0) }
-                        formatButton("去空行") { TextFormatterToolbox.collapseBlankLines($0) }
-                        formatButton("1. 编号") { TextFormatterToolbox.toNumberedList($0) }
-                        formatButton("• 符号") { TextFormatterToolbox.toBulletList($0) }
+                if linkReport.hasChanges, let cleanTarget = linkReport.extractedCleanURL ?? (linkReport.cleanedText.isEmpty ? nil : linkReport.cleanedText) {
+                    Button {
+                        copyToPasteboard(cleanTarget, message: linkReport.summaryBadge)
+                    } label: {
+                        LXTag(
+                            text: linkReport.hasIdentityLeakRisk ? "去追踪净链" : "纯净链接",
+                            icon: "sparkles",
+                            tint: linkReport.hasIdentityLeakRisk ? Color(Design.Palette.warning) : Color(Design.Palette.accent),
+                            filled: true
+                        )
                     }
-                    .padding(.vertical, 4)
+                    .buttonStyle(.plain)
                 }
-                .font(.subheadline)
+                if let code = item.extractedCode {
+                    Button {
+                        copyToPasteboard(code, message: "已复制验证码 \(code)")
+                    } label: {
+                        LXTag(text: "验证码 \(code)", icon: "doc.on.doc", tint: Color(Design.Palette.accent), filled: true)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("复制验证码 \(code)")
+                }
+                Spacer(minLength: 4)
+                Text(item.createdAt, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            copyToPasteboard(item.text, message: "已复制「\(item.text.prefix(20))」")
+        }
+        .swipeActions(edge: .leading) {
+            Button {
+                appState.togglePinClipboard(id: item.id)
+            } label: {
+                Label(item.isPinned ? "取消置顶" : "置顶", systemImage: item.isPinned ? "pin.slash" : "pin")
+            }
+            .tint(Color(Design.Palette.accent))
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                appState.deleteClipboard(id: item.id)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            Button {
+                openBigBang(item.text)
+            } label: {
+                Label("炸词", systemImage: "scissors")
+            }
+            .tint(Color(Design.Palette.slate))
+        }
+        .contextMenu {
+            Button {
+                copyToPasteboard(item.text, message: "已复制原文")
+            } label: {
+                Label("复制原文", systemImage: "doc.on.doc")
+            }
+            Button {
+                copyToPasteboard(TextFormatterToolbox.addPanguSpaces(item.text), message: "已加盘古空格并复制")
+            } label: {
+                Label("加盘古空格并复制", systemImage: "textformat.abc")
+            }
+            Button {
+                copyToPasteboard(TextFormatterToolbox.collapseBlankLines(item.text), message: "已去除多余空行并复制")
+            } label: {
+                Label("去多余空行并复制", systemImage: "text.justify")
+            }
+            Button {
+                copyToPasteboard(TextFormatterToolbox.toNumberedList(item.text), message: "已整理为编号清单并复制")
+            } label: {
+                Label("整理为编号清单并复制", systemImage: "list.number")
+            }
+            Button {
+                openBigBang(item.text)
+            } label: {
+                Label("BigBang 炸词提取", systemImage: "scissors")
+            }
+            Divider()
+            Button {
+                appState.togglePinClipboard(id: item.id)
+            } label: {
+                Label(item.isPinned ? "取消置顶" : "置顶", systemImage: item.isPinned ? "pin.slash" : "pin")
+            }
+            Button(role: .destructive) {
+                appState.deleteClipboard(id: item.id)
+            } label: {
+                Label("删除", systemImage: "trash")
             }
         }
     }
 
-    private func toolHubRow(icon: String, title: String, badge: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color(Design.Palette.accent))
-                .frame(width: 24)
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color(Design.Palette.ink))
-            Spacer()
-            Text(badge)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    // 效率工具箱（L2 专项子页收口）
+    private var toolsSection: some View {
+        Section("更多工具") {
+            NavigationLink {
+                PersonalFillCardsSubView()
+            } label: {
+                toolHubRow(
+                    icon: "person.text.rectangle.fill",
+                    title: "个人速填名片夹",
+                    subtitle: "家/公司地址、开票税号、车牌，小程序 3 秒分字段填表"
+                )
+            }
+
+            NavigationLink {
+                DraftRecoverySubView()
+            } label: {
+                toolHubRow(
+                    icon: "clock.arrow.circlepath",
+                    title: "草稿防丢黑匣子",
+                    subtitle: "24 小时纯本地自动留底长草稿，防切 App 刷新清空"
+                )
+            }
+
+            NavigationLink {
+                SocialScriptBankSubView()
+            } label: {
+                toolHubRow(
+                    icon: "text.bubble.fill",
+                    title: "高情商离线话术口袋",
+                    subtitle: "拒绝、催促、道歉、祝福、闲鱼维权，零 API 密钥离线直发"
+                )
+            }
+
+            NavigationLink {
+                CrossDeviceRelaySubView()
+            } label: {
+                toolHubRow(icon: "laptopcomputer.and.iphone", title: "跨屏剪贴板接力", subtitle: "6 位匹配码，电脑和手机互传文字")
+            }
+
+            NavigationLink {
+                EmojiKaomojiCatalogSubView()
+            } label: {
+                toolHubRow(icon: "face.smiling", title: "表情与颜文字库", subtitle: "搜索并一键复制")
+            }
+
+            Button {
+                showVoiceStudio = true
+            } label: {
+                toolHubRow(icon: "mic.fill", title: "实时语音同传", subtitle: "中⇄英 · 中⇄日 · 语音朗读", showsChevron: true)
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink {
+                SecureVaultSubView()
+            } label: {
+                toolHubRow(
+                    icon: "lock.shield.fill",
+                    title: "Face ID 本地保险箱",
+                    subtitle: "敏感信息只存本机，永不上云",
+                    badge: "\(appState.secureVaultItems.count) 条"
+                )
+            }
         }
-        .padding(.vertical, 2)
+    }
+
+    private var formatSection: some View {
+        Section {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                formatButton("链接去追踪", icon: "link.badge.plus") {
+                    let r = LinkPrivacyCleaner.clean($0)
+                    return r.extractedCleanURL ?? r.cleanedText
+                }
+                formatButton("发帖防限流", icon: "megaphone.fill") { OfflineTextLinter.autoReplacePlatformRisks($0) }
+                formatButton("盘古空格", icon: "textformat.abc") { TextFormatterToolbox.addPanguSpaces($0) }
+                formatButton("去多余空行", icon: "text.justify") { TextFormatterToolbox.collapseBlankLines($0) }
+                formatButton("数字编号", icon: "list.number") { TextFormatterToolbox.toNumberedList($0) }
+                formatButton("圆点列表", icon: "list.bullet") { TextFormatterToolbox.toBulletList($0) }
+            }
+            .padding(.vertical, 6)
+        } header: {
+            Text("剪贴板一键排版与净化")
+        } footer: {
+            Text("对系统剪贴板里的当前内容生效，处理后自动写回剪贴板。")
+        }
+    }
+
+    private func toolHubRow(icon: String, title: String, subtitle: String, badge: String? = nil, showsChevron: Bool = false) -> some View {
+        HStack(spacing: 12) {
+            LXIconTile(icon: icon)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            if let badge {
+                LXTag(text: badge)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     // MARK: - 2. 动态变量快捷短语（支持 {{日期}} / {{时间}} / {{剪贴板}} / {{随机问候}} 实时渲染）
@@ -294,81 +539,153 @@ struct ClipboardPhrasesView: View {
                     newPhraseContent = "{{随机问候}}！今日（{{日期}} {{星期}} {{时间}}）进展同步如下："
                     showAddPhrase = true
                 } label: {
-                    Label("新建「动态日期汇报」模板", systemImage: "wand.and.stars")
-                        .font(.subheadline.weight(.semibold))
+                    HStack(spacing: 12) {
+                        LXIconTile(icon: "wand.and.stars")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("新建动态模板")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Text("日期、时间、问候语插入时自动更新")
+                                .font(.caption)
+                                .foregroundStyle(Color(Design.Palette.stone))
+                        }
+                        Spacer(minLength: 6)
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(Color(Design.Palette.accent))
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             } footer: {
-                Text("支持 {{日期}}、{{时间}}、{{星期}}、{{剪贴板}}、{{随机问候}}，插入时自动替换为实时值。")
+                Text("可用变量：{{日期}}、{{时间}}、{{星期}}、{{剪贴板}}、{{随机问候}}")
             }
 
-            Section("快捷短语 (\(appState.quickPhrases.count)) · 点按复制") {
-                ForEach(appState.quickPhrases) { phrase in
-                    let hasVars = DynamicTemplateEngine.containsVariables(phrase.content)
-                    let rendered = hasVars ? DynamicTemplateEngine.render(phrase.content) : phrase.content
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text(phrase.title).font(.headline)
-                            if hasVars {
-                                Text("动态")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color(Design.Palette.accentSoft))
-                                    .foregroundStyle(Color(Design.Palette.accent))
-                                    .clipShape(Capsule())
-                            }
-                            Spacer()
-                            Text(phrase.category)
-                                .font(.caption.bold())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 2)
-                                .background(Color.secondary.opacity(0.15))
-                                .clipShape(Capsule())
-                        }
-                        Text(phrase.content)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        if hasVars {
-                            Text("实时预览：\(rendered)")
-                                .font(.caption)
-                                .foregroundStyle(Color(Design.Palette.accent))
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        UIPasteboard.general.string = rendered
-                        appState.addClipboardEntry(rendered)
-                        toolboxToast = "✓ 已复制渲染结果：「\(rendered.prefix(24))」"
-                    }
-                    .swipeActions {
-                        Button(role: .destructive) {
-                            appState.deleteQuickPhrase(id: phrase.id)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
+            Section {
+                if appState.quickPhrases.isEmpty {
+                    LXEmptyState(
+                        icon: "text.bubble",
+                        title: "还没有快捷短语",
+                        message: "点右上角 + 新建，常用的话在键盘里一点就能发。"
+                    )
+                } else {
+                    ForEach(appState.quickPhrases) { phrase in
+                        phraseRow(phrase)
                     }
                 }
+            } header: {
+                Text("快捷短语 · \(appState.quickPhrases.count)")
+            } footer: {
+                if !appState.quickPhrases.isEmpty {
+                    Text("点按复制（动态模板会先替换成实时内容）；左滑删除。")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    private func phraseRow(_ phrase: QuickPhrase) -> some View {
+        let hasVars = DynamicTemplateEngine.containsVariables(phrase.content)
+        let rendered = hasVars ? DynamicTemplateEngine.render(phrase.content) : phrase.content
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(phrase.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .lineLimit(1)
+                if hasVars {
+                    LXTag(text: "动态", icon: "wand.and.stars", tint: Color(Design.Palette.accent), filled: true)
+                }
+                Spacer(minLength: 4)
+                if !phrase.category.isEmpty {
+                    LXTag(text: phrase.category)
+                }
+            }
+            Text(phrase.content)
+                .font(.footnote)
+                .foregroundStyle(Color(Design.Palette.stone))
+                .lineLimit(3)
+            if hasVars {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "eye")
+                        .font(.caption2)
+                        .foregroundStyle(Color(Design.Palette.accent))
+                        .padding(.top, 2)
+                    Text(rendered)
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.charcoal))
+                        .lineLimit(3)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(Design.Palette.accentSoft), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            UIPasteboard.general.string = rendered
+            appState.addClipboardEntry(rendered)
+            toolboxToast = "已复制「\(rendered.prefix(20))」"
+        }
+        .swipeActions {
+            Button(role: .destructive) {
+                appState.deleteQuickPhrase(id: phrase.id)
+                toolboxToast = "已删除「\(phrase.title)」"
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .contextMenu {
+            Button {
+                UIPasteboard.general.string = rendered
+                appState.addClipboardEntry(rendered)
+                toolboxToast = "已复制"
+            } label: {
+                Label(hasVars ? "复制渲染结果" : "复制", systemImage: "doc.on.doc")
+            }
+            if hasVars {
+                Button {
+                    UIPasteboard.general.string = phrase.content
+                    toolboxToast = "已复制模板原文"
+                } label: {
+                    Label("复制模板原文", systemImage: "curlybraces")
+                }
+            }
+            Button(role: .destructive) {
+                appState.deleteQuickPhrase(id: phrase.id)
+                toolboxToast = "已删除「\(phrase.title)」"
+            } label: {
+                Label("删除", systemImage: "trash")
             }
         }
     }
 
-    private func formatButton(_ title: String, transform: @escaping (String) -> String) -> some View {
+    private func formatButton(_ title: String, icon: String, transform: @escaping (String) -> String) -> some View {
         Button {
-            guard let raw = UIPasteboard.general.string, !raw.isEmpty else {
-                toolboxToast = "当前系统剪贴板为空，请先复制一段文字"
+            guard let raw = ConcealedPasteboard.readNonConcealedStringForUserPaste() else {
+                toolboxToast = ConcealedPasteboard.isConcealed()
+                    ? "受保护的保险箱机密不参与快捷排版"
+                    : "系统剪贴板是空的，先复制一段文字"
                 return
             }
             let out = transform(raw)
             UIPasteboard.general.string = out
             appState.addClipboardEntry(out)
-            toolboxToast = "✓ 已完成「\(title)」并写回剪贴板"
+            toolboxToast = "已完成「\(title)」并写回剪贴板"
         } label: {
-            Text(title)
-                .font(.caption2.bold())
-                .frame(maxWidth: .infinity, minHeight: 34)
-                .background(Color(Design.Palette.surface))
-                .foregroundStyle(Color(Design.Palette.ink))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color(Design.Palette.accent))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+            }
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -398,7 +715,7 @@ struct ClipboardPhrasesView: View {
                                 }
                             } label: {
                                 Text(token)
-                                    .font(.system(size: 13.5, weight: .medium))
+                                    .font(.footnote.weight(.medium))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 8)
                                     .frame(maxWidth: .infinity)
@@ -462,6 +779,7 @@ struct ClipboardPhrasesView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                 }
+                .lxReadableWidth()
                 .padding()
             }
             .navigationTitle("BigBang 炸词提取")
@@ -537,122 +855,244 @@ struct ClipboardPhrasesView: View {
 
 struct CrossDeviceRelaySubView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var relayConfig: ClipboardRelayConfig = ClipboardRelayConfig.load()
+    @State private var relayConfig: ClipboardRelayConfig = ClipboardRelayConfig()  // 真实配置在 onAppear 读取
     @State private var relayToast: String?
-    @State private var isRelaying: Bool = false
+    @State private var isPushing = false
+    @State private var isPulling = false
+    @FocusState private var codeFocused: Bool
+
+    private var isRelaying: Bool { isPushing || isPulling }
+
+    private var isCodeValid: Bool {
+        relayConfig.pairCode.count == 6 && !relayConfig.pairCode.contains(where: { !$0.isNumber })
+    }
+
+    private var dashboardURL: String {
+        "\(appState.cloudConfig.normalizedBaseURL)/dashboard"
+    }
 
     var body: some View {
         Form {
             Section {
-                HStack {
-                    Text("6 位匹配码")
-                    Spacer()
-                    TextField("6位码", text: $relayConfig.pairCode)
-                        .multilineTextAlignment(.trailing)
-                        .font(.system(size: 16, weight: .bold, design: .monospaced))
-                        .frame(width: 96)
-                    Button("换码") {
+                HStack(alignment: .top, spacing: 12) {
+                    LXIconTile(icon: "laptopcomputer.and.iphone", size: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("电脑和手机互传文字")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                        Text("两边输入同一个 6 位码即可，无需登录。身份证、银行卡、密码会被自动拦截。")
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Section {
+                HStack(spacing: 10) {
+                    TextField("000000", text: $relayConfig.pairCode)
+                        .keyboardType(.numberPad)
+                        .focused($codeFocused)
+                        .font(.system(size: 30, weight: .bold, design: .monospaced))
+                        .kerning(6)
+                        .foregroundStyle(isCodeValid ? Color(Design.Palette.ink) : Color(Design.Palette.error))
+                        .onChange(of: relayConfig.pairCode) { newValue in
+                            let digits = String(newValue.filter(\.isNumber).prefix(6))
+                            if digits != newValue { relayConfig.pairCode = digits }
+                            if digits.count == 6 { relayConfig.save() }
+                        }
+                        .accessibilityLabel("6 位匹配码")
+
+                    Spacer(minLength: 4)
+
+                    Button {
+                        UIPasteboard.general.string = relayConfig.pairCode
+                        relayToast = "已复制匹配码"
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                    .disabled(!isCodeValid)
+                    .accessibilityLabel("复制匹配码")
+
+                    Button {
                         relayConfig.pairCode = ClipboardRelayService.generateSixDigitCode()
                         relayConfig.save()
+                        relayToast = "已换成新的匹配码"
+                    } label: {
+                        Label("换码", systemImage: "arrow.clockwise")
                     }
-                    .font(.caption.bold())
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
                 }
+                .padding(.vertical, 4)
+            } header: {
+                Text("匹配码")
+            } footer: {
+                if !isCodeValid {
+                    Text("匹配码需要是 6 位数字。")
+                        .foregroundStyle(Color(Design.Palette.error))
+                }
+            }
 
-                Toggle("进入工具页时自动监听跨屏推送", isOn: $relayConfig.autoRelayEnabled)
-                    .onChange(of: relayConfig.autoRelayEnabled) { _ in
-                        relayConfig.save()
-                    }
-
+            Section {
                 HStack(spacing: 10) {
                     Button {
                         pushClipboardToRelay()
                     } label: {
-                        Text("秒传本机剪贴板")
-                            .font(.subheadline.bold())
-                            .frame(maxWidth: .infinity, minHeight: 38)
-                            .background(Color(Design.Palette.accent))
-                            .foregroundStyle(Color.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        HStack(spacing: 6) {
+                            if isPushing {
+                                ProgressView().controlSize(.small).tint(Color.white)
+                            } else {
+                                Image(systemName: "arrow.up.circle.fill")
+                            }
+                            Text(isPushing ? "发送中…" : "发送本机剪贴板")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isRelaying)
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
 
                     Button {
                         pullClipboardFromRelay()
                     } label: {
-                        Text("拉取跨屏内容")
-                            .font(.subheadline.bold())
-                            .frame(maxWidth: .infinity, minHeight: 38)
-                            .background(Color(Design.Palette.surface))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        HStack(spacing: 6) {
+                            if isPulling {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.down.circle")
+                            }
+                            Text(isPulling ? "接收中…" : "接收电脑内容")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isRelaying)
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                }
+                .disabled(isRelaying || !isCodeValid)
+                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+
+                LXToggleRow(
+                    "打开「工具」页时自动接收",
+                    subtitle: "电脑推送的内容会直接写入手机剪贴板",
+                    isOn: $relayConfig.autoRelayEnabled
+                )
+                .onChange(of: relayConfig.autoRelayEnabled) { _ in
+                    relayConfig.save()
+                }
+            } header: {
+                Text("传输")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 10) {
+                    stepRow(1, "在电脑浏览器打开下面的地址")
+                    HStack(spacing: 8) {
+                        Text(dashboardURL)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Color(Design.Palette.charcoal))
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            UIPasteboard.general.string = dashboardURL
+                            relayToast = "已复制控制台地址"
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                        .accessibilityLabel("复制控制台地址")
+                    }
+                    .padding(10)
+                    .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.input, style: .continuous))
+                    stepRow(2, "输入和手机上相同的 6 位匹配码")
+                    stepRow(3, "手机点「发送」，或在电脑上发送后手机点「接收」")
                 }
                 .padding(.vertical, 4)
-
-                if let msg = relayToast {
-                    Text(msg)
-                        .font(.caption)
-                        .foregroundStyle(msg.hasPrefix("✓") ? Color(Design.Palette.success) : Color(Design.Palette.accent))
-                }
-            } footer: {
-                Text("在电脑浏览器打开控制台（\(appState.cloudConfig.normalizedBaseURL)/dashboard）输入相同 6 位匹配码即可双向秒传；敏感身份证/银行卡/密码自动拦截。")
+            } header: {
+                Text("电脑端怎么用")
             }
         }
         .navigationTitle("跨屏剪贴板接力")
         .navigationBarTitleDisplayMode(.inline)
+        .lxToast($relayToast)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { codeFocused = false }
+            }
+        }
         .onAppear { relayConfig = ClipboardRelayConfig.load() }
     }
 
+    private func stepRow(_ index: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(index)")
+                .font(.caption.bold().monospacedDigit())
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 22, height: 22)
+                .background(Color(Design.Palette.accentSoft), in: Circle())
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(Color(Design.Palette.charcoal))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
+    }
+
     private func pushClipboardToRelay() {
-        let content = UIPasteboard.general.string ?? appState.clipboardItems.first?.text ?? ""
-        guard !content.isEmpty else {
-            relayToast = "本机剪贴板为空，请先复制一段内容"
+        if ConcealedPasteboard.isConcealed() {
+            relayToast = "检测到保险箱受保护剪贴板，已拦截跨屏上传"
             return
         }
-        isRelaying = true
+        let content = ConcealedPasteboard.readNonConcealedStringForUserPaste() ?? appState.clipboardItems.first?.text ?? ""
+        guard !content.isEmpty else {
+            relayToast = "本机剪贴板是空的，先复制一段内容"
+            return
+        }
+        isPushing = true
         relayConfig.save()
         Task {
             do {
                 let item = try await ClipboardRelayService.shared.push(text: content, pairCode: relayConfig.pairCode)
                 await MainActor.run {
-                    isRelaying = false
+                    isPushing = false
                     appState.refreshAll()
-                    relayToast = item.extractedCode != nil
-                        ? "✓ 已秒传至匹配码 \(item.pairCode)（识别验证码 \(item.extractedCode!)）"
-                        : "✓ 已秒传至匹配码 \(item.pairCode)"
+                    if let code = item.extractedCode {
+                        relayToast = "已发送到匹配码 \(item.pairCode)（识别到验证码 \(code)）"
+                    } else {
+                        relayToast = "已发送到匹配码 \(item.pairCode)"
+                    }
                 }
             } catch {
                 await MainActor.run {
-                    isRelaying = false
-                    relayToast = error.localizedDescription
+                    isPushing = false
+                    relayToast = "发送失败：\(error.localizedDescription)"
                 }
             }
         }
     }
 
     private func pullClipboardFromRelay() {
-        isRelaying = true
+        isPulling = true
         relayConfig.save()
         Task {
             do {
                 let items = try await ClipboardRelayService.shared.pullLatest(pairCode: relayConfig.pairCode)
                 await MainActor.run {
-                    isRelaying = false
+                    isPulling = false
                     appState.refreshAll()
                     if let first = items.first {
-                        UIPasteboard.general.string = first.contentText
-                        relayToast = "✓ 已接力：「\(first.contentText.prefix(24))」"
+                        if first.contentText.hasPrefix(ClipboardRelayCrypto.prefix) {
+                            relayToast = "收到加密剪贴板但 6 位匹配码不匹配，未能解密"
+                        } else {
+                            UIPasteboard.general.string = first.contentText
+                            relayToast = "已收到并复制：「\(first.contentText.prefix(24))」"
+                        }
                     } else {
-                        relayToast = "匹配码 \(relayConfig.pairCode) 暂无跨屏剪贴板记录"
+                        relayToast = "匹配码 \(relayConfig.pairCode) 上还没有内容"
                     }
                 }
             } catch {
                 await MainActor.run {
-                    isRelaying = false
-                    relayToast = error.localizedDescription
+                    isPulling = false
+                    relayToast = "接收失败：\(error.localizedDescription)"
                 }
             }
         }
@@ -666,56 +1106,48 @@ struct EmojiKaomojiCatalogSubView: View {
     @State private var emojiQuery = ""
     @State private var emojiCategoryFilter = 0
     @State private var copiedSymbolToast: String?
+    @State private var recentSymbols: [String] = []
+
+    private let emojiColumns = [GridItem(.adaptive(minimum: 48, maximum: 64), spacing: 8)]
 
     var body: some View {
-        let allHits = EmojiCatalog.search(emojiQuery, limit: 80)
-        let hits = allHits.filter { entry in
-            switch emojiCategoryFilter {
-            case 1: return !entry.isSymbol
-            case 2: return entry.isSymbol && entry.symbol.count > 1
-            case 3: return entry.isSymbol && entry.symbol.count == 1
-            default: return true
-            }
-        }
+        let allHits = EmojiCatalog.search(emojiQuery, limit: 120)
+        let emojis = allHits.filter { !$0.isSymbol }
+        let kaomojis = allHits.filter { $0.isSymbol && $0.symbol.count > 1 }
+        let symbols = allHits.filter { $0.isSymbol && $0.symbol.count == 1 }
+        let showEmoji = emojiCategoryFilter == 0 || emojiCategoryFilter == 1
+        let showKaomoji = emojiCategoryFilter == 0 || emojiCategoryFilter == 2
+        let showSymbols = emojiCategoryFilter == 0 || emojiCategoryFilter == 3
+        let nothing = (showEmoji ? emojis.count : 0) + (showKaomoji ? kaomojis.count : 0) + (showSymbols ? symbols.count : 0) == 0
+
         return List {
             Section {
-                TextField("搜索表情/颜文字（如：开心、掀桌、箭头）", text: $emojiQuery)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Picker("分类筛选", selection: $emojiCategoryFilter) {
-                    Text("全部").tag(0)
-                    Text("Emoji").tag(1)
-                    Text("颜文字").tag(2)
-                    Text("符号").tag(3)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        categoryChip("全部", tag: 0)
+                        categoryChip("Emoji", tag: 1)
+                        categoryChip("颜文字", tag: 2)
+                        categoryChip("符号", tag: 3)
+                    }
                 }
-                .pickerStyle(.segmented)
-
-                if let toast = copiedSymbolToast {
-                    Text(toast)
-                        .font(.caption)
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
+                .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
             }
 
-            let recentSymbols = RecentEmojiStore.load()
-            if !recentSymbols.isEmpty {
+            if emojiQuery.isEmpty && !recentSymbols.isEmpty {
                 Section("最近常用") {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
+                        HStack(spacing: 8) {
                             ForEach(recentSymbols.prefix(16), id: \.self) { sym in
                                 Button {
-                                    UIPasteboard.general.string = sym
-                                    appState.addClipboardEntry(sym)
-                                    copiedSymbolToast = "✓ 已复制「\(sym)」"
+                                    copy(sym, record: false)
                                 } label: {
                                     Text(sym)
-                                        .font(.system(size: 22))
-                                        .frame(width: 38, height: 38)
-                                        .background(Color(Design.Palette.surface))
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        .font(.system(size: 24))
+                                        .frame(width: 44, height: 44)
+                                        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("复制 \(sym)")
                             }
                         }
                         .padding(.vertical, 4)
@@ -723,32 +1155,127 @@ struct EmojiKaomojiCatalogSubView: View {
                 }
             }
 
-            Section("精选 (\(hits.count))") {
-                ForEach(hits, id: \.symbol) { entry in
-                    Button {
-                        UIPasteboard.general.string = entry.symbol
-                        RecentEmojiStore.record(entry.symbol)
-                        appState.addClipboardEntry(entry.symbol)
-                        copiedSymbolToast = "✓ 已复制「\(entry.symbol)」"
-                    } label: {
-                        HStack(spacing: 12) {
-                            Text(entry.symbol)
-                                .font(.system(size: entry.isSymbol ? 16 : 22))
-                                .foregroundStyle(Color(Design.Palette.ink))
-                            Text(entry.name)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("复制")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+            if nothing {
+                Section {
+                    LXEmptyState(
+                        icon: "face.dashed",
+                        title: "没有找到",
+                        message: "换个关键词试试，比如「开心」「掀桌」「箭头」。"
+                    )
+                }
+            }
+
+            if showEmoji && !emojis.isEmpty {
+                Section("Emoji · \(emojis.count)") {
+                    LazyVGrid(columns: emojiColumns, spacing: 8) {
+                        ForEach(emojis, id: \.symbol) { entry in
+                            Button {
+                                copy(entry.symbol)
+                            } label: {
+                                Text(entry.symbol)
+                                    .font(.system(size: 28))
+                                    .frame(maxWidth: .infinity, minHeight: 48)
+                                    .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("复制 \(entry.name)")
                         }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+
+            if showKaomoji && !kaomojis.isEmpty {
+                Section("颜文字 · \(kaomojis.count)") {
+                    ForEach(kaomojis, id: \.symbol) { entry in
+                        symbolRow(entry.symbol, name: entry.name, large: false)
                     }
                 }
             }
+
+            if showSymbols && !symbols.isEmpty {
+                Section("符号 · \(symbols.count)") {
+                    LazyVGrid(columns: emojiColumns, spacing: 8) {
+                        ForEach(symbols, id: \.symbol) { entry in
+                            Button {
+                                copy(entry.symbol)
+                            } label: {
+                                Text(entry.symbol)
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundStyle(Color(Design.Palette.ink))
+                                    .frame(maxWidth: .infinity, minHeight: 48)
+                                    .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("复制 \(entry.name)")
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
         }
+        .listStyle(.insetGrouped)
+        .searchable(text: $emojiQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索：开心、掀桌、箭头…")
+        .autocorrectionDisabled()
         .navigationTitle("表情与颜文字")
         .navigationBarTitleDisplayMode(.inline)
+        .lxToast($copiedSymbolToast)
+        .onAppear { recentSymbols = RecentEmojiStore.load() }
+    }
+
+    private func categoryChip(_ title: String, tag: Int) -> some View {
+        let active = emojiCategoryFilter == tag
+        return Button {
+            withAnimation(.easeOut(duration: 0.15)) { emojiCategoryFilter = tag }
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    private func symbolRow(_ symbol: String, name: String, large: Bool) -> some View {
+        Button {
+            copy(symbol)
+        } label: {
+            HStack(spacing: 12) {
+                Text(symbol)
+                    .font(.system(size: large ? 22 : 16))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 8)
+                Text(name)
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
+                Image(systemName: "doc.on.doc")
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.accent))
+            }
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("复制 \(name)")
+    }
+
+    private func copy(_ symbol: String, record: Bool = true) {
+        UIPasteboard.general.string = symbol
+        if record {
+            RecentEmojiStore.record(symbol)
+        }
+        appState.addClipboardEntry(symbol)
+        recentSymbols = RecentEmojiStore.load()
+        copiedSymbolToast = "已复制「\(symbol)」"
     }
 }
 
@@ -756,133 +1283,251 @@ struct EmojiKaomojiCatalogSubView: View {
 
 struct SecureVaultSubView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isVaultUnlocked = false
+    @State private var isUnlocking = false
+    @State private var revealedIDs: Set<String> = []
     @State private var showAddVaultItem = false
     @State private var editingVaultItem: SecureVaultItem?
+    @State private var pendingDelete: SecureVaultItem?
     @State private var toast: String?
 
     var body: some View {
         List {
-            if let toast {
-                Section {
-                    Label(toast, systemImage: "checkmark.circle.fill")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
+            if !isVaultUnlocked {
+                lockedSection
+            } else {
+                unlockedSections
             }
-
-            Section {
-                if !isVaultUnlocked {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "lock.shield.fill")
-                                .font(.title2)
-                                .foregroundStyle(Color(Design.Palette.accent))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("已锁定 · \(appState.secureVaultItems.count) 条敏感凭证")
-                                    .font(.subheadline.bold())
-                                Text("身份证、税号、银行卡仅存本机受保护容器，永不上传任何云端。")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Button {
-                            Task { await unlockVaultWithBiometrics() }
-                        } label: {
-                            Label("用\(BiometricAuthHelper.biometryDisplayName())解锁保险箱", systemImage: "faceid")
-                                .font(.subheadline.bold())
-                                .frame(maxWidth: .infinity, minHeight: 42)
-                                .background(Color(Design.Palette.accent))
-                                .foregroundStyle(Color.white)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.vertical, 4)
-                } else {
-                    HStack {
-                        Label("已通过生物验证解锁", systemImage: "lock.open.fill")
-                            .font(.caption.bold())
-                            .foregroundStyle(Color(Design.Palette.success))
-                        Spacer()
-                        Button("立即上锁") { isVaultUnlocked = false }
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ForEach(appState.secureVaultItems) { item in
-                        HStack {
-                            Button {
-                                editingVaultItem = item
-                            } label: {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Text(item.title).font(.subheadline.bold()).foregroundStyle(.primary)
-                                        Text(item.category).font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(item.value)
-                                        .font(.system(size: 13, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            Spacer()
-                            Button("复制") {
-                                UIPasteboard.general.string = item.value
-                                toast = "✓ 已安全复制「\(item.title)」（未写入剪贴板历史）"
-                            }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color(Design.Palette.accentSoft))
-                            .foregroundStyle(Color(Design.Palette.accent))
-                            .clipShape(Capsule())
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .onDelete { offsets in
-                        let ids = offsets.map { appState.secureVaultItems[$0].id }
-                        for id in ids { appState.deleteVaultItem(id: id) }
-                    }
-
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("本地保险箱")
+        .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if isVaultUnlocked {
                     Button {
-                        showAddVaultItem = true
+                        lock()
                     } label: {
-                        Label("新增敏感安全条目", systemImage: "plus.circle.fill")
-                            .font(.subheadline.bold())
+                        Label("上锁", systemImage: "lock.fill")
                     }
                 }
             }
         }
-        .navigationTitle("Face ID 敏感保险箱")
-        .navigationBarTitleDisplayMode(.inline)
-        .onDisappear { isVaultUnlocked = false }
+        .onDisappear { lock() }
+        .onChange(of: scenePhase) { phase in
+            // 切到后台或多任务界面时立即上锁，避免内容出现在 App 切换器截图里。
+            // Face ID / 密码验证弹框本身也会让 App 暂时变为 inactive，验证进行中不能上锁。
+            if phase != .active && !isUnlocking { lock() }
+        }
+        .confirmationDialog(
+            "删除「\(pendingDelete?.title ?? "")」？",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                if let item = pendingDelete {
+                    appState.deleteVaultItem(id: item.id)
+                    revealedIDs.remove(item.id)
+                    toast = "已删除「\(item.title)」"
+                }
+                pendingDelete = nil
+            }
+        } message: {
+            Text("保险箱内容不参与备份，删除后无法恢复。")
+        }
         .sheet(isPresented: $showAddVaultItem) {
             VaultItemEditorSheet(initial: nil) { created in
                 appState.upsertVaultItem(created)
-                toast = "✓ 已加密存入本机保险箱（绝不上云）"
+                toast = "已存入保险箱"
             }
         }
         .sheet(item: $editingVaultItem) { item in
             VaultItemEditorSheet(initial: item) { updated in
                 appState.upsertVaultItem(updated)
-                toast = "✓ 已更新「\(updated.title)」"
+                toast = "已更新「\(updated.title)」"
             }
         }
     }
 
+    private var lockedSection: some View {
+        Section {
+            VStack(spacing: 16) {
+                LXIconTile(icon: "lock.shield.fill", size: 60)
+                VStack(spacing: 6) {
+                    Text(appState.secureVaultItems.isEmpty ? "本地保险箱" : "已锁定 · \(appState.secureVaultItems.count) 条")
+                        .font(.callout.weight(.bold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    Text("存放身份证号、银行卡、开票税号等。只保存在这台设备上，不参与云同步，也不进备份。")
+                        .font(.footnote)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !BiometricAuthHelper.isDeviceSecured {
+                    // verify() 在未设锁屏密码时会直接放行：必须如实告诉用户保险箱此时等于没锁
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.warning))
+                            .padding(.top, 1)
+                        Text("这台设备没有设置锁屏密码，保险箱无法真正上锁，任何拿到手机的人都能打开。建议先在系统设置里设置密码。")
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(Design.Palette.warning).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                Button {
+                    Task { await unlockVaultWithBiometrics() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isUnlocking {
+                            ProgressView().controlSize(.small).tint(Color.white)
+                        } else {
+                            Image(systemName: BiometricAuthHelper.biometrySymbolName())
+                        }
+                        Text("用\(BiometricAuthHelper.biometryDisplayName())解锁")
+                    }
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                .disabled(isUnlocking)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+            .padding(.horizontal, 4)
+        }
+    }
+
+    @ViewBuilder
+    private var unlockedSections: some View {
+        Section {
+            if appState.secureVaultItems.isEmpty {
+                LXEmptyState(
+                    icon: "tray",
+                    title: "保险箱是空的",
+                    message: "点下面的按钮存入第一条，比如开票税号或常用银行卡号。"
+                )
+            } else {
+                ForEach(appState.secureVaultItems) { item in
+                    vaultRow(item)
+                }
+            }
+            Button {
+                showAddVaultItem = true
+            } label: {
+                Label("新增条目", systemImage: "plus.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.accent))
+                    .frame(minHeight: 36)
+            }
+        } header: {
+            Label("已解锁 · 离开页面或切到后台会自动上锁", systemImage: "lock.open.fill")
+                .textCase(nil)
+        } footer: {
+            Text("复制的内容只留在本机剪贴板（不会通过「通用剪贴板」传到 Mac 或 iPad），\(Int(ConcealedPasteboard.defaultLifetime)) 秒后自动清除，灵犀键盘也不会把它记进剪贴板历史。")
+        }
+    }
+
+    private func vaultRow(_ item: SecureVaultItem) -> some View {
+        let revealed = revealedIDs.contains(item.id)
+        return HStack(alignment: .center, spacing: 10) {
+            Button {
+                editingVaultItem = item
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(item.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .lineLimit(1)
+                        if !item.category.isEmpty {
+                            LXTag(text: item.category)
+                        }
+                    }
+                    Text(revealed ? item.value : item.maskedPreview)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(Color(Design.Palette.charcoal))
+                        .lineLimit(revealed ? 3 : 1)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                if revealed {
+                    revealedIDs.remove(item.id)
+                } else {
+                    revealedIDs.insert(item.id)
+                }
+            } label: {
+                Image(systemName: revealed ? "eye.slash" : "eye")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(revealed ? "隐藏内容" : "显示内容")
+
+            Button {
+                ConcealedPasteboard.copy(item.value)
+                toast = "已复制「\(item.title)」，\(Int(ConcealedPasteboard.defaultLifetime)) 秒后自动清除"
+            } label: {
+                Text("复制")
+            }
+            .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+        }
+        .padding(.vertical, 4)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                pendingDelete = item
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
+    private func lock() {
+        isVaultUnlocked = false
+        revealedIDs = []
+    }
+
     private func unlockVaultWithBiometrics() async {
+        guard !isUnlocking else { return }
+        isUnlocking = true
         do {
-            try await BiometricAuthHelper.verify(reason: "验证身份以查看本机加密敏感信息保险箱")
+            try await BiometricAuthHelper.verify(reason: "验证身份以查看本机保险箱")
             isVaultUnlocked = true
         } catch {
             toast = "解锁失败：\(error.localizedDescription)"
         }
+        // 等验证弹框完全收起、App 回到前台后再解除保护，避免收起过程中的 inactive 事件误上锁
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        isUnlocking = false
     }
 }
 
 // MARK: - L2 设置子页：26 键自定义上滑/下滑符号映射编辑器（归口至「设置 → 键盘手感与手势」）
+
+private struct LayoutPackJSONDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+    init(configuration: ReadConfiguration) throws {
+        self.data = configuration.file.regularFileContents ?? Data()
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
 
 struct CustomSwipeKeymapEditorView: View {
     @EnvironmentObject private var appState: AppState
@@ -890,137 +1535,364 @@ struct CustomSwipeKeymapEditorView: View {
     @State private var customUpDraft: String = ""
     @State private var customDownDraft: String = ""
     @State private var toast: String?
+    @State private var confirmPreset = false
+    @State private var confirmHamsterPreset = false
+    @State private var confirmReset = false
+    @State private var commandTargetDirection: Int = 1 // 0=上滑, 1=下划
+    @State private var packExportDoc: LayoutPackJSONDocument?
+    @State private var showPackExporter = false
+    @State private var showPackImporter = false
+
+    private let rows: [[String]] = [
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+        ["z", "x", "c", "v", "b", "n", "m"]
+    ]
+
+    private static let geekPreset: [String: String] = [
+        "a": "@", "s": "/", "d": "$", "f": "()", "g": "{}", "h": "[]", "k": "->"
+    ]
+
+    private var savedUp: String { appState.settings.customSwipeUpMap[selectedKeyToEdit] ?? "" }
+    private var savedDown: String { appState.settings.customSwipeDownMap[selectedKeyToEdit] ?? "" }
+
+    private var hasUnsavedChanges: Bool {
+        customUpDraft.trimmingCharacters(in: .whitespacesAndNewlines) != savedUp
+            || customDownDraft.trimmingCharacters(in: .whitespacesAndNewlines) != savedDown
+    }
+
+    private var customizedCount: Int {
+        Set(appState.settings.customSwipeUpMap.keys).union(appState.settings.customSwipeDownMap.keys).count
+    }
 
     var body: some View {
-        let rows: [[String]] = [
-            ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
-            ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
-            ["z", "x", "c", "v", "b", "n", "m"]
-        ]
-        return Form {
-            if let toast {
-                Section {
-                    Label(toast, systemImage: "checkmark.circle.fill")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
-            }
-
+        Form {
             Section {
                 VStack(spacing: 6) {
                     ForEach(rows, id: \.self) { row in
                         HStack(spacing: 4) {
                             ForEach(row, id: \.self) { key in
-                                let isSel = selectedKeyToEdit == key
-                                let upVal = appState.settings.customSwipeUpMap[key]
-                                let downVal = appState.settings.customSwipeDownMap[key]
-                                let customized = (upVal != nil || downVal != nil)
-                                Button {
-                                    selectedKeyToEdit = key
-                                    loadDrafts()
-                                } label: {
-                                    VStack(spacing: 1) {
-                                        Text(upVal ?? " ")
-                                            .font(.system(size: 8))
-                                            .foregroundStyle(isSel ? Color.white.opacity(0.9) : Color(Design.Palette.accent))
-                                        Text(key.uppercased())
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundStyle(isSel ? Color.white : Color(Design.Palette.ink))
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 34)
-                                    .background(isSel ? Color(Design.Palette.accent) : (customized ? Color(Design.Palette.accentSoft) : Color(Design.Palette.surface)))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
+                                keyCap(key)
                             }
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            } header: {
+                Text("选择按键 · 已自定义 \(customizedCount) 个")
+            } footer: {
+                Text("蓝底为已自定义的按键。键帽上方是上滑输出，下方是下划输出。")
+            }
+
+            Section {
+                HStack(spacing: 10) {
+                    Label("上滑", systemImage: "arrow.up")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .frame(width: 64, alignment: .leading)
+                    TextField("留空使用默认", text: $customUpDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                }
+                HStack(spacing: 10) {
+                    Label("下划", systemImage: "arrow.down")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .frame(width: 64, alignment: .leading)
+                    TextField("如 ()、「」或 #paste / #firstChar", text: $customDownDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("绑定仓式快捷动作命令（点按一键填入）")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color(Design.Palette.stone))
+                        Spacer()
+                        Picker("方向", selection: $commandTargetDirection) {
+                            Text("填到上滑").tag(0)
+                            Text("填到下划").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 148)
+                    }
+                    LXFlowLayout(spacing: 6, lineSpacing: 6) {
+                        ForEach(KeyboardSwipeCommand.allCases) { cmd in
+                            Button {
+                                if commandTargetDirection == 0 {
+                                    customUpDraft = cmd.rawValue
+                                } else {
+                                    customDownDraft = cmd.rawValue
+                                }
+                            } label: {
+                                Text("\(cmd.keycapBadge) · \(cmd.displayTitle)")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color(Design.Palette.ink))
+                                    .padding(.horizontal, 9)
+                                    .frame(height: 28)
+                                    .background(Color(Design.Palette.surface), in: Capsule())
+                                    .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
                 .padding(.vertical, 4)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("当前按键：「\(selectedKeyToEdit.uppercased())」")
-                        .font(.caption.bold())
-                        .foregroundStyle(Color(Design.Palette.accent))
-
-                    HStack(spacing: 8) {
-                        Text("上滑输出").font(.caption).frame(width: 56, alignment: .leading)
-                        TextField("留空使用默认数字/符号", text: $customUpDraft)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    HStack(spacing: 8) {
-                        Text("下滑输出").font(.caption).frame(width: 56, alignment: .leading)
-                        TextField("如 () / 「」 / 常用词", text: $customDownDraft)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-
-                    HStack(spacing: 8) {
-                        Button("保存「\(selectedKeyToEdit.uppercased())」") {
-                            let up = customUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let dn = customDownDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if up.isEmpty { appState.settings.customSwipeUpMap.removeValue(forKey: selectedKeyToEdit) }
-                            else { appState.settings.customSwipeUpMap[selectedKeyToEdit] = up }
-                            if dn.isEmpty { appState.settings.customSwipeDownMap.removeValue(forKey: selectedKeyToEdit) }
-                            else { appState.settings.customSwipeDownMap[selectedKeyToEdit] = dn }
-                            toast = "✓ 已保存按键「\(selectedKeyToEdit.uppercased())」映射"
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 12)
-                        .frame(height: 32)
-                        .background(Color(Design.Palette.accent))
-                        .foregroundStyle(Color.white)
-                        .clipShape(Capsule())
-                        .buttonStyle(.plain)
-
-                        Button("极客编程预设") {
-                            appState.settings.customSwipeDownMap["a"] = "@"
-                            appState.settings.customSwipeDownMap["s"] = "/"
-                            appState.settings.customSwipeDownMap["d"] = "$"
-                            appState.settings.customSwipeDownMap["f"] = "()"
-                            appState.settings.customSwipeDownMap["g"] = "{}"
-                            appState.settings.customSwipeDownMap["h"] = "[]"
-                            appState.settings.customSwipeDownMap["k"] = "->"
-                            loadDrafts()
-                            toast = "✓ 已应用极客编程下滑符号预设"
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .frame(height: 32)
-                        .background(Color(Design.Palette.surface))
-                        .foregroundStyle(Color(Design.Palette.ink))
-                        .clipShape(Capsule())
-                        .buttonStyle(.plain)
-
-                        Spacer()
-
-                        if !appState.settings.customSwipeUpMap.isEmpty || !appState.settings.customSwipeDownMap.isEmpty {
-                            Button("重置") {
-                                appState.settings.customSwipeUpMap = [:]
-                                appState.settings.customSwipeDownMap = [:]
-                                loadDrafts()
-                                toast = "已恢复默认上下滑符号"
-                            }
-                            .font(.caption)
-                            .foregroundStyle(Color(Design.Palette.error))
-                            .buttonStyle(.plain)
-                        }
+                Button {
+                    saveCurrent(showToast: true)
+                } label: {
+                    Label(hasUnsavedChanges ? "保存「\(selectedKeyToEdit.uppercased())」" : "已保存", systemImage: hasUnsavedChanges ? "checkmark" : "checkmark.circle")
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: hasUnsavedChanges, wide: true))
+                .disabled(!hasUnsavedChanges)
+                .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
+            } header: {
+                HStack {
+                    Text("按键「\(selectedKeyToEdit.uppercased())」")
+                    if hasUnsavedChanges {
+                        LXTag(text: "未保存", tint: Color(Design.Palette.warning), filled: true)
+                            .textCase(nil)
                     }
                 }
             } footer: {
-                Text("点选任意字母键可自由改写上滑与下滑输出，保存后键盘生效并随 E2EE 云同步。")
+                Text("切换到其他按键时会自动保存当前修改。保存后键盘立即生效。")
+            }
+
+            Section {
+                ForEach(CustomKeyboardLayoutPack.builtInPacks) { pack in
+                    let isActive = appState.settings.activeLayoutPackID == pack.id
+                    Button {
+                        pack.apply(to: &appState.settings)
+                        loadDrafts()
+                        toast = "已切换布局包「\(pack.name)」"
+                    } label: {
+                        HStack(spacing: 12) {
+                            LXIconTile(icon: pack.icon, tint: isActive ? Color(Design.Palette.accent) : Color(Design.Palette.slate), size: 32)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(pack.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Color(Design.Palette.ink))
+                                    if isActive {
+                                        LXTag(text: "使用中", icon: "checkmark", tint: Color(Design.Palette.accent), filled: true)
+                                    }
+                                }
+                                Text(pack.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(Color(Design.Palette.stone))
+                                    .lineLimit(2)
+                            }
+                            Spacer(minLength: 4)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        let pack = CustomKeyboardLayoutPack.fromCurrentSettings(appState.settings)
+                        if let data = pack.exportJSON() {
+                            packExportDoc = LayoutPackJSONDocument(data: data)
+                            showPackExporter = true
+                        }
+                    } label: {
+                        Label("导出布局包 JSON", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+
+                    Button {
+                        showPackImporter = true
+                    } label: {
+                        Label("导入布局包", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                }
+                .padding(.vertical, 2)
+            } header: {
+                Text("场景键盘布局包（支持分享与键盘内 1 键秒切）")
+            } footer: {
+                Text("对标仓输入法 / CustardKit：一键切换整套划动命令、数字行、标点与盘古空格配置，也可导出为 JSON 分享给朋友。")
+            }
+
+            Section {
+                Button {
+                    confirmHamsterPreset = true
+                } label: {
+                    LXNavRow(
+                        icon: "bolt.circle.fill",
+                        title: "仓输入法效率命令预设",
+                        subtitle: "上滑 J取首字 K取尾字 · 下划 Z撤 X清 C润色 V贴 B三版 H/L光标 T译 F繁"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    confirmPreset = true
+                } label: {
+                    LXNavRow(
+                        icon: "chevron.left.forwardslash.chevron.right",
+                        title: "编程符号预设",
+                        subtitle: "A@  S/  D$  F()  G{}  H[]  K->"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                if customizedCount > 0 {
+                    Button(role: .destructive) {
+                        confirmReset = true
+                    } label: {
+                        Text("全部恢复默认")
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                    }
+                }
+            } header: {
+                Text("快捷操作")
             }
         }
-        .navigationTitle("26 键上下滑映射")
+        .navigationTitle("上下滑映射")
         .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
         .onAppear { loadDrafts() }
+        .onDisappear {
+            if hasUnsavedChanges { saveCurrent(showToast: false) }
+        }
+        .confirmationDialog("应用仓输入法效率命令预设？", isPresented: $confirmHamsterPreset, titleVisibility: .visible) {
+            Button("应用") {
+                for (k, v) in KeyboardSwipeCommand.hamsterEfficiencyUpPreset {
+                    appState.settings.customSwipeUpMap[k] = v
+                }
+                for (k, v) in KeyboardSwipeCommand.hamsterEfficiencyDownPreset {
+                    appState.settings.customSwipeDownMap[k] = v
+                }
+                loadDrafts()
+                toast = "已应用仓式动作命令预设（含以词定字与 AI 快捷划动）"
+            }
+        } message: {
+            Text("会在 J/K 上滑绑定以词定字，并在 Z/X/C/V/B/H/L/T/F 下划绑定撤销、清空、AI 润色、粘贴、三版、光标与简繁切换。")
+        }
+        .confirmationDialog("应用编程符号预设？", isPresented: $confirmPreset, titleVisibility: .visible) {
+            Button("应用") {
+                for (k, v) in Self.geekPreset {
+                    appState.settings.customSwipeDownMap[k] = v
+                }
+                loadDrafts()
+                toast = "已应用编程符号预设"
+            }
+        } message: {
+            Text("会覆盖 A、S、D、F、G、H、K 这 7 个键现有的下划设置。")
+        }
+        .confirmationDialog("全部恢复默认？", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("恢复默认", role: .destructive) {
+                appState.settings.activeLayoutPackID = "standard"
+                appState.settings.customSwipeUpMap = [:]
+                appState.settings.customSwipeDownMap = [:]
+                loadDrafts()
+                toast = "已恢复默认上下滑"
+            }
+        } message: {
+            Text("\(customizedCount) 个按键的自定义映射会被清除。")
+        }
+        .fileExporter(
+            isPresented: $showPackExporter,
+            document: packExportDoc,
+            contentType: .json,
+            defaultFilename: "lingxi-keymap-pack"
+        ) { result in
+            switch result {
+            case .success:
+                toast = "已导出灵犀自定义键盘布局包"
+            case .failure(let err):
+                let ns = err as NSError
+                if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
+                    toast = "导出失败：\(err.localizedDescription)"
+                }
+            }
+        }
+        .fileImporter(isPresented: $showPackImporter, allowedContentTypes: [.json]) { result in
+            switch result {
+            case .success(let url):
+                let granted = url.startAccessingSecurityScopedResource()
+                defer { if granted { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url),
+                      let pack = CustomKeyboardLayoutPack.decodeJSON(data) else {
+                    toast = "文件不是有效的灵犀布局包"
+                    return
+                }
+                pack.apply(to: &appState.settings)
+                loadDrafts()
+                toast = "已导入并启用布局包「\(pack.name)」"
+            case .failure(let err):
+                let ns = err as NSError
+                if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
+                    toast = "导入失败：\(err.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func keyCap(_ key: String) -> some View {
+        let isSel = selectedKeyToEdit == key
+        let upVal = appState.settings.customSwipeUpMap[key]
+        let downVal = appState.settings.customSwipeDownMap[key]
+        let customized = (upVal != nil || downVal != nil)
+        return Button {
+            guard key != selectedKeyToEdit else { return }
+            if hasUnsavedChanges { saveCurrent(showToast: false) }
+            selectedKeyToEdit = key
+            loadDrafts()
+        } label: {
+            VStack(spacing: 0) {
+                Text(upVal.map { KeyboardSwipeCommand.keycapBadge(for: $0) } ?? " ")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(isSel ? Color.white.opacity(0.85) : Color(Design.Palette.accent))
+                    .lineLimit(1)
+                Text(key.uppercased())
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSel ? Color.white : Color(Design.Palette.ink))
+                Text(downVal.map { KeyboardSwipeCommand.keycapBadge(for: $0) } ?? " ")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(isSel ? Color.white.opacity(0.85) : Color(Design.Palette.accent))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 42)
+            .background(
+                isSel ? Color(Design.Palette.accent) : (customized ? Color(Design.Palette.accentSoft) : Color(Design.Palette.surface)),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("按键 \(key.uppercased())\(customized ? "，已自定义" : "")")
+        .accessibilityAddTraits(isSel ? .isSelected : [])
+    }
+
+    private func saveCurrent(showToast: Bool) {
+        let up = customUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dn = customDownDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if up.isEmpty {
+            appState.settings.customSwipeUpMap.removeValue(forKey: selectedKeyToEdit)
+        } else {
+            appState.settings.customSwipeUpMap[selectedKeyToEdit] = up
+        }
+        if dn.isEmpty {
+            appState.settings.customSwipeDownMap.removeValue(forKey: selectedKeyToEdit)
+        } else {
+            appState.settings.customSwipeDownMap[selectedKeyToEdit] = dn
+        }
+        if showToast {
+            toast = "已保存「\(selectedKeyToEdit.uppercased())」"
+        }
     }
 
     private func loadDrafts() {
-        customUpDraft = appState.settings.customSwipeUpMap[selectedKeyToEdit] ?? ""
-        customDownDraft = appState.settings.customSwipeDownMap[selectedKeyToEdit] ?? ""
+        customUpDraft = savedUp
+        customDownDraft = savedDown
     }
 }
 
@@ -1035,43 +1907,506 @@ private struct VaultItemEditorSheet: View {
     @State private var category: String
     @State private var value: String
 
+    private static let categoryPresets = ["证件", "银行卡", "开票", "地址", "账号"]
+
     init(initial: SecureVaultItem?, onSave: @escaping (SecureVaultItem) -> Void) {
         self.initial = initial
         self.onSave = onSave
         _title = State(initialValue: initial?.title ?? "")
-        _category = State(initialValue: initial?.category ?? "证件/账务")
+        _category = State(initialValue: initial?.category ?? "证件")
         _value = State(initialValue: initial?.value ?? "")
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("名称（如：公司开票税号 / 身份证号）", text: $title)
-                TextField("分类（如：证件、银行卡、开票、地址）", text: $category)
-                TextField("敏感信息正文（仅存本机安全容器，绝不上云）", text: $value, axis: .vertical)
-                    .lineLimit(2...5)
-                    .font(.system(size: 14, design: .monospaced))
+                Section("名称") {
+                    TextField("如：公司开票税号", text: $title)
+                }
+
+                Section {
+                    LXFlowLayout(spacing: 8, lineSpacing: 8) {
+                        ForEach(Self.categoryPresets, id: \.self) { preset in
+                            let selected = category == preset
+                            Button {
+                                category = preset
+                            } label: {
+                                Text(preset)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 32)
+                                    .foregroundStyle(selected ? Color.white : Color(Design.Palette.ink))
+                                    .background(selected ? Color(Design.Palette.accent) : Color(Design.Palette.surface), in: Capsule())
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    TextField("或输入自定义分类", text: $category)
+                } header: {
+                    Text("分类")
+                }
+
+                Section {
+                    TextField("内容", text: $value, axis: .vertical)
+                        .lineLimit(2...5)
+                        .font(.subheadline.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("内容")
+                } footer: {
+                    Text("只保存在这台设备上（受 iOS 数据保护加密），不参与云同步和备份。")
+                }
             }
-            .navigationTitle(initial == nil ? "新增敏感凭证" : "编辑敏感凭证")
+            .navigationTitle(initial == nil ? "新增条目" : "编辑条目")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
+                        let cleanCategory = category.trimmingCharacters(in: .whitespacesAndNewlines)
                         let item = SecureVaultItem(
                             id: initial?.id ?? UUID().uuidString,
                             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-                            category: category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "证件/账务" : category,
+                            category: cleanCategory.isEmpty ? "证件" : cleanCategory,
                             value: value.trimmingCharacters(in: .whitespacesAndNewlines)
                         )
                         onSave(item)
                         dismiss()
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                              value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .fontWeight(.semibold)
+                    .disabled(!canSave)
                 }
             }
         }
     }
 }
 
+// MARK: - L2 工具子页 4：个人速填名片夹（家/公司收件地址、企业开票、车牌联系）
+
+struct PersonalFillCardsSubView: View {
+    @State private var cards: [PersonalFillCard] = []
+    @State private var showCreateSheet = false
+    @State private var editingCard: PersonalFillCard?
+    @State private var toast: String?
+
+    var body: some View {
+        List {
+            Section {
+                LXFlowLayout(spacing: 8, lineSpacing: 8) {
+                    Button {
+                        showCreateSheet = true
+                    } label: {
+                        Label("新建速填名片", systemImage: "plus.circle.fill")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: true))
+
+                    Button {
+                        importFromClipboard()
+                    } label: {
+                        Label("从剪贴板智能识别建卡", systemImage: "doc.on.clipboard")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("快捷操作")
+            } footer: {
+                Text("保存后可在键盘「剪贴板 → 名片」直接单字段点填，或在任意输入框打 vdz（地址）/ vkp（开票）/ vmp（名片）/ vcp（车牌）毫秒召唤。")
+            }
+
+            if cards.isEmpty {
+                Section {
+                    LXEmptyState(
+                        icon: "person.text.rectangle.fill",
+                        title: "还没有个人速填名片",
+                        message: "复制一段收件地址或开票抬头点上方「智能识别建卡」，或手动新建一张常用名片。"
+                    )
+                }
+            } else {
+                Section("已存速填名片 · \(cards.count)") {
+                    ForEach(cards) { card in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: card.kind.systemIcon)
+                                    .foregroundStyle(Color(Design.Palette.accent))
+                                Text(card.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color(Design.Palette.ink))
+                                Spacer()
+                                LXTag(text: card.kind.displayTitle)
+                            }
+                            ForEach(card.nonEmptyFields) { field in
+                                HStack(spacing: 8) {
+                                    Text(field.label)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color(Design.Palette.stone))
+                                        .frame(width: 48, alignment: .leading)
+                                    Text(field.value)
+                                        .font(.footnote)
+                                        .foregroundStyle(Color(Design.Palette.ink))
+                                        .lineLimit(2)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Button("复制") {
+                                        UIPasteboard.general.string = field.value
+                                        toast = "已复制\(field.label)"
+                                    }
+                                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                                }
+                            }
+                            HStack(spacing: 8) {
+                                Button {
+                                    UIPasteboard.general.string = card.formattedFullText
+                                    toast = "已复制整张名片"
+                                } label: {
+                                    Label("复制整张", systemImage: "doc.on.doc")
+                                }
+                                .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+
+                                Button {
+                                    editingCard = card
+                                } label: {
+                                    Label("编辑", systemImage: "pencil")
+                                }
+                                .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                            }
+                            .padding(.top, 2)
+                        }
+                        .padding(.vertical, 4)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                PersonalFillCardStore.delete(id: card.id)
+                                cards = PersonalFillCardStore.load()
+                                toast = "已删除名片"
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("个人速填名片夹")
+        .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
+        .onAppear {
+            cards = PersonalFillCardStore.load()
+        }
+        .sheet(isPresented: $showCreateSheet) {
+            PersonalFillCardEditorSheet(initial: nil) { saved in
+                PersonalFillCardStore.upsert(saved)
+                cards = PersonalFillCardStore.load()
+                toast = "已保存「\(saved.title)」"
+            }
+        }
+        .sheet(item: $editingCard) { card in
+            PersonalFillCardEditorSheet(initial: card) { saved in
+                PersonalFillCardStore.upsert(saved)
+                cards = PersonalFillCardStore.load()
+                toast = "已更新「\(saved.title)」"
+            }
+        }
+    }
+
+    private func importFromClipboard() {
+        guard let raw = ConcealedPasteboard.readNonConcealedStringForUserPaste() else {
+            toast = ConcealedPasteboard.isConcealed() ? "保险箱受保护机密不可直接导入普通名片夹" : "系统剪贴板为空"
+            return
+        }
+        guard let card = PersonalFillCardStore.buildCardFromRawText(raw) else {
+            toast = "未在剪贴板中识别到完整的收件地址或开票信息"
+            return
+        }
+        PersonalFillCardStore.upsert(card)
+        cards = PersonalFillCardStore.load()
+        toast = "已智能建卡「\(card.title)」（\(card.fields.count) 项）"
+    }
+}
+
+private struct PersonalFillCardEditorSheet: View {
+    let initial: PersonalFillCard?
+    let onSave: (PersonalFillCard) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var title: String
+    @State private var kind: PersonalCardKind
+    @State private var fields: [PersonalCardField]
+
+    init(initial: PersonalFillCard?, onSave: @escaping (PersonalFillCard) -> Void) {
+        self.initial = initial
+        self.onSave = onSave
+        let k = initial?.kind ?? .homeAddress
+        _title = State(initialValue: initial?.title ?? k.displayTitle)
+        _kind = State(initialValue: k)
+        _fields = State(initialValue: initial?.fields ?? k.defaultFieldLabels.map { PersonalCardField(label: $0, value: "") })
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && fields.contains(where: { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("基本信息") {
+                    TextField("名片名称（如：家里收件、公司开票）", text: $title)
+                    Picker("类型", selection: $kind) {
+                        ForEach(PersonalCardKind.allCases) { item in
+                            Text("\(item.badgePrefix) \(item.displayTitle)").tag(item)
+                        }
+                    }
+                    .onChange(of: kind) { newKind in
+                        if initial == nil {
+                            title = newKind.displayTitle
+                            fields = newKind.defaultFieldLabels.map { PersonalCardField(label: $0, value: "") }
+                        }
+                    }
+                }
+
+                Section("结构化字段（键盘可逐项单点填入）") {
+                    ForEach($fields) { $field in
+                        HStack(spacing: 8) {
+                            TextField("标签", text: $field.label)
+                                .font(.caption.weight(.semibold))
+                                .frame(width: 64)
+                            TextField("填写内容", text: $field.value)
+                                .font(.subheadline)
+                        }
+                    }
+                    .onDelete { offsets in
+                        fields.remove(atOffsets: offsets)
+                    }
+                    Button {
+                        fields.append(PersonalCardField(label: "备注", value: ""))
+                    } label: {
+                        Label("添加字段", systemImage: "plus.circle")
+                    }
+                }
+            }
+            .navigationTitle(initial == nil ? "新建速填名片" : "编辑名片")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        let card = PersonalFillCard(
+                            id: initial?.id ?? UUID(),
+                            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                            kind: kind,
+                            fields: fields.filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                        )
+                        onSave(card)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - L2 工具子页 5：草稿防丢黑匣子（24 小时纯本地留底）
+
+struct DraftRecoverySubView: View {
+    @State private var drafts: [SavedDraftRecord] = []
+    @State private var confirmClearAll = false
+    @State private var toast: String?
+
+    var body: some View {
+        List {
+            Section {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .foregroundStyle(Color(Design.Palette.success))
+                    Text("仅保存在本机 24 小时后自动销毁、永不上云；密码框、无痕模式、银行卡/身份证与强密码均自动跳过。")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 2)
+            }
+
+            if drafts.isEmpty {
+                Section {
+                    LXEmptyState(
+                        icon: "clock.arrow.circlepath",
+                        title: "暂无防丢草稿",
+                        message: "当你在任意 App 打出 ≥18 字长内容并换行或切出时，会自动在这里留底，防止页面刷新或闪退丢字。"
+                    )
+                }
+            } else {
+                Section("最近 24 小时留底草稿 · \(drafts.count)") {
+                    ForEach(drafts) { rec in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(rec.text)
+                                .font(.subheadline)
+                                .foregroundStyle(Color(Design.Palette.ink))
+                                .lineLimit(5)
+                                .textSelection(.enabled)
+                            HStack(spacing: 8) {
+                                LXTag(text: "\(rec.charCount) 字")
+                                Text(rec.updatedAt, style: .relative)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(Design.Palette.stone))
+                                Spacer()
+                                Button {
+                                    UIPasteboard.general.string = rec.text
+                                    toast = "已复制完整草稿"
+                                } label: {
+                                    Label("复制捞回", systemImage: "doc.on.doc")
+                                }
+                                .buttonStyle(LXCapsuleButtonStyle(prominent: true))
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                DraftRecoveryStore.delete(id: rec.id)
+                                drafts = DraftRecoveryStore.load()
+                                toast = "已删除草稿"
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("草稿防丢黑匣子")
+        .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
+        .toolbar {
+            if !drafts.isEmpty {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("清空", role: .destructive) {
+                        confirmClearAll = true
+                    }
+                }
+            }
+        }
+        .confirmationDialog("清空全部防丢草稿？", isPresented: $confirmClearAll, titleVisibility: .visible) {
+            Button("全部清空", role: .destructive) {
+                DraftRecoveryStore.clearAll()
+                drafts = []
+                toast = "已清空防丢草稿黑匣子"
+            }
+        }
+        .onAppear {
+            drafts = DraftRecoveryStore.load()
+        }
+    }
+}
+
+// MARK: - L2 工具子页 6：高情商离线话术口袋
+
+struct SocialScriptBankSubView: View {
+    @State private var query = ""
+    @State private var selectedCategory: SocialScriptCategory? = nil
+    @State private var selectedTone: SocialScriptTone? = nil
+    @State private var toast: String?
+
+    var body: some View {
+        let items = SocialScriptBank.filter(category: selectedCategory, tone: selectedTone, query: query)
+        List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(Color(Design.Palette.muted))
+                    TextField("搜索场景（如：借钱、催还钱、迟到、闲鱼、押金…）", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        categoryChip(nil, title: "全部分类")
+                        ForEach(SocialScriptCategory.allCases) { cat in
+                            categoryChip(cat, title: cat.rawValue)
+                        }
+                    }
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        toneChip(nil, title: "全部语气")
+                        ForEach(SocialScriptTone.allCases) { tone in
+                            toneChip(tone, title: tone.rawValue)
+                        }
+                    }
+                }
+            }
+
+            Section("精选离线话术 · \(items.count) 条（无需 API 密钥）") {
+                if items.isEmpty {
+                    LXEmptyState(icon: "text.bubble", title: "没有匹配的话术", message: "换个关键词或重置筛选条件试试。")
+                } else {
+                    ForEach(items) { item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                LXTag(text: item.scenario, tint: Color(Design.Palette.accent), filled: true)
+                                LXTag(text: item.tone.rawValue)
+                                Spacer()
+                                Button {
+                                    UIPasteboard.general.string = item.text
+                                    toast = "已复制「\(item.scenario)」话术"
+                                } label: {
+                                    Label("复制", systemImage: "doc.on.doc")
+                                }
+                                .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                            }
+                            Text(item.text)
+                                .font(.subheadline)
+                                .foregroundStyle(Color(Design.Palette.ink))
+                                .textSelection(.enabled)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("高情商离线话术口袋")
+        .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
+    }
+
+    private func categoryChip(_ cat: SocialScriptCategory?, title: String) -> some View {
+        let active = (selectedCategory == cat)
+        return Button {
+            selectedCategory = cat
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 11)
+                .frame(height: 30)
+                .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toneChip(_ tone: SocialScriptTone?, title: String) -> some View {
+        let active = (selectedTone == tone)
+        return Button {
+            selectedTone = tone
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .foregroundStyle(active ? Color.white : Color(Design.Palette.stone))
+                .background(active ? Color(Design.Palette.slate) : Color(Design.Palette.surface), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}

@@ -72,6 +72,7 @@ final class VoiceInputPanelView: UIView {
 
     private let utilityBar = UIStackView()
     private let dictationConvertBtn = ActionClosureButton(type: .system)
+    private let offlineCleanBtn = ActionClosureButton(type: .system)
     private let fullWorkbenchBtn = ActionClosureButton(type: .system)
 
     private let bottomBar = UIStackView()
@@ -173,6 +174,18 @@ final class VoiceInputPanelView: UIView {
             self?.handleDictationConvertTap()
         }
         utilityBar.addArrangedSubview(dictationConvertBtn)
+
+        offlineCleanBtn.setTitle("⚡ 离线去口水", for: .normal)
+        offlineCleanBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        offlineCleanBtn.layer.cornerRadius = 9
+        offlineCleanBtn.layer.cornerCurve = .continuous
+        offlineCleanBtn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
+        offlineCleanBtn.setContentHuggingPriority(.required, for: .horizontal)
+        offlineCleanBtn.setContentCompressionResistancePriority(.required, for: .horizontal)
+        offlineCleanBtn.actionHandler = { [weak self] in
+            self?.handleOfflineVoiceCleanTap()
+        }
+        utilityBar.addArrangedSubview(offlineCleanBtn)
 
         fullWorkbenchBtn.setTitle("全屏同传", for: .normal)
         fullWorkbenchBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
@@ -320,6 +333,8 @@ final class VoiceInputPanelView: UIView {
 
         dictationConvertBtn.backgroundColor = theme.accentFill.withAlphaComponent(0.16)
         dictationConvertBtn.setTitleColor(theme.candidateHighlight, for: .normal)
+        offlineCleanBtn.backgroundColor = theme.specialKeyFill
+        offlineCleanBtn.setTitleColor(theme.keyText, for: .normal)
         fullWorkbenchBtn.backgroundColor = theme.specialKeyFill
         fullWorkbenchBtn.setTitleColor(theme.keyText, for: .normal)
 
@@ -853,7 +868,7 @@ final class VoiceInputPanelView: UIView {
         }
         liveTranslateStreamTask?.cancel()
         let hostText = (onFetchHostInputContext?() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let pbText = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let pbText = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess) ?? ""
 
         let source: String
         let replaceLen: Int
@@ -960,6 +975,29 @@ final class VoiceInputPanelView: UIView {
         insertButton.isEnabled = hasOut
         insertButton.alpha = hasOut ? 1.0 : 0.45
         setNeedsLayout()
+    }
+
+    private func handleOfflineVoiceCleanTap() {
+        stopAllRecording(runFinalTranslate: false)
+        let localSource = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source: String
+        if !localSource.isEmpty {
+            source = localSource
+        } else {
+            let host = (onFetchHostInputContext?() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty else {
+                statusMessage = "请先说话或先用系统听写输入口述内容，再点「⚡ 离线去口水」"
+                refreshDisplays()
+                return
+            }
+            source = host
+            transcriptText = host
+            pendingReplaceCount = host.count
+        }
+        let report = VoiceTranscriptCleaner.clean(source)
+        translatedText = report.cleaned
+        statusMessage = "⚡ 离线去口水（0ms）：\(report.summaryBadge)"
+        refreshDisplays()
     }
 
     private func handleClear() {

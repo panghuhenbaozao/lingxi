@@ -1848,15 +1848,19 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
     def _client_ip(self) -> str:
         return self.client_address[0] if self.client_address else "127.0.0.1"
 
+    def _cors_origin(self) -> str:
+        origin = os.environ.get("LINGXI_CORS_ORIGIN", "*").strip()
+        return origin if origin else "*"
+
     def _send_json(self, status: int, data: Any) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self._cors_origin())
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-API-Key, X-Service-Key, X-Lingxi-Timestamp, X-Lingxi-Nonce, X-Lingxi-Signature",
+            "Content-Type, Authorization, X-API-Key, X-Admin-Token, X-Service-Key, X-Lingxi-Timestamp, X-Lingxi-Nonce, X-Lingxi-Signature",
         )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.end_headers()
@@ -1900,6 +1904,24 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
         expected = hmac.new(signing_secret, msg, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, sig_hdr.strip())
 
+    def _is_admin_authorized(self) -> Tuple[bool, bool]:
+        """检查环境变量 LINGXI_ADMIN_TOKEN；配置后管理与 B2B 签发接口强制鉴权。"""
+        expected = os.environ.get("LINGXI_ADMIN_TOKEN", "").strip()
+        if not expected:
+            return False, False
+        hdr = (self.headers.get("X-Admin-Token") or "").strip()
+        auth = self.headers.get("Authorization") or ""
+        bearer = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        provided = hdr or bearer
+        return True, bool(provided and hmac.compare_digest(provided, expected))
+
+    def _require_admin_if_configured(self) -> bool:
+        configured, authorized = self._is_admin_authorized()
+        if configured and not authorized:
+            self._send_error_json(HTTPStatus.UNAUTHORIZED, "ADMIN_AUTH_REQUIRED", "管理接口已开启管理员保护，请提供 X-Admin-Token")
+            return False
+        return True
+
     def _require_auth(self, query_target_user: Optional[str] = None) -> Optional[str]:
         user_id = self.db.authenticate_request(
             self.headers.get("Authorization"),
@@ -1932,7 +1954,16 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/dashboard/overview":
+                if not self._require_admin_if_configured():
+                    return
+                _, is_admin = self._is_admin_authorized()
                 overview = self.db.dashboard_overview()
+                if not is_admin:
+                    for prof in overview.get("profiles", []):
+                        em = str(prof.get("email", "") or "")
+                        if "@" in em:
+                            local, domain = em.split("@", 1)
+                            prof["email"] = (local[:2] + "***@" + domain) if len(local) > 1 else "***@" + domain
                 port = self.server.server_address[1]
                 lan_ip = detect_lan_ip()
                 overview["lanURL"] = f"http://{lan_ip}:{port}"
@@ -1968,7 +1999,7 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "openCoreLicense": "MIT Permanent Open-Core",
-                        "e2eeProtocol": "LXE1 (ChaCha20-Poly1305 / AES-256-GCM)",
+                        "e2eeProtocol": "LXE2 / LXE1 (PBKDF2 + ChaCha20-Poly1305 / AES-256-GCM)",
                         "syncTransports": ["local_noop", "lan_p2p", "e2ee_cloud"],
                         "tiers": ["free", "self_hosted", "pro", "enterprise"],
                         "communityPacks": len(COMMUNITY_LEXICON_PACKS),
@@ -1986,8 +2017,11 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, found)
                 return
 
-            # 3. 跨设备剪贴板接力 (REST 拉取 + SSE 实时推流)
+            # 3. 跨设备剪贴板接力 (REST 拉取 + SSE 实时推流 + 按 IP 滑动窗口防爆破限流)
             if path == "/api/v1/relay/clipboard":
+                if not self.db.limiter.allow(f"relay_get:{self._client_ip()}", max_calls=60, window_seconds=60):
+                    self._send_error_json(HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "拉取过于频繁，请稍后再试")
+                    return
                 code = query.get("code", [""])[0]
                 since_id = int(query.get("since_id", ["0"])[0])
                 items = self.db.pull_clipboard_relay(code, since_id)
@@ -1995,12 +2029,15 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/relay/stream":
+                if not self.db.limiter.allow(f"relay_sse:{self._client_ip()}", max_calls=30, window_seconds=60):
+                    self._send_error_json(HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "推流连接过于频繁，请稍后再试")
+                    return
                 code = re.sub(r"[^0-9A-Za-z]", "", query.get("code", [""])[0])
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Origin", self._cors_origin())
                 self.end_headers()
                 try:
                     items = self.db.pull_clipboard_relay(code, 0)
@@ -2089,10 +2126,14 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/dashboard/seed-demo":
+                if not self._require_admin_if_configured():
+                    return
                 self._send_json(HTTPStatus.OK, self.db.seed_demo_data())
                 return
 
             if path in ("/api/v1/community/packs", "/api/v1/community/lexicons"):
+                if not self._require_admin_if_configured():
+                    return
                 name = str(body.get("name", "")).strip() or "社区贡献词包"
                 category = str(body.get("category", "")).strip() or "社区专题"
                 tsv = str(body.get("tsv", "")).strip() or "lx\t灵犀输入法"
@@ -2111,6 +2152,9 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/relay/clipboard":
+                if not self.db.limiter.allow(f"relay_post:{self._client_ip()}", max_calls=30, window_seconds=60):
+                    self._send_error_json(HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "跨屏发送过于频繁，请稍后再试")
+                    return
                 res = self.db.push_clipboard_relay(
                     pair_code=str(body.get("pairCode", "")),
                     content_text=str(body.get("contentText", "")),
@@ -2120,6 +2164,8 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/b2b/clients":
+                if not self._require_admin_if_configured():
+                    return
                 res = self.db.create_b2b_client(
                     org=str(body.get("org", "Enterprise Partner")),
                     scopes=str(body.get("scopes", "profile:read,aggregate:read")),
@@ -2128,6 +2174,8 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/b2b/simulate-query":
+                if not self._require_admin_if_configured():
+                    return
                 res = self.db.execute_b2b_aggregate_query(
                     client_id=str(body.get("clientID", "")),
                     ip=self._client_ip(),
@@ -2158,10 +2206,11 @@ class LingxiHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, session)
                 return
 
-            if path == "/api/v1/auth/apple":
+            if path in ("/api/v1/auth/apple", "/api/v1/auth/apple-device"):
+                hw_id = str(body.get("hardwareKeyID") or body.get("user") or "").strip()
                 session = self.db.sign_in_with_apple(
                     identity_token_b64=str(body.get("identityToken", "")),
-                    apple_user=str(body.get("user", "")),
+                    apple_user=hw_id,
                     device_id=str(body.get("deviceID", "ios-default")),
                 )
                 self._send_json(HTTPStatus.OK, session)
@@ -2474,11 +2523,34 @@ def run_self_test() -> None:
             assert code == 200 and exported["format"] == "LINGXI-GDPR-PORTABLE-EXPORT"
             assert len(exported["consentAuditTrail"]) >= 2
 
-            # 11. L5 运维安全：数据库在线热备快照与恢复演练校验（"不演练的备份等于没有"）
+            # 11. 管理端令牌门禁与 Apple 硬件密钥登录路由校验
+            prev_admin_token = os.environ.get("LINGXI_ADMIN_TOKEN")
+            os.environ["LINGXI_ADMIN_TOKEN"] = "selftest-admin-secret"
+            try:
+                code_unauth, _ = request_json("GET", "/api/v1/dashboard/overview")
+                assert code_unauth == 401, f"Admin overview must return 401 when LINGXI_ADMIN_TOKEN is set, got {code_unauth}"
+                code_auth, ov = request_json("GET", "/api/v1/dashboard/overview", headers={"X-Admin-Token": "selftest-admin-secret"})
+                assert code_auth == 200 and "stats" in ov
+                code_b2b_block, _ = request_json("POST", "/api/v1/b2b/clients", {"org": "未授权测试"})
+                assert code_b2b_block == 401, f"B2B client creation must require admin token when configured, got {code_b2b_block}"
+            finally:
+                if prev_admin_token is None:
+                    os.environ.pop("LINGXI_ADMIN_TOKEN", None)
+                else:
+                    os.environ["LINGXI_ADMIN_TOKEN"] = prev_admin_token
+
+            code_hw, hw_res = request_json(
+                "POST",
+                "/api/v1/auth/apple-device",
+                {"hardwareID": "hw_test_0123456789abcdef", "username": "Apple 硬件用户", "deviceID": "iphone-16-pro"},
+            )
+            assert code_hw == 200 and hw_res.get("accessToken")
+
+            # 12. L5 运维安全：数据库在线热备快照与恢复演练校验（"不演练的备份等于没有"）
             drill_report = run_backup_and_restore_drill(db_file)
             assert drill_report["integrityCheck"] == "ok" and drill_report["restoredTables"] >= 11
 
-            print("OK  Lingxi Cloud Server v4.0 Full-Spec Self-Test: ALL PASSED (8/8 Architecture Sections + L5 Backup Drill Verified)")
+            print("OK  Lingxi Cloud Server v4.0 Full-Spec Self-Test: ALL PASSED (8/8 Architecture Sections + Admin Guard + L5 Backup Drill Verified)")
         finally:
             server.shutdown()
             server.server_close()

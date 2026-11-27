@@ -6,9 +6,9 @@
 
 ## 一、 四条不可动摇的架构铁律与开源对标
 
-1. **键盘扩展永不发起网络请求**：`Keyboard/` 进程零网络权限诉求，所有习惯指标与剪贴板/词库变更均通过 App Group (`group.com.lingxi.keyboard`) 落盘，由主 App 进程统一完成网络通信。
+1. **离线默认零联网、显式授权按需直连**：日常打字解码、词库自学习、模糊音、保险箱 100% 在端侧完成，跨进程状态通过 App Group (`group.com.lingxi.ime`) 共享；仅在用户显式开启「允许完全访问」并主动点击 AI / 边打边译 / 截屏识图时直连用户配置的大模型端点，且支持端侧 `AIPrivacyShield` 敏感信息自动脱敏。
 2. **离线是默认态且永远完整可用**：对标 **HeliBoard (`Helium314/HeliBoard`)**，未登录状态下全拼/双拼/九键/笔画、词库、皮肤、加密备份、局域网双机同步、本地统计 100% 完整可用。
-3. **同步零知识 (E2EE)**：对标 **Bitwarden / Vaultwarden (`dani-garcia/vaultwarden`)**，端侧采用 `SyncCrypto` (`Argon2id/HKDF-SHA256` + `ChaCha20-Poly1305` / `AES-256-GCM`) 封装 `"LXE1"` 密文信封，服务端仅存取密文 blob，数学上无法解密用户词库或短语。
+3. **同步零知识 (E2EE)**：对标 **Bitwarden / Vaultwarden (`dani-garcia/vaultwarden`)**，端侧采用 `SyncCrypto` (`PBKDF2-HMAC-SHA256` 端侧主密钥 + `HKDF-SHA256` + `AES-256-GCM` / `ChaCha20-Poly1305`) 封装 `"LXE2"` 密文信封（兼容历史 `"LXE1"`），服务端仅存取密文 blob，数学上无法解密用户词库或短语。
 4. **同步与分析物理分离**：对标 **Atuin (`atuinsh/atuin`)** 与 **Wakapi (`muety/wakapi`)**，同步通道 (`sync_records` + `sync_state`) 与分析通道 (`typing_habit_events` + `user_typing_profiles`) 分表、分接口、分权限，分析通道需显式授权 (`consent_records`) 且永不含任何打字原文。
 
 ---

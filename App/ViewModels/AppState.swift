@@ -58,6 +58,9 @@ final class AppState: ObservableObject {
     @Published var screenshotAutoAnalyze: Bool = false
     @Published var pendingDeleteScreenshotAssetID: String? = nil
     @Published var voiceEngineBannerMessage: String? = nil
+    /// 不属于某个具体页面的结果提示（例如从浏览器回到 App 完成登录），在首页底部显示
+    @Published var globalToastMessage: String? = nil
+    @Published var globalErrorMessage: String? = nil
     @Published var typingStatsSummary: TypingStatsStore.Summary = TypingStatsStore.shared.summary()
     @Published var customBgPreview: UIImage?
     @Published var userAvatarImage: UIImage?
@@ -124,11 +127,12 @@ final class AppState: ObservableObject {
         guard let token = SideloadConfigBridge.exportLocalConfigHandoffTokenFromMainApp() else {
             return (false, "生成同步口令失败，请稍后重试。")
         }
-        UIPasteboard.general.string = token
+        // 使用仅本机、90 秒自动过期的受保护剪贴板，避免密钥口令经通用剪贴板同步到其他设备
+        ConcealedPasteboard.copy(token, expiresIn: 90)
         if isCloudAuthenticated {
-            return (true, "✓ 已同步云端并复制直传口令（含 AI 密钥、模型、外观与设置）！切出灵犀键盘即可自动认领生效。")
+            return (true, "✓ 已同步云端并复制仅本机同步口令（90 秒自动过期）！切出灵犀键盘即可自动认领生效。")
         }
-        return (true, "✓ 已复制本机直传口令（含 AI 密钥、模型、外观与设置）！切出灵犀键盘（需开启完全访问）即可自动导入生效。")
+        return (true, "✓ 已复制仅本机同步口令（90 秒自动过期，含 AI 密钥、模型、外观与设置）！切出灵犀键盘（需开启完全访问）即可自动导入生效。")
     }
 
     /// 响应键盘扩展发出的 Darwin 跨进程变更通知或切 Tab 时静默拉平 App 与键盘的外观/设置/字数状态，绝不反向覆盖写盘。
@@ -427,11 +431,17 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func cloneStyleDNA(fromSamples samples: String) async -> PersonalStyleDNA {
+        let res = await cloneStyleDNAWithStatus(fromSamples: samples)
+        return res.dna
+    }
+
+    @discardableResult
+    func cloneStyleDNAWithStatus(fromSamples samples: String) async -> (dna: PersonalStyleDNA, usedLLM: Bool, fallbackReason: String?) {
         isCloningStyleDNA = true
         defer { isCloningStyleDNA = false }
-        let dna = await AIAutoInsightService.cloneStyleDNA(fromSamples: samples, config: aiConfig)
-        aiConfig.styleDNA = dna
-        return dna
+        let res = await AIAutoInsightService.cloneStyleDNAWithStatus(fromSamples: samples, config: aiConfig)
+        aiConfig.styleDNA = res.dna
+        return res
     }
 
     func upsertContextCard(_ card: PersonalContextCard) {

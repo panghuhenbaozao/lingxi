@@ -10,6 +10,7 @@ final class EmojiSymbolPanelView: UIView {
         case kaomoji = 2
         case punctuation = 3
         case mathAndUnits = 4
+        case layoutPack = 5
 
         var title: String {
             switch self {
@@ -18,11 +19,82 @@ final class EmojiSymbolPanelView: UIView {
             case .kaomoji: return "颜文字"
             case .punctuation: return "，。标点"
             case .mathAndUnits: return "①∑ 符号"
+            case .layoutPack: return "⚡ 布局专属"
             }
         }
 
         var isWideCell: Bool {
-            self == .kaomoji
+            self == .kaomoji || self == .layoutPack
+        }
+    }
+
+    enum EmojiSubgroup: Int, CaseIterable {
+        case all = 0
+        case emotion = 1
+        case gesture = 2
+        case work = 3
+        case food = 4
+        case celebrate = 5
+        case animal = 6
+
+        var title: String {
+            switch self {
+            case .all: return "全部"
+            case .emotion: return "情绪"
+            case .gesture: return "手势"
+            case .work: return "职场"
+            case .food: return "美食"
+            case .celebrate: return "祝福"
+            case .animal: return "动物"
+            }
+        }
+
+        var emojis: [String] {
+            switch self {
+            case .all:
+                return EmojiSymbolPanelView.richEmojis
+            case .emotion:
+                return [
+                    "😂", "🤣", "😊", "😄", "😁", "😆", "😅", "🥹",
+                    "🥺", "😭", "😢", "😤", "😡", "🤯", "😱", "😨",
+                    "😍", "🥰", "😘", "😗", "☺️", "😳", "🤗", "🤭",
+                    "🤔", "🤨", "😐", "😑", "🙄", "😏", "🫠", "🫡",
+                    "😴", "😪", "😵‍💫", "🤒", "😷", "🤧", "🤮", "🥳",
+                    "😎", "🤓", "🧐", "🤠", "😇", "😈", "👻", "🤖",
+                ]
+            case .gesture:
+                return [
+                    "👍", "👎", "👏", "🙌", "🙏", "🤝", "👌", "✌️",
+                    "🤞", "🫶", "💪", "👋", "🤦", "🤷", "🙇", "👀",
+                    "🫡", "🤗", "❤️", "💔", "💕", "💖", "💯", "🔥",
+                ]
+            case .work:
+                return [
+                    "🫡", "👌", "✅", "🙏", "💪", "👏", "🤝", "☕️",
+                    "💻", "📱", "📝", "📚", "💡", "🎯", "🚀", "⏰",
+                    "📅", "📊", "🔧", "🐛", "🔒", "⚠️", "❌", "🚫",
+                    "❓", "❗", "✨", "🔥", "💯", "🎉", "🐟", "😩",
+                ]
+            case .food:
+                return [
+                    "☕️", "🧋", "🍺", "🍻", "🥂", "🍵", "🍉", "🍓",
+                    "🍎", "🍔", "🍟", "🍕", "🍜", "🍲", "🍣", "🍱",
+                    "🍚", "🍰", "🎂", "🍦", "🍢", "🥐", "🥗", "🍿",
+                ]
+            case .celebrate:
+                return [
+                    "🎉", "🎊", "🎈", "🎂", "🎁", "🧧", "🏆", "🥇",
+                    "❤️", "🧡", "💛", "💚", "💙", "💜", "💕", "💖",
+                    "🌹", "💐", "🌸", "🌺", "🍀", "✨", "🌟", "💫",
+                    "💰", "💍", "🥳", "🥂", "🍻", "💯", "🔥", "🌈",
+                ]
+            case .animal:
+                return [
+                    "🐶", "🐱", "🐼", "🐰", "🦊", "🐻", "🐨", "🐯",
+                    "🦁", "🐮", "🐷", "🐸", "🐵", "🦄", "🐝", "🦋",
+                    "🐟", "🦆", "☀️", "🌙", "🌈", "🌧️", "❄️", "🌸",
+                ]
+            }
         }
     }
 
@@ -33,6 +105,8 @@ final class EmojiSymbolPanelView: UIView {
 
     private let topScroll = LingxiScrollView()
     private let categoryStack = UIStackView()
+    private let subgroupScroll = LingxiScrollView()
+    private let subgroupStack = UIStackView()
     private let gridScroll = LingxiScrollView()
     private let gridContainer = UIView()
     private let bottomBar = UIStackView()
@@ -41,9 +115,12 @@ final class EmojiSymbolPanelView: UIView {
     private let deleteButton = ActionClosureButton(type: .system)
 
     private var categoryButtons: [UIButton] = []
+    private var subgroupButtons: [UIButton] = []
     private var cellPool: [UIButton] = []
     private var currentCategory: Category = .emoji
+    private var currentSubgroup: EmojiSubgroup = .all
     private var currentItems: [String] = []
+    private var packQuickTokens: [String] = []
     private var theme: ResolvedTheme?
     private var repeatTimer: Timer?
     private var repeatCount = 0
@@ -143,6 +220,27 @@ final class EmojiSymbolPanelView: UIView {
             categoryButtons.append(btn)
         }
 
+        subgroupScroll.showsHorizontalScrollIndicator = false
+        addSubview(subgroupScroll)
+
+        subgroupStack.axis = .horizontal
+        subgroupStack.alignment = .center
+        subgroupStack.spacing = 6
+        subgroupScroll.addSubview(subgroupStack)
+
+        for group in EmojiSubgroup.allCases {
+            let btn = UIButton(type: .custom)
+            btn.tag = group.rawValue
+            btn.setTitle(group.title, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+            btn.contentEdgeInsets = UIEdgeInsets(top: 3, left: 9, bottom: 3, right: 9)
+            btn.layer.cornerRadius = 10
+            btn.layer.cornerCurve = .continuous
+            btn.addTarget(self, action: #selector(handleSubgroupTap(_:)), for: .touchUpInside)
+            subgroupStack.addArrangedSubview(btn)
+            subgroupButtons.append(btn)
+        }
+
         gridScroll.showsVerticalScrollIndicator = true
         addSubview(gridScroll)
         gridScroll.addSubview(gridContainer)
@@ -184,8 +282,9 @@ final class EmojiSymbolPanelView: UIView {
         bottomBar.addArrangedSubview(deleteButton)
     }
 
-    func configure(theme: ResolvedTheme, preferredCategory: Category? = nil) {
+    func configure(theme: ResolvedTheme, preferredCategory: Category? = nil, packQuickTokens: [String] = []) {
         self.theme = theme
+        self.packQuickTokens = packQuickTokens
         if let preferredCategory {
             self.currentCategory = preferredCategory
         } else if currentCategory == .recent && RecentEmojiStore.load().isEmpty {
@@ -210,6 +309,12 @@ final class EmojiSymbolPanelView: UIView {
             btn.backgroundColor = active ? theme.accentFill : theme.specialKeyFill
             btn.setTitleColor(active ? theme.accentText : theme.keyText, for: .normal)
         }
+        subgroupScroll.isHidden = (currentCategory != .emoji)
+        for (idx, btn) in subgroupButtons.enumerated() {
+            let active = (idx == currentSubgroup.rawValue)
+            btn.backgroundColor = active ? theme.accentFill.withAlphaComponent(0.18) : .clear
+            btn.setTitleColor(active ? theme.candidateHighlight : theme.keyHintText, for: .normal)
+        }
     }
 
     private func items(for category: Category) -> [String] {
@@ -224,13 +329,16 @@ final class EmojiSymbolPanelView: UIView {
             }
             return merged
         case .emoji:
-            return Self.richEmojis
+            return currentSubgroup.emojis
         case .kaomoji:
             return Self.curatedKaomojis
         case .punctuation:
             return Self.chineseAndCommonPunctuations
         case .mathAndUnits:
             return Self.mathAndNumberSymbols
+        case .layoutPack:
+            if !packQuickTokens.isEmpty { return packQuickTokens }
+            return CustomKeyboardLayoutPack.find(id: "developer")?.quickStripTokens ?? ["()", "{}", "[]", "「」", "《》", "——"]
         }
     }
 
@@ -265,10 +373,16 @@ final class EmojiSymbolPanelView: UIView {
             let btn = ensureCell(at: idx)
             btn.isHidden = false
             btn.tag = idx
-            btn.setTitle(item, for: .normal)
+            if let cmd = KeyboardSwipeCommand.parse(item) {
+                btn.setTitle("\(cmd.keycapBadge) \(cmd.displayTitle)", for: .normal)
+                btn.setTitleColor(theme.candidateHighlight, for: .normal)
+                btn.backgroundColor = theme.accentFill.withAlphaComponent(0.14)
+            } else {
+                btn.setTitle(item, for: .normal)
+                btn.setTitleColor(theme.keyText, for: .normal)
+                btn.backgroundColor = isEmojiCat ? theme.keyFill.withAlphaComponent(0.55) : theme.keyFill
+            }
             btn.titleLabel?.font = font
-            btn.setTitleColor(theme.keyText, for: .normal)
-            btn.backgroundColor = isEmojiCat ? theme.keyFill.withAlphaComponent(0.55) : theme.keyFill
         }
         for idx in currentItems.count..<cellPool.count {
             cellPool[idx].isHidden = true
@@ -288,9 +402,19 @@ final class EmojiSymbolPanelView: UIView {
         categoryStack.frame = CGRect(x: pad, y: 2, width: catSize.width, height: topH - 4)
         topScroll.contentSize = CGSize(width: max(bounds.width, catSize.width + pad * 2), height: topH)
 
-        bottomBar.frame = CGRect(x: pad, y: max(topH + 8, bounds.height - botH - 5), width: max(80, bounds.width - pad * 2), height: botH)
+        let showSubgroup = (currentCategory == .emoji)
+        subgroupScroll.isHidden = !showSubgroup
+        let subH: CGFloat = showSubgroup ? 26 : 0
+        if showSubgroup {
+            subgroupScroll.frame = CGRect(x: 0, y: topScroll.frame.maxY + 2, width: bounds.width, height: subH)
+            let subSize = subgroupStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            subgroupStack.frame = CGRect(x: pad, y: 1, width: subSize.width, height: subH - 2)
+            subgroupScroll.contentSize = CGSize(width: max(bounds.width, subSize.width + pad * 2), height: subH)
+        }
 
-        let gridY = topScroll.frame.maxY + 4
+        bottomBar.frame = CGRect(x: pad, y: max(topH + subH + 8, bounds.height - botH - 5), width: max(80, bounds.width - pad * 2), height: botH)
+
+        let gridY = (showSubgroup ? subgroupScroll.frame.maxY : topScroll.frame.maxY) + 4
         let gridH = max(48, bottomBar.frame.minY - gridY - 6)
         gridScroll.frame = CGRect(x: 0, y: gridY, width: bounds.width, height: gridH)
 
@@ -319,6 +443,13 @@ final class EmojiSymbolPanelView: UIView {
     @objc private func handleCategoryTap(_ sender: UIButton) {
         guard let cat = Category(rawValue: sender.tag), cat != currentCategory else { return }
         currentCategory = cat
+        refreshCategoryStyles()
+        reloadItems()
+    }
+
+    @objc private func handleSubgroupTap(_ sender: UIButton) {
+        guard let group = EmojiSubgroup(rawValue: sender.tag), group != currentSubgroup else { return }
+        currentSubgroup = group
         refreshCategoryStyles()
         reloadItems()
     }

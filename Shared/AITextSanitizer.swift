@@ -4,9 +4,14 @@ import Foundation
 /// 彻底清除大模型习惯性输出的 `*`、`**`、`###`、`---`、反引号等 Markdown 乱码符号，
 /// 同时完整保留正常算式（如 `2*3=6`、`5 * 8`）与自然中文标点，确保内容随时可直接粘贴发微信/聊天。
 public enum AITextSanitizer {
-    /// 统一注入到系统提示词的强硬纯文本格式规则
+    /// 统一注入到系统提示词的强硬纯文本格式规则（适用于键盘聊天直发场景）
     public static let plainTextOutputRule: String = """
     【强制输出格式要求】严禁使用任何 Markdown 语法，绝对不要输出 *、**、***、#、##、###、`、```、~~、>、--- 等符号；只输出干净自然、可直接复制到微信发送的纯文本；需要分点说明时请使用「1.」「2.」或「• 」配合自然换行。
+    """
+
+    /// 供 App 内富文本工作台（写作工作台、多模型圆桌、参数化模板）使用的结构化 Markdown 规则
+    public static let richMarkdownOutputRule: String = """
+    【富文本排版格式要求】当前输出将渲染在支持富文本的阅读卡片中：可使用清晰的标题（# / ## / ###）、要点列表（- / 1.）、关键加粗（**重点**）与引用（>）；若包含代码、命令行、JSON 或配置片段，请务必使用带语言标识的围栏代码块（例如 ```swift 或 ```python）包裹，便于用户一键复制代码块。
     """
 
     private static let codeFenceRegex = try? NSRegularExpression(pattern: #"(?m)^\s*```[A-Za-z0-9_+-]*\s*$"#)
@@ -63,6 +68,19 @@ public enum AITextSanitizer {
             while text.hasPrefix("\n") {
                 text.removeFirst()
             }
+            return text
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 供 App 内富文本工作台（写作工作台、多模型圆桌、参数化模板）使用的轻量清洗：
+    /// 保留标题、列表、加粗与围栏代码块交由 `LXMarkdownMessageView` 渲染，仅规范换行与折叠多余空行。
+    public static func cleanPreservingMarkdown(_ raw: String, streaming: Bool = false) -> String {
+        guard !raw.isEmpty else { return "" }
+        var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        text = replace(text, regex: multiBlankLinesRegex, with: "\n\n")
+        if streaming {
+            while text.hasPrefix("\n") { text.removeFirst() }
             return text
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)

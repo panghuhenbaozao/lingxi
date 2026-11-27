@@ -113,9 +113,15 @@ public enum SideloadConfigBridge {
         if includeLocalSnapshots {
             let encoder = JSONEncoder()
             var aiSnap = AIConfig.load()
-            // 避免把数百条远端模型列表塞入剪贴板口令，仅同步核心密钥、当前模型、思考模式与提示词
+            // 避免把数百条远端模型列表塞入剪贴板口令；同时若已绑定容灾兜底渠道，则保留该条精简备用档案，确保侧载键盘自动容灾可用
             aiSnap.fetchedModels = []
-            aiSnap.profiles = []
+            if let fid = aiSnap.failoverProfileID, !fid.isEmpty,
+               var failoverProf = aiSnap.profiles.first(where: { $0.id == fid }) {
+                failoverProf.fetchedModels = []
+                aiSnap.profiles = [failoverProf]
+            } else {
+                aiSnap.profiles = []
+            }
             aiData = try? encoder.encode(aiSnap)
             themeData = try? encoder.encode(ThemeCustomization.load(force: true))
             settingsData = try? encoder.encode(LingxiSettings.load(force: true))
@@ -184,6 +190,13 @@ public enum SideloadConfigBridge {
             }
             if incomingAI.profiles.isEmpty {
                 incomingAI.profiles = existing.profiles
+            } else if !existing.profiles.isEmpty {
+                var merged = incomingAI.profiles
+                let incomingIDs = Set(merged.map(\.id))
+                for p in existing.profiles where !incomingIDs.contains(p.id) {
+                    merged.append(p)
+                }
+                incomingAI.profiles = merged
             }
             _ = incomingAI.save()
             importedParts.append("AI配置")

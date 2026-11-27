@@ -1,3 +1,4 @@
+import CommonCrypto
 import CryptoKit
 import Foundation
 import Network
@@ -98,16 +99,26 @@ public enum CloudCredentialStore {
     private struct FallbackSecrets: Codable {
         var session: AuthSession?
         var apiKey: String?
+        var e2eeMasterSecretB64: String?
     }
 
     public static func saveSession(_ session: AuthSession?) {
-        var secrets = loadFallback()
-        secrets.session = session
-        _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
         if let session, let data = try? JSONEncoder().encode(session) {
-            writeKeychain(account: "auth_session", data: data)
+            if writeKeychain(account: "auth_session", data: data) {
+                var secrets = loadFallback()
+                secrets.session = nil
+                persistFallbackOrCleanup(secrets)
+                return
+            }
+            // 仅在无签名测试环境 Keychain 不可用时回退受保护文件
+            var secrets = loadFallback()
+            secrets.session = session
+            _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
         } else {
             deleteKeychain(account: "auth_session")
+            var secrets = loadFallback()
+            secrets.session = nil
+            persistFallbackOrCleanup(secrets)
         }
     }
 
@@ -121,13 +132,21 @@ public enum CloudCredentialStore {
 
     public static func saveAPIKey(_ apiKey: String?) {
         let cleaned = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var secrets = loadFallback()
-        secrets.apiKey = (cleaned?.isEmpty == false) ? cleaned : nil
-        _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
         if let cleaned, !cleaned.isEmpty, let data = cleaned.data(using: .utf8) {
-            writeKeychain(account: "customer_api_key", data: data)
+            if writeKeychain(account: "customer_api_key", data: data) {
+                var secrets = loadFallback()
+                secrets.apiKey = nil
+                persistFallbackOrCleanup(secrets)
+                return
+            }
+            var secrets = loadFallback()
+            secrets.apiKey = cleaned
+            _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
         } else {
             deleteKeychain(account: "customer_api_key")
+            var secrets = loadFallback()
+            secrets.apiKey = nil
+            persistFallbackOrCleanup(secrets)
         }
     }
 
@@ -140,9 +159,66 @@ public enum CloudCredentialStore {
         return loadFallback().apiKey
     }
 
+    /// 端侧零知识 E2EE 主密钥材料（由用户口令经 PBKDF2-HMAC-SHA256 派生，仅存于本机钥匙串，绝不上传服务端）。
+    public static func saveE2EEMasterSecret(_ secret: Data?) {
+        if let secret, !secret.isEmpty {
+            if writeKeychain(account: "e2ee_master_secret", data: secret) {
+                var secrets = loadFallback()
+                secrets.e2eeMasterSecretB64 = nil
+                persistFallbackOrCleanup(secrets)
+                return
+            }
+            var secrets = loadFallback()
+            secrets.e2eeMasterSecretB64 = secret.base64EncodedString()
+            _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
+        } else {
+            deleteKeychain(account: "e2ee_master_secret")
+            var secrets = loadFallback()
+            secrets.e2eeMasterSecretB64 = nil
+            persistFallbackOrCleanup(secrets)
+        }
+    }
+
+    public static func loadE2EEMasterSecret() -> Data? {
+        if let data = readKeychain(account: "e2ee_master_secret"), !data.isEmpty {
+            return data
+        }
+        if let b64 = loadFallback().e2eeMasterSecretB64, let data = Data(base64Encoded: b64), !data.isEmpty {
+            return data
+        }
+        return nil
+    }
+
+    /// 纯函数：使用 PBKDF2-HMAC-SHA256 (100,000 轮) 从用户密码与账户盐派生 32 字节端侧主密钥材料。
+    public static func deriveClientMasterSecret(password: String, salt: String, rounds: UInt32 = 100_000) -> Data? {
+        let pwData = Data(password.utf8)
+        let saltData = Data(("lingxi-zk-e2ee|" + salt).utf8)
+        guard !pwData.isEmpty, !saltData.isEmpty else { return nil }
+        var derived = Data(count: 32)
+        let status = derived.withUnsafeMutableBytes { derivedPtr in
+            saltData.withUnsafeBytes { saltPtr in
+                pwData.withUnsafeBytes { pwPtr in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        pwPtr.baseAddress?.assumingMemoryBound(to: Int8.self),
+                        pwData.count,
+                        saltPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        saltData.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        rounds,
+                        derivedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        32
+                    )
+                }
+            }
+        }
+        return status == kCCSuccess ? derived : nil
+    }
+
     public static func clearAll() {
         deleteKeychain(account: "auth_session")
         deleteKeychain(account: "customer_api_key")
+        deleteKeychain(account: "e2ee_master_secret")
         try? FileManager.default.removeItem(at: AppGroup.fileURL(fallbackFileName))
     }
 
@@ -150,7 +226,16 @@ public enum CloudCredentialStore {
         AppGroup.readJSON(FallbackSecrets.self, from: fallbackFileName) ?? FallbackSecrets()
     }
 
-    private static func writeKeychain(account: String, data: Data) {
+    private static func persistFallbackOrCleanup(_ secrets: FallbackSecrets) {
+        if secrets.session == nil && secrets.apiKey == nil && secrets.e2eeMasterSecretB64 == nil {
+            try? FileManager.default.removeItem(at: AppGroup.fileURL(fallbackFileName))
+        } else {
+            _ = AppGroup.writeJSON(secrets, to: fallbackFileName, protected: true)
+        }
+    }
+
+    @discardableResult
+    private static func writeKeychain(account: String, data: Data) -> Bool {
         deleteKeychain(account: account)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -159,7 +244,7 @@ public enum CloudCredentialStore {
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        SecItemAdd(query as CFDictionary, nil)
+        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
     }
 
     private static func readKeychain(account: String) -> Data? {
@@ -1344,6 +1429,9 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/register", body: payload, requireAuth: false)
             let session = try persistAuthResponse(dict, isLocalOnly: false)
             let cfg = CloudBackendConfig.load()
+            if let zkSecret = CloudCredentialStore.deriveClientMasterSecret(password: password, salt: cfg.e2eeSalt) {
+                CloudCredentialStore.saveE2EEMasterSecret(zkSecret)
+            }
             LocalAccountVault.mirrorServerAccount(
                 userID: session.userID,
                 email: cfg.email,
@@ -1381,6 +1469,9 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             let dict = try await requestJSON(method: "POST", path: "/api/v1/auth/login", body: payload, requireAuth: false)
             let session = try persistAuthResponse(dict, isLocalOnly: false)
             let cfg = CloudBackendConfig.load()
+            if let zkSecret = CloudCredentialStore.deriveClientMasterSecret(password: password, salt: cfg.e2eeSalt) {
+                CloudCredentialStore.saveE2EEMasterSecret(zkSecret)
+            }
             LocalAccountVault.mirrorServerAccount(
                 userID: session.userID,
                 email: cfg.email,
@@ -1650,10 +1741,23 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     // MARK: SyncService (LWW 重要数据云同步 + SyncCrypto E2EE 端到端加密)
 
-    private static let e2eeMagicHeader = Data("LXE1".utf8)
+    /// 历史兼容密文信封（服务端可见盐派生）
+    private static let e2eeLegacyMagicHeader = Data("LXE1".utf8)
+    /// 真零知识密文信封（由端侧 PBKDF2 派生主密钥材料 + 盐共同派生，服务端数学上无法解密）
+    private static let e2eeZeroKnowledgeMagicHeader = Data("LXE2".utf8)
 
-    /// 从用户专属 e2eeSalt + 身份标识派生 AES-256-GCM 端到端同步密钥
-    private func activeE2EESyncKey() -> Data? {
+    private func zeroKnowledgeKeyMaterial() -> Data? {
+        guard let master = CloudCredentialStore.loadE2EEMasterSecret(), !master.isEmpty else {
+            return nil
+        }
+        let cfg = CloudBackendConfig.load()
+        var material = master
+        material.append(Data(("|" + cfg.e2eeSalt + "|" + cfg.userID).utf8))
+        return material
+    }
+
+    /// 兼容历史 LXE1 密文的派生材料（仅用于平滑解密旧设备已上传记录，或在免密登录且未设本地主口令时兜底）
+    private func legacyE2EESyncKeyMaterial() -> Data? {
         let cfg = CloudBackendConfig.load()
         let salt = cfg.e2eeSalt.trimmingCharacters(in: .whitespacesAndNewlines)
         let uid = cfg.userID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1666,29 +1770,45 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
         return nil
     }
 
-    private func sealPayloadIfPossible(_ plaintext: Data) -> Data {
-        guard !plaintext.isEmpty,
-              !plaintext.starts(with: Self.e2eeMagicHeader),
-              let material = activeE2EESyncKey() else {
+    private func sealPayloadStrictly(_ plaintext: Data) throws -> Data {
+        if plaintext.isEmpty || plaintext.starts(with: Self.e2eeZeroKnowledgeMagicHeader) || plaintext.starts(with: Self.e2eeLegacyMagicHeader) {
             return plaintext
         }
-        let key = SyncCrypto.deriveSyncKey(from: material)
-        if let sealed = try? SyncCrypto.seal(plaintext, key: key) {
-            return Self.e2eeMagicHeader + sealed
+        if let zkMaterial = zeroKnowledgeKeyMaterial() {
+            let key = SyncCrypto.deriveSyncKey(from: zkMaterial)
+            let sealed = try SyncCrypto.seal(plaintext, key: key)
+            return Self.e2eeZeroKnowledgeMagicHeader + sealed
         }
-        return plaintext
+        guard let legacyMaterial = legacyE2EESyncKeyMaterial() else {
+            throw CloudBackendError.badRequest("端到端加密密钥未就绪，已拒绝明文上传")
+        }
+        let key = SyncCrypto.deriveSyncKey(from: legacyMaterial)
+        let sealed = try SyncCrypto.seal(plaintext, key: key)
+        return Self.e2eeLegacyMagicHeader + sealed
     }
 
     private func openPayloadIfNeeded(_ payload: Data) -> Data {
-        guard payload.starts(with: Self.e2eeMagicHeader) else {
+        if payload.starts(with: Self.e2eeZeroKnowledgeMagicHeader) {
+            let body = Data(payload.dropFirst(Self.e2eeZeroKnowledgeMagicHeader.count))
+            if let zkMaterial = zeroKnowledgeKeyMaterial() {
+                let key = SyncCrypto.deriveSyncKey(from: zkMaterial)
+                if let plain = try? SyncCrypto.open(body, key: key) {
+                    return plain
+                }
+            }
             return payload
         }
-        let body = payload.dropFirst(Self.e2eeMagicHeader.count)
-        guard let material = activeE2EESyncKey() else {
+        if payload.starts(with: Self.e2eeLegacyMagicHeader) {
+            let body = Data(payload.dropFirst(Self.e2eeLegacyMagicHeader.count))
+            if let legacyMaterial = legacyE2EESyncKeyMaterial() {
+                let key = SyncCrypto.deriveSyncKey(from: legacyMaterial)
+                if let plain = try? SyncCrypto.open(body, key: key) {
+                    return plain
+                }
+            }
             return payload
         }
-        let key = SyncCrypto.deriveSyncKey(from: material)
-        return (try? SyncCrypto.open(Data(body), key: key)) ?? payload
+        return payload
     }
 
     public func pull(namespace: SyncNamespace, since: UInt64) async throws -> SyncPage {
@@ -1728,8 +1848,8 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
 
     public func push(_ changes: [SyncChange]) async throws -> [SyncConflict] {
         guard isRealCloudAuthenticated else { return [] }
-        let serialized: [[String: Any]] = changes.map { c in
-            let encrypted = c.tombstone ? c.ciphertext : sealPayloadIfPossible(c.ciphertext)
+        let serialized: [[String: Any]] = try changes.map { c in
+            let encrypted = c.tombstone ? c.ciphertext : try sealPayloadStrictly(c.ciphertext)
             return [
                 "namespace": c.namespace.rawValue,
                 "key": c.key,
@@ -1914,7 +2034,10 @@ public final class CloudBackendClient: AuthService, SyncService, InsightService 
             var cfg = CloudBackendConfig.load()
             cfg.e2eeSalt = newSalt
             cfg.save()
-            // 清空同步账本游标，触发用新盐派生的密钥全量重加密推送
+            if let zkSecret = CloudCredentialStore.deriveClientMasterSecret(password: newPassword, salt: newSalt) {
+                CloudCredentialStore.saveE2EEMasterSecret(zkSecret)
+            }
+            // 清空同步账本游标，触发用新密码+新盐派生的零知识密钥全量重加密推送
             SyncLedgerStore().save(SyncLedger())
             _ = try? await syncAllImportantDataAndHabits()
         }

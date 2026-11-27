@@ -55,9 +55,9 @@ struct ToolbarSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             } header: {
-                Text("顶部工具栏与智能胶囊预览")
+                Text("预览")
             } footer: {
-                Text("日常空闲时左置『灵犀 AI / 译』胶囊、右置轻量工具按钮；当收到短信验证码或新复制内容时，顶栏会自动切换为全宽智能粘贴胶囊。低频的表情与光标移动已从顶栏移除。")
+                Text("收到短信验证码或复制新内容时，工具栏会临时变成一键粘贴条，粘贴或关闭后恢复。")
             }
 
             Section {
@@ -70,13 +70,15 @@ struct ToolbarSettingsView: View {
                         Spacer()
                         Toggle("", isOn: visibilityBinding(for: item.buttonID))
                             .labelsHidden()
+                            .tint(Color(Design.Palette.accent))
+                            .accessibilityLabel("显示\(item.buttonID.displayName)")
                     }
                 }
                 .onMove(perform: moveItems)
             } header: {
-                Text("功能按钮显隐与排序")
+                Text("按钮 · 已显示 \(sortedItems.filter { $0.isVisible && $0.buttonID != .undo }.count) 个")
             } footer: {
-                Text("开关控制按钮是否显示，拖动右侧手柄调整顺序。撤销按钮仅在刚删除内容时出现。")
+                Text("拖动右侧把手调整顺序。AI、译、截屏、语音固定在左侧，其余在右侧；按钮太多时左侧可以左右滑动。撤销只在刚删除内容时出现。")
             }
 
             Section {
@@ -152,80 +154,45 @@ struct ToolbarSettingsView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("常规空闲态（跟随当前外观与调色）")
+                Text("平时（与键盘里的排列完全一致）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(Design.Palette.stone))
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        if isButtonVisible(.ai) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text("灵犀 AI")
-                                    .font(.system(size: 12, weight: .semibold))
+                // 与键盘 TopToolbarView 相同的分簇规则：AI / 译 / 截屏 / 语音在左，其余在右；
+                // 撤销只在刚删除内容时出现，右端固定一个「收起键盘」
+                let visible = sortedItems.filter { $0.isVisible && $0.buttonID != .undo }
+                let left = visible.filter { $0.buttonID.isPrimaryLeftAction }
+                let right = visible.filter { !$0.buttonID.isPrimaryLeftAction }
+                HStack(spacing: 6) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(left) { item in
+                                previewButton(item.buttonID, accent: accent, keyFill: keyFill, ink: ink)
                             }
-                            .foregroundStyle(accent)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
-                            .background(accent.opacity(0.12))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(accent.opacity(0.28), lineWidth: 0.5))
                         }
-                        if isButtonVisible(.translate) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "character.bubble")
-                                    .font(.system(size: 11, weight: .medium))
-                                Text("译")
-                                    .font(.system(size: 12, weight: .semibold))
-                            }
-                            .foregroundStyle(ink)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(keyFill)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
-                        }
-                        if isButtonVisible(.layout) {
-                            Text("九键")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(ink)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(keyFill)
-                                .clipShape(Capsule())
-                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
-                        }
-                        if isButtonVisible(.clipboard) {
-                            Image(systemName: "doc.on.clipboard")
-                                .font(.system(size: 12.5, weight: .medium))
-                                .foregroundStyle(ink)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(keyFill)
-                                .clipShape(Capsule())
-                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
-                        }
-                        if isButtonVisible(.settings) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 12.5, weight: .medium))
-                                .foregroundStyle(ink)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(keyFill)
-                                .clipShape(Capsule())
-                                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
-                        }
+                        .padding(.leading, 10)
                     }
-                    .padding(.horizontal, 10)
+                    Spacer(minLength: 4)
+                    HStack(spacing: 6) {
+                        ForEach(right) { item in
+                            previewButton(item.buttonID, accent: accent, keyFill: keyFill, ink: ink)
+                        }
+                        Image(systemName: "keyboard.chevron.compact.down")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(hint)
+                            .padding(.horizontal, 6)
+                    }
+                    .padding(.trailing, 8)
                 }
                 .frame(height: 44)
                 .background(barBg)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("工具栏预览：\((left + right).map(\.buttonID.displayName).joined(separator: "、"))")
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("复制文本 / 收到短信验证码时（文本区支持左右滑动查看完整内容）")
+                Text("收到验证码 / 复制新内容时")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(Design.Palette.stone))
                 HStack(spacing: 6) {
@@ -271,6 +238,48 @@ struct ToolbarSettingsView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// 预览里的单个按钮：AI 为强调胶囊，「译」为文字胶囊，其余为图标
+    @ViewBuilder
+    private func previewButton(_ id: ToolbarButtonID, accent: Color, keyFill: Color, ink: Color) -> some View {
+        switch id {
+        case .ai:
+            HStack(spacing: 4) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("灵犀 AI")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(accent.opacity(0.12), in: Capsule())
+            .overlay(Capsule().stroke(accent.opacity(0.28), lineWidth: 0.5))
+        case .translate:
+            Text("译")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ink)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(keyFill, in: Capsule())
+                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+        case .layout:
+            Text("九键")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(ink)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(keyFill, in: Capsule())
+                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+        default:
+            Image(systemName: id.symbolName)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(ink)
+                .frame(width: 28, height: 28)
+                .background(keyFill, in: Capsule())
+                .overlay(Capsule().stroke(ink.opacity(0.12), lineWidth: 0.5))
+        }
     }
 
     private func isButtonVisible(_ id: ToolbarButtonID) -> Bool {

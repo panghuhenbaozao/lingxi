@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 // MARK: - 1. 动态变量快捷短语引擎（借鉴 azooKey：支持 {{日期}} / {{时间}} / {{星期}} / {{剪贴板}} / {{选中文字}}）
 
@@ -211,14 +213,89 @@ struct SecureVaultItem: Codable, Identifiable, Equatable {
 
 enum SecureSnippetVault {
     private static let fileName = "lingxi_local_secure_vault.json"
+    private static let magicHeader = Data("LXV1".utf8)
+    private static let keychainService = "com.lingxi.ime.vault"
+    private static let keychainAccount = "vault_master_key_v1"
+
+    /// 纯函数：用 256 位对称密钥将保险箱条目数组封装为 `LXV1` + AES-256-GCM 密文信封（便于单元测试）。
+    static func sealItems(_ items: [SecureVaultItem], key: SymmetricKey) throws -> Data {
+        let plain = try JSONEncoder().encode(items)
+        guard let combined = try AES.GCM.seal(plain, using: key).combined else {
+            throw SyncCrypto.CryptoError.sealFailed
+        }
+        return magicHeader + combined
+    }
+
+    /// 纯函数：解密 `LXV1` 密文信封；若传入历史明文 JSON 则兼容解码，确保平滑升级零丢数据。
+    static func openItems(_ raw: Data, key: SymmetricKey?) throws -> [SecureVaultItem] {
+        if raw.starts(with: magicHeader) {
+            guard let key else { throw SyncCrypto.CryptoError.decryptFailed }
+            let boxData = Data(raw.dropFirst(magicHeader.count))
+            let box = try AES.GCM.SealedBox(combined: boxData)
+            let plain = try AES.GCM.open(box, using: key)
+            return try JSONDecoder().decode([SecureVaultItem].self, from: plain)
+        }
+        // 兼容历史明文格式
+        return try JSONDecoder().decode([SecureVaultItem].self, from: raw)
+    }
+
+    private static func loadOrCreateKeychainKey() -> SymmetricKey? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+           let keyData = item as? Data,
+           keyData.count == 32 {
+            return SymmetricKey(data: keyData)
+        }
+        let fresh = SymmetricKey(size: .bits256)
+        let keyData = fresh.withUnsafeBytes { Data($0) }
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecValueData as String: keyData,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        return status == errSecSuccess ? fresh : nil
+    }
 
     static func loadAll() -> [SecureVaultItem] {
-        AppGroup.readJSON([SecureVaultItem].self, from: fileName) ?? []
+        let url = AppGroup.fileURL(fileName)
+        guard let raw = try? Data(contentsOf: url), !raw.isEmpty else { return [] }
+        let key = loadOrCreateKeychainKey()
+        guard let items = try? openItems(raw, key: key) else { return [] }
+        // 若读取到的是旧版明文且当前设备 Keychain 可用，自动静默升级为 AES-256-GCM 密文落盘
+        if !raw.starts(with: magicHeader), key != nil {
+            _ = saveAll(items)
+        }
+        return items
     }
 
     @discardableResult
     static func saveAll(_ items: [SecureVaultItem]) -> Bool {
-        AppGroup.writeJSON(items, to: fileName, protected: true)
+        let url = AppGroup.fileURL(fileName)
+        if let key = loadOrCreateKeychainKey(),
+           let sealed = try? sealItems(items, key: key) {
+            do {
+                try sealed.write(to: url, options: [.atomic])
+                try? FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: url.path
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+        // 无签名测试环境 Keychain 不可用时的安全回退
+        return AppGroup.writeJSON(items, to: fileName, protected: true)
     }
 
     static func upsert(_ item: SecureVaultItem) {

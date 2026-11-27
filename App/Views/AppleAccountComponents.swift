@@ -55,6 +55,22 @@ final class ApplePasskeyWebAuthCoordinator: NSObject, ASWebAuthenticationPresent
 
 /// 系统原生面容 ID / 触控 ID / 锁屏密码验证工具（供 Face ID 云端登录与本地保险箱复用）。
 enum BiometricAuthHelper {
+    /// 与当前设备生物识别类型匹配的 SF Symbol（面容 ID / 触控 ID / 锁）
+    static func biometrySymbolName() -> String {
+        let ctx = LAContext()
+        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        switch ctx.biometryType {
+        case .faceID: return "faceid"
+        case .touchID: return "touchid"
+        default: return "lock.fill"
+        }
+    }
+
+    /// 设备是否设置了锁屏密码（未设置时 `verify` 会直接放行，保险箱等需要如实提示用户）
+    static var isDeviceSecured: Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: nil)
+    }
+
     static func biometryDisplayName() -> String {
         let ctx = LAContext()
         _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
@@ -208,13 +224,7 @@ struct AppleStyleSignInSheet: View {
                     VStack(spacing: 10) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [Color(Design.Palette.accent), Color(hexColor: HexColor("#5856D6"))],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
+                                .fill(Color(Design.Palette.accent))
                                 .frame(width: 68, height: 68)
                                 .shadow(color: Color(Design.Palette.accent).opacity(0.28), radius: 12, y: 5)
                             Image(systemName: "text.cursor")
@@ -227,8 +237,8 @@ struct AppleStyleSignInSheet: View {
                             .font(.system(size: 26, weight: .bold))
                             .foregroundStyle(Color(Design.Palette.ink))
 
-                        Text("国内免代理直连云端（TCP + 5 组 IPv4 优选自动竞速），\n端到端零知识加密同步词库、外观、文风 DNA 与打字习惯。")
-                            .font(.system(size: 13))
+                        Text("国内直连，无需代理。\n词库、外观和打字习惯端到端加密同步，服务器看不到内容。")
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineSpacing(3)
@@ -243,14 +253,14 @@ struct AppleStyleSignInSheet: View {
                             Task { await signInWithFaceIDHardwareKey() }
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "apple.logo")
+                                Image(systemName: BiometricAuthHelper.biometrySymbolName())
                                     .font(.system(size: 18, weight: .semibold))
-                                Text("通过 Apple \(BiometricAuthHelper.biometryDisplayName())一键登录云端")
-                                    .font(.system(size: 15.5, weight: .semibold))
+                                Text("用\(BiometricAuthHelper.biometryDisplayName())一键登录")
+                                    .font(.subheadline.weight(.semibold))
                             }
                             .frame(maxWidth: .infinity, minHeight: 52)
-                            .background(colorScheme == .dark ? Color.white : Color.black)
-                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                            .background(Color(Design.Palette.ink))
+                            .foregroundStyle(Color(Design.Palette.canvas))
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -262,8 +272,8 @@ struct AppleStyleSignInSheet: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "person.badge.key.fill")
                                     .font(.system(size: 17, weight: .semibold))
-                                Text("通过 Apple iCloud 钥匙串通行密钥登录")
-                                    .font(.system(size: 15.5, weight: .semibold))
+                                Text("用 iCloud 钥匙串通行密钥登录")
+                                    .font(.subheadline.weight(.semibold))
                             }
                             .frame(maxWidth: .infinity, minHeight: 50)
                             .background(Color(Design.Palette.accent))
@@ -273,7 +283,7 @@ struct AppleStyleSignInSheet: View {
                         .buttonStyle(.plain)
                         .disabled(isWorking)
 
-                        Text("推荐点上方黑色按钮：自动走国内 IPv4 优选直连，刷一次\(BiometricAuthHelper.biometryDisplayName())即可秒建并登录真实云端账号，不会降级为离线。")
+                        Text("推荐第一个：验证一次\(BiometricAuthHelper.biometryDisplayName())，就能自动创建并登录云端账号。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -282,7 +292,7 @@ struct AppleStyleSignInSheet: View {
 
                     if isWorking {
                         HStack(spacing: 8) {
-                            ProgressView()
+                            ProgressView().controlSize(.small)
                             Text(workingStatus.isEmpty ? "正在安全验证并同步云端…" : workingStatus)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -293,7 +303,8 @@ struct AppleStyleSignInSheet: View {
                         let isSuccess = err.hasPrefix("✓")
                         HStack(spacing: 6) {
                             Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                            Text(err)
+                            Text(LXToastText.clean(err))
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         .font(.footnote)
                         .foregroundStyle(isSuccess ? Color(Design.Palette.success) : Color(Design.Palette.error))
@@ -331,13 +342,15 @@ struct AppleStyleSignInSheet: View {
                                     .frame(height: 48)
                             } else {
                                 if mode == .register {
-                                    TextField("昵称（显示在个人主页与头像）", text: $username)
+                                    TextField("昵称（显示在头像旁）", text: $username)
+                                        .textContentType(.nickname)
                                         .font(.system(size: 15))
                                         .padding(.horizontal, 16)
                                         .frame(height: 48)
                                     Divider().padding(.leading, 16)
                                 }
-                                TextField("邮箱地址（如 me@example.com）", text: $email)
+                                TextField("邮箱地址", text: $email)
+                                    .textContentType(.username)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
                                     .keyboardType(.emailAddress)
@@ -345,7 +358,12 @@ struct AppleStyleSignInSheet: View {
                                     .padding(.horizontal, 16)
                                     .frame(height: 48)
                                 Divider().padding(.leading, 16)
-                                SecureField("密码（至少 6 位）", text: $password)
+                                SecureField(mode == .register ? "设置密码（至少 6 位）" : "密码", text: $password)
+                                    .textContentType(mode == .register ? UITextContentType.newPassword : UITextContentType.password)
+                                    .submitLabel(.go)
+                                    .onSubmit {
+                                        if canSubmit { Task { await submitEmailOrKeyAction() } }
+                                    }
                                     .font(.system(size: 15))
                                     .padding(.horizontal, 16)
                                     .frame(height: 48)
@@ -354,11 +372,18 @@ struct AppleStyleSignInSheet: View {
                         .background(Color(.secondarySystemGroupedBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
+                        if let hint = formHint {
+                            Text(hint)
+                                .font(.caption)
+                                .foregroundStyle(Color(Design.Palette.error))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
                         Button {
                             Task { await submitEmailOrKeyAction() }
                         } label: {
                             Text(mode == .register ? "邮箱注册并云端同步" : (mode == .apiKey ? "验证并连接 API Key" : "邮箱登录"))
-                                .font(.system(size: 15.5, weight: .semibold))
+                                .font(.subheadline.weight(.semibold))
                                 .frame(maxWidth: .infinity, minHeight: 46)
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .foregroundStyle(Color(Design.Palette.accent))
@@ -369,7 +394,8 @@ struct AppleStyleSignInSheet: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .disabled(isWorking)
+                        .disabled(isWorking || !canSubmit)
+                        .opacity(canSubmit ? 1 : 0.5)
                     }
 
                     // 4. 离线本地模式兜底
@@ -381,20 +407,22 @@ struct AppleStyleSignInSheet: View {
                         )
                         dismiss()
                     } label: {
-                        Text("暂不连网，仅启用纯本机加密档案")
+                        Text("暂不登录，只在本机使用")
                             .font(.footnote.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
                     // 5. 高级自托管服务器地址折叠区
-                    DisclosureGroup("云端服务器设置（已内置中国直连 Cloudflare 云）", isExpanded: $showServerConfig) {
+                    DisclosureGroup("服务器设置（一般不用改）", isExpanded: $showServerConfig) {
                         VStack(alignment: .leading, spacing: 8) {
                             TextField("https://lingxi-ime.pages.dev", text: $appState.cloudConfig.serverBaseURL)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
-                                .font(.system(size: 13, design: .monospaced))
+                                .font(.footnote.monospaced())
                                 .padding(10)
                                 .background(Color(.secondarySystemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -421,9 +449,11 @@ struct AppleStyleSignInSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 }
+                .lxReadableWidth()
                 .padding(.horizontal, 22)
                 .padding(.bottom, 32)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -438,6 +468,36 @@ struct AppleStyleSignInSheet: View {
         }
     }
 
+    private var trimmedEmail: String {
+        email.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 表单就绪：字段已填写且格式正确
+    private var canSubmit: Bool {
+        switch mode {
+        case .apiKey:
+            return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .login:
+            return isEmailLike(trimmedEmail) && !password.isEmpty
+        case .register:
+            return isEmailLike(trimmedEmail) && password.count >= 6
+        }
+    }
+
+    /// 只在用户已经输入过内容后才提示，避免一打开就满屏红字
+    private var formHint: String? {
+        guard mode != .apiKey else { return nil }
+        if !trimmedEmail.isEmpty && !isEmailLike(trimmedEmail) { return "邮箱格式不正确" }
+        if mode == .register && !password.isEmpty && password.count < 6 { return "密码至少 6 位" }
+        return nil
+    }
+
+    private func isEmailLike(_ s: String) -> Bool {
+        guard let at = s.firstIndex(of: "@"), at != s.startIndex else { return false }
+        let domain = s[s.index(after: at)...]
+        return domain.contains(".") && !domain.hasPrefix(".") && !domain.hasSuffix(".") && !s.contains(" ")
+    }
+
     private var cloudProbeBanner: some View {
         Button {
             Task { await probeCloudStatusSilently() }
@@ -445,25 +505,25 @@ struct AppleStyleSignInSheet: View {
             HStack(spacing: 6) {
                 switch cloudProbeState {
                 case .probing:
-                    ProgressView().scaleEffect(0.75)
-                    Text("正在测速国内直连云端节点…")
+                    ProgressView().controlSize(.mini)
+                    Text("正在连接云端…")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
                 case .online(let ms, let route):
                     Circle()
                         .fill(Color(Design.Palette.success))
                         .frame(width: 7, height: 7)
-                    Text("国内云端已连通 · \(ms)ms · \(route)")
+                    Text("云端已连通 · \(ms) ms")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color(Design.Palette.success))
                         .lineLimit(1)
                 case .unreachable(let detail):
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Text("暂未连通（点此重试）：\(detail)")
+                        .foregroundStyle(Color(Design.Palette.warning))
+                    Text("暂未连通，点此重试")
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color(Design.Palette.warning))
                         .lineLimit(1)
                 }
             }
@@ -488,6 +548,7 @@ struct AppleStyleSignInSheet: View {
     }
 
     private func signInWithAppleICloudPasskey() async {
+        guard !isWorking else { return }
         guard let authURL = CloudBackendClient.shared.applePasskeyAuthURL() else {
             errorMessage = "云端服务器地址无效"
             return
@@ -507,6 +568,7 @@ struct AppleStyleSignInSheet: View {
     }
 
     private func signInWithFaceIDHardwareKey() async {
+        guard !isWorking else { return }
         isWorking = true
         workingStatus = "正在验证\(BiometricAuthHelper.biometryDisplayName())…"
         errorMessage = nil
@@ -523,6 +585,7 @@ struct AppleStyleSignInSheet: View {
     }
 
     private func submitEmailOrKeyAction() async {
+        guard !isWorking, canSubmit else { return }
         isWorking = true
         workingStatus = "正在连接 Cloudflare 云端…"
         errorMessage = nil
@@ -530,15 +593,16 @@ struct AppleStyleSignInSheet: View {
         do {
             switch mode {
             case .login:
-                try await appState.loginCloudAccount(account: email, password: password)
+                try await appState.loginCloudAccount(account: trimmedEmail, password: password)
             case .register:
+                let nick = username.trimmingCharacters(in: .whitespacesAndNewlines)
                 try await appState.registerCloudAccount(
-                    email: email,
-                    username: username.isEmpty ? (email.components(separatedBy: "@").first ?? "灵犀用户") : username,
+                    email: trimmedEmail,
+                    username: nick.isEmpty ? (trimmedEmail.components(separatedBy: "@").first ?? "灵犀用户") : nick,
                     password: password
                 )
             case .apiKey:
-                try await appState.connectCustomerAPIKey(apiKey)
+                try await appState.connectCustomerAPIKey(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             dismiss()
         } catch {

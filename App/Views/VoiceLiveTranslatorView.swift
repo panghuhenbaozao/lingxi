@@ -20,7 +20,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
     @Published var isRecording: Bool = false
     @Published var isTranslating: Bool = false
     @Published var audioLevel: CGFloat = 0
-    @Published var statusText: String = "点下方麦克风直接开口说话，支持边说边实时双语转换"
+    @Published var statusText: String = "点下方麦克风开始说话，边说边转换"
     @Published var errorText: String? = nil
     @Published var permissionDenied: Bool = false
     @Published var history: [VoiceTranslationHistoryItem] = []
@@ -43,7 +43,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
         translatedText = ""
         lastTranslatedSnapshot = ""
         errorText = nil
-        statusText = "已切换为「\(newMode.shortTitle)」，点麦克风开始说话"
+        statusText = "已切换为「\(newMode.shortTitle)」"
     }
 
     func flipDirection() {
@@ -69,7 +69,13 @@ final class VoiceLiveTranslatorController: ObservableObject {
         }
     }
 
+    private var isStarting = false
+
     func start(aiConfig: AIConfig) async {
+        // 防止连点导致两次启动音频引擎
+        guard !isStarting, !isRecording else { return }
+        isStarting = true
+        defer { isStarting = false }
         permissionDenied = false
         errorText = nil
         if synthesizer.isSpeaking {
@@ -84,7 +90,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
         }
         guard speechAuth == .authorized else {
             permissionDenied = true
-            statusText = "请授予「语音识别」权限以启用实时语音转换"
+            statusText = "需要「语音识别」权限才能把说的话转成文字"
             return
         }
 
@@ -96,13 +102,13 @@ final class VoiceLiveTranslatorController: ObservableObject {
         }
         guard micGranted else {
             permissionDenied = true
-            statusText = "请授予「麦克风」权限以采集实时语音"
+            statusText = "需要「麦克风」权限才能录音"
             return
         }
 
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: mode.sourceLocaleID)),
               recognizer.isAvailable else {
-            errorText = "当前设备暂不支持「\(mode.sourceLanguageLabel)」系统语音识别，请确认网络或系统听写可用。"
+            errorText = "这台设备暂时无法识别「\(mode.sourceLanguageLabel)」，请检查网络，或在系统设置里确认已开启听写。"
             return
         }
 
@@ -130,7 +136,10 @@ final class VoiceLiveTranslatorController: ObservableObject {
             let inputNode = audioEngine.inputNode
             let hwFormat = inputNode.inputFormat(forBus: 0)
             guard hwFormat.channelCount > 0 && hwFormat.sampleRate > 0 else {
-                errorText = "未检测到可用麦克风通道，请检查系统麦克风权限或蓝牙耳机连接。"
+                errorText = "没有检测到可用的麦克风，请检查麦克风权限或蓝牙耳机连接。"
+                recognitionRequest = nil
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                restoreBackgroundEngineIfNeeded()
                 return
             }
             inputNode.removeTap(onBus: 0)
@@ -146,7 +155,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
             try audioEngine.start()
 
             isRecording = true
-            statusText = "🎙️ 正在聆听（\(mode.shortTitle)）… 边说边实时转换"
+            statusText = "正在听（\(mode.shortTitle)），说完点「说完了」"
 
             recognitionTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
                 Task { @MainActor [weak self] in
@@ -173,6 +182,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
         } catch {
             errorText = "麦克风启动失败：\(error.localizedDescription)"
             stop(runFinalTranslate: false)
+            restoreBackgroundEngineIfNeeded()
         }
     }
 
@@ -191,7 +201,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
 
         let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         if runFinalTranslate && !clean.isEmpty {
-            statusText = "录音已结束，正在完成最终校译…"
+            statusText = "正在完成最终转换…"
             triggerTranslationNow(for: clean, aiConfig: aiConfig, recordHistory: true)
         } else if clean.isEmpty {
             statusText = "点下方麦克风开始说话（\(mode.shortTitle)）"
@@ -250,9 +260,11 @@ final class VoiceLiveTranslatorController: ObservableObject {
         guard aiConfig.isConfigured else {
             isTranslating = false
             if mode.isTranslationMode {
-                errorText = "尚未配置 AI API Key：语音识别原文已就绪，前往「AI 智脑」填写 Key 后即可自动实时中英互译。"
+                errorText = "还没有填写 AI 密钥：原文已经识别出来了，填好密钥后就能自动翻译。"
             } else {
-                translatedText = TextFormatterToolbox.addPanguSpaces(TextFormatterToolbox.collapseBlankLines(clean))
+                let report = VoiceTranscriptCleaner.clean(clean)
+                translatedText = report.cleaned
+                statusText = "离线去口水完成：\(report.summaryBadge)"
             }
             return
         }
@@ -283,7 +295,7 @@ final class VoiceLiveTranslatorController: ObservableObject {
                 self.lastTranslatedSnapshot = clean
                 self.isTranslating = false
                 if !self.isRecording {
-                    self.statusText = "✓ 转换完成，可点下方直接复制或朗读"
+                    self.statusText = "转换完成，可以复制或朗读"
                 }
                 if recordHistory && !finalOut.isEmpty {
                     let item = VoiceTranslationHistoryItem(mode: modeSnap, source: clean, target: finalOut)
@@ -292,13 +304,13 @@ final class VoiceLiveTranslatorController: ObservableObject {
                     // 录音结束完成精准校译后自动写入剪贴板与历史，切回微信/聊天软件顶栏立刻弹出一键粘贴胶囊
                     UIPasteboard.general.string = finalOut
                     _ = ClipboardStore.record(finalOut)
-                    self.statusText = "✓ 已自动复制译文！切回原 App 点键盘顶栏即可直接上屏"
+                    self.statusText = "结果已自动复制，切回聊天 App 点键盘顶栏即可粘贴"
                 }
             } catch is CancellationError {
                 // 新的语音片段到来，自然取消旧任务
             } catch {
                 self.isTranslating = false
-                self.errorText = "实时翻译失败：\(error.localizedDescription)"
+                self.errorText = "转换失败：\(error.localizedDescription)"
             }
         }
     }
@@ -318,31 +330,46 @@ final class VoiceLiveTranslatorController: ObservableObject {
     }
 }
 
-/// 旗舰「实时语音同传转换」工作台（说中文实时转英文 / 说英文实时转中文 / 中日互译 / 朗读 / 一键复制回键盘）。
+/// 实时语音同传工作台（v6）：语种切换 → 原文 → 译文 → 底部固定大号麦克风；本次记录可复制、朗读。
 struct VoiceLiveTranslatorView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var controller = VoiceLiveTranslatorController()
     @State private var toast: String?
+    @State private var confirmClear = false
+    @State private var showOfflineCleanDiff = false
+    @State private var lastOfflineCleanedOriginal = ""
+    @FocusState private var editorFocused: Bool
+
+    private var hasContent: Bool {
+        !controller.transcript.isEmpty || !controller.translatedText.isEmpty
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
-                    modeSwitcherCard
+                VStack(spacing: Design.Spacing.md) {
+                    languageCard
                     sourceCard
                     resultCard
-                    micActionCard
                     if !controller.history.isEmpty {
                         historySection
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .lxReadableWidth()
+                .padding(.horizontal, Design.Spacing.md)
+                .padding(.top, Design.Spacing.xs)
+                .padding(.bottom, Design.Spacing.md)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("实时语音同传")
+            .safeAreaInset(edge: .bottom) {
+                micBar
+            }
+            .navigationTitle("语音同传")
             .navigationBarTitleDisplayMode(.inline)
+            .lxToast($toast)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("完成") {
@@ -350,14 +377,25 @@ struct VoiceLiveTranslatorView: View {
                         dismiss()
                     }
                 }
-                if !controller.transcript.isEmpty || !controller.translatedText.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if hasContent {
                         Button("清空") {
-                            controller.clearAll()
+                            confirmClear = true
                         }
-                        .font(.subheadline)
+                        .disabled(controller.isRecording)
                     }
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { editorFocused = false }
+                }
+            }
+            .confirmationDialog("清空原文和译文？", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("清空", role: .destructive) {
+                    controller.clearAll()
+                }
+            } message: {
+                Text("本次记录列表会保留。")
             }
             .onAppear {
                 applyPendingExternalLaunchIfNeeded()
@@ -372,6 +410,9 @@ struct VoiceLiveTranslatorView: View {
                     applyPendingExternalLaunchIfNeeded()
                 }
             }
+            .onChange(of: controller.isRecording) { recording in
+                if recording { editorFocused = false }
+            }
             .onDisappear {
                 controller.stop(runFinalTranslate: false)
                 controller.restoreBackgroundEngineIfNeeded()
@@ -379,333 +420,395 @@ struct VoiceLiveTranslatorView: View {
         }
     }
 
-    // MARK: - 1. 顶部语种互换条
+    // MARK: - 1. 语种与模式
 
-    private var modeSwitcherCard: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Text(controller.mode.sourceLanguageLabel)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color(Design.Palette.surface))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    private var languageCard: some View {
+        LXCard {
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    languageLabel(controller.mode.sourceLanguageLabel, caption: "你说", highlighted: false)
 
-                Button {
-                    controller.flipDirection()
-                } label: {
-                    Image(systemName: "arrow.left.arrow.right")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 34)
-                        .background(Color(Design.Palette.accent))
-                        .clipShape(Circle())
+                    Button {
+                        controller.flipDirection()
+                    } label: {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.white)
+                            .frame(width: 40, height: 40)
+                            .background(Color(Design.Palette.accent), in: Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(controller.isRecording)
+                    .opacity(controller.isRecording ? 0.4 : 1)
+                    .accessibilityLabel("互换语言方向")
+
+                    languageLabel(controller.mode.targetLanguageLabel, caption: controller.mode.isTranslationMode ? "译成" : "整理为", highlighted: true)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("一键互换语种方向")
 
-                Text(controller.mode.targetLanguageLabel)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(Design.Palette.accent))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color(Design.Palette.accentSoft))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(VoiceTranslateMode.allCases) { m in
-                        let active = controller.mode == m
-                        Button(m.pillTitle) {
-                            controller.selectMode(m)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(VoiceTranslateMode.allCases) { m in
+                            modeChip(m)
                         }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
-                        .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
-                        .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
-                        .clipShape(Capsule())
-                        .buttonStyle(.plain)
                     }
                 }
+            }
+        }
+    }
+
+    private func languageLabel(_ text: String, caption: String, highlighted: Bool) -> some View {
+        VStack(spacing: 2) {
+            Text(caption)
+                .font(.caption2)
+                .foregroundStyle(Color(Design.Palette.stone))
+            Text(text)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(highlighted ? Color(Design.Palette.accent) : Color(Design.Palette.ink))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, minHeight: 48)
+        .background(
+            highlighted ? Color(Design.Palette.accentSoft) : Color(Design.Palette.surface),
+            in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func modeChip(_ m: VoiceTranslateMode) -> some View {
+        let active = controller.mode == m
+        return Button {
+            controller.selectMode(m)
+        } label: {
+            Text(m.pillTitle)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                .background(active ? Color(Design.Palette.accent) : Color(Design.Palette.surface), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(controller.isRecording)
+        .opacity(controller.isRecording && !active ? 0.4 : 1)
+        .accessibilityLabel(m.shortTitle)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    // MARK: - 2. 原文
+
+    private var sourceCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(controller.isRecording ? Color(Design.Palette.error) : Color(Design.Palette.hairline))
+                        .frame(width: 8, height: 8)
+                    Text(controller.isRecording ? "正在听…" : "原文")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(controller.isRecording ? Color(Design.Palette.error) : Color(Design.Palette.stone))
+                    if !controller.transcript.isEmpty {
+                        Text("\(controller.transcript.count) 字")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(Color(Design.Palette.stone))
+                    }
+                    Spacer()
+                    if !controller.isRecording {
+                        Button {
+                            pasteSource()
+                        } label: {
+                            Label("粘贴", systemImage: "doc.on.clipboard")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                    }
+                }
+
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $controller.transcript)
+                        .focused($editorFocused)
+                        .font(.body)
+                        .frame(minHeight: 96, maxHeight: 160)
+                        .scrollContentBackground(.hidden)
+                        // 录音时由语音识别实时写入，禁止手动编辑以免被识别结果覆盖
+                        .disabled(controller.isRecording)
+                    if controller.transcript.isEmpty {
+                        Text(controller.mode.sourceLocaleID == "en-US"
+                             ? "Tap the mic and speak English, or paste text here."
+                             : "点下方麦克风开始说话，也可以直接输入或粘贴文字。")
+                            .font(.body)
+                            .foregroundStyle(Color(Design.Palette.muted))
+                            .padding(.top, 8)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                if !controller.transcript.isEmpty && !controller.isRecording {
+                    HStack(spacing: 8) {
+                        Button {
+                            editorFocused = false
+                            controller.translateCurrentTranscript(aiConfig: appState.aiConfig)
+                        } label: {
+                            Label(controller.mode.isTranslationMode ? "翻译这段文字" : "AI 精修整理", systemImage: "arrow.down")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                        .disabled(controller.isTranslating)
+
+                        Button {
+                            editorFocused = false
+                            let raw = controller.transcript
+                            let report = VoiceTranscriptCleaner.clean(raw)
+                            lastOfflineCleanedOriginal = raw
+                            showOfflineCleanDiff = report.changed
+                            controller.translatedText = report.cleaned
+                            controller.errorText = nil
+                            controller.statusText = "离线口述清洗（0ms）：\(report.summaryBadge)"
+                            toast = report.summaryBadge
+                        } label: {
+                            Label("离线去口水", systemImage: "waveform")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                        .disabled(controller.isTranslating)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 3. 译文
+
+    private var resultCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    Text(controller.mode.targetLanguageLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.accent))
+                    if controller.isTranslating {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Spacer()
+                    if !controller.translatedText.isEmpty && !controller.isTranslating {
+                        if !lastOfflineCleanedOriginal.isEmpty && lastOfflineCleanedOriginal != controller.translatedText {
+                            Button {
+                                showOfflineCleanDiff.toggle()
+                            } label: {
+                                Label(showOfflineCleanDiff ? "看成品" : "红绿对照", systemImage: "arrow.left.arrow.right")
+                            }
+                            .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                        }
+                        Button {
+                            controller.speakText(controller.translatedText)
+                        } label: {
+                            Label("朗读", systemImage: "speaker.wave.2")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                    }
+                }
+
+                if let err = controller.errorText {
+                    errorBlock(err)
+                } else if controller.translatedText.isEmpty {
+                    Text(controller.isTranslating ? "正在转换…" : "说完或输入后，结果会实时显示在这里。")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(Design.Palette.muted))
+                        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                } else if showOfflineCleanDiff && !lastOfflineCleanedOriginal.isEmpty && lastOfflineCleanedOriginal != controller.translatedText {
+                    let diff = AITextDiffEngine.diff(original: lastOfflineCleanedOriginal, revised: controller.translatedText)
+                    LXDiffHighlightText(report: diff)
+                        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                } else {
+                    Text(controller.translatedText)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !controller.translatedText.isEmpty && !controller.isTranslating {
+                    HStack(spacing: 8) {
+                        Button {
+                            copyAndNotify(controller.translatedText, label: "已复制，切回聊天 App 后点键盘顶栏即可粘贴")
+                        } label: {
+                            Label("复制结果", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+
+                        if controller.mode.isTranslationMode && !controller.transcript.isEmpty {
+                            Button {
+                                copyAndNotify("\(controller.transcript)\n\(controller.translatedText)", label: "已复制双语对照")
+                            } label: {
+                                Text("复制双语")
+                            }
+                            .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func errorBlock(_ err: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color(Design.Palette.warning))
+                Text(LXToastText.clean(err))
+                    .font(.footnote)
+                    .foregroundStyle(Color(Design.Palette.ink))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !appState.aiConfig.isConfigured {
+                Button {
+                    controller.stop(runFinalTranslate: false)
+                    appState.requestedTab = 2
+                    dismiss()
+                } label: {
+                    Label("去填写 AI 密钥", systemImage: "key.fill")
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: true))
             }
         }
         .padding(12)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(Design.Palette.warning).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    // MARK: - 2. 实时语音原文卡片
+    // MARK: - 4. 底部固定麦克风
 
-    private var sourceCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(controller.isRecording ? Color(Design.Palette.error) : Color(Design.Palette.accent))
-                    .frame(width: 8, height: 8)
-                Text("🎙️ \(controller.mode.sourceLanguageLabel)（可边说边改，也可粘贴）")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("粘贴") {
-                    if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !clip.isEmpty {
-                        controller.transcript = clip
-                        controller.translateCurrentTranscript(aiConfig: appState.aiConfig)
-                    }
-                }
-                .font(.caption.bold())
-                .foregroundStyle(Color(Design.Palette.accent))
-                .buttonStyle(.plain)
-
-                if !controller.transcript.isEmpty && !controller.isRecording {
-                    Button("立即转译") {
-                        controller.translateCurrentTranscript(aiConfig: appState.aiConfig)
-                    }
-                    .font(.caption.bold())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color(Design.Palette.accentSoft))
-                    .foregroundStyle(Color(Design.Palette.accent))
-                    .clipShape(Capsule())
-                    .buttonStyle(.plain)
-                }
-            }
-
-            ZStack(alignment: .topLeading) {
-                if controller.transcript.isEmpty {
-                    Text(controller.mode.sourceLocaleID == "en-US"
-                         ? "Speak English here, or paste English text to translate into Chinese in real time…"
-                         : "按下方开始说话，或直接粘贴文字实时转换…")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 8)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $controller.transcript)
-                    .font(.body)
-                    .frame(minHeight: 88, maxHeight: 140)
-                    .scrollContentBackground(.hidden)
-            }
-        }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 3. 实时转换结果卡片
-
-    private var resultCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Text("🌐 \(controller.mode.targetLanguageLabel)")
-                    .font(.caption.bold())
-                    .foregroundStyle(Color(Design.Palette.accent))
-                if controller.isTranslating {
-                    ProgressView().scaleEffect(0.7)
-                    Text("实时转换中…")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if !controller.translatedText.isEmpty {
-                    Button {
-                        controller.speakText(controller.translatedText)
-                    } label: {
-                        Label("朗读", systemImage: "speaker.wave.2.fill")
-                            .font(.caption.bold())
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Color(Design.Palette.surface))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if let err = controller.errorText {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("⚠️ \(err)")
-                        .font(.caption)
-                        .foregroundStyle(Color.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !appState.aiConfig.isConfigured {
-                        Button("一键前往 AI 智脑填写 Key") {
-                            appState.requestedTab = 2
-                            dismiss()
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color(Design.Palette.accent))
-                        .foregroundStyle(.white)
-                        .clipShape(Capsule())
-                        .buttonStyle(.plain)
-                    }
-                }
-            } else if controller.translatedText.isEmpty {
-                Text("开始说话后，实时译文会逐字流式显示在这里。")
-                    .font(.subheadline)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-            } else {
-                Text(controller.isTranslating ? "\(controller.translatedText) ▍" : controller.translatedText)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-            }
-
-            if !controller.translatedText.isEmpty || !controller.transcript.isEmpty {
-                HStack(spacing: 8) {
-                    Button {
-                        let text = controller.translatedText.isEmpty ? controller.transcript : controller.translatedText
-                        copyAndNotify(text, label: "已复制转换结果，切回聊天软件点键盘顶栏即粘贴")
-                    } label: {
-                        Label("复制结果给键盘", systemImage: "doc.on.doc.fill")
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity, minHeight: 36)
-                            .background(Color(Design.Palette.accent))
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    if !controller.transcript.isEmpty && !controller.translatedText.isEmpty {
-                        Button {
-                            let both = "\(controller.transcript)\n\(controller.translatedText)"
-                            copyAndNotify(both, label: "已复制双语对照")
-                        } label: {
-                            Text("复制双语")
-                                .font(.caption.bold())
-                                .padding(.horizontal, 14)
-                                .frame(height: 36)
-                                .background(Color(Design.Palette.surface))
-                                .foregroundStyle(Color(Design.Palette.ink))
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if let toast {
-                Text(toast)
-                    .font(.caption.bold())
-                    .foregroundStyle(Color(Design.Palette.success))
-            }
-        }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 4. 大号实时录音触发区
-
-    private var micActionCard: some View {
-        VStack(spacing: 10) {
-            Text(controller.statusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
+    private var micBar: some View {
+        VStack(spacing: 8) {
             if controller.permissionDenied {
                 Button {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    Label("一键前往系统设置开启语音与麦克风权限", systemImage: "gearshape.fill")
-                        .font(.subheadline.bold())
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(Color.orange)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    Label("去设置开启麦克风和语音识别", systemImage: "gearshape.fill")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true, tint: Color(Design.Palette.warning)))
             }
 
+            Text(LXToastText.clean(controller.statusText))
+                .font(.caption)
+                .foregroundStyle(Color(Design.Palette.stone))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity)
+
             Button {
+                editorFocused = false
                 controller.toggleRecording(aiConfig: appState.aiConfig)
             } label: {
                 HStack(spacing: 10) {
                     ZStack {
-                        if controller.isRecording {
+                        if controller.isRecording && !reduceMotion {
                             Circle()
                                 .fill(Color.white.opacity(0.28))
-                                .frame(width: 30 + controller.audioLevel * 18, height: 30 + controller.audioLevel * 18)
+                                .frame(width: 28 + controller.audioLevel * 18, height: 28 + controller.audioLevel * 18)
                                 .animation(.easeOut(duration: 0.12), value: controller.audioLevel)
                         }
                         Image(systemName: controller.isRecording ? "stop.fill" : "mic.fill")
                             .font(.system(size: 18, weight: .bold))
                     }
-                    .frame(width: 44, height: 44)
+                    .frame(width: 40, height: 40)
 
-                    Text(controller.isRecording
-                         ? "停止说话（实时完成校译）"
-                         : "开始说话 · \(controller.mode.shortTitle)")
-                        .font(.headline)
+                    Text(controller.isRecording ? "说完了" : "开始说话")
+                        .font(.system(size: 17, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity, minHeight: 56)
-                .background(controller.isRecording ? Color(Design.Palette.error) : Color(Design.Palette.accent))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .foregroundStyle(Color.white)
+                .background(
+                    controller.isRecording ? Color(Design.Palette.error) : Color(Design.Palette.accent),
+                    in: RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(controller.isRecording ? "停止录音" : "开始说话，\(controller.mode.shortTitle)")
         }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, Design.Spacing.md)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background(.regularMaterial)
     }
 
-    // MARK: - 5. 本次同传历史记录
+    // MARK: - 5. 本次记录
 
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("本次同传记录（点按复制，点喇叭朗读）")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
+            Text("本次记录 · \(controller.history.count)")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Color(Design.Palette.slate))
+                .padding(.leading, 4)
 
             ForEach(controller.history) { item in
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.mode.pillTitle)
-                            .font(.caption2.bold())
-                            .foregroundStyle(Color(Design.Palette.accent))
-                        Text(item.source)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(item.target)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        copyAndNotify(item.target, label: "✓ 已复制「\(item.target.prefix(16))…」")
-                    }
+                LXCard {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 6) {
+                                LXTag(text: item.mode.pillTitle, tint: Color(Design.Palette.accent), filled: true)
+                                Text(item.createdAt.formatted(date: .omitted, time: .shortened))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(Color(Design.Palette.stone))
+                            }
+                            Text(item.source)
+                                .font(.caption)
+                                .foregroundStyle(Color(Design.Palette.stone))
+                                .lineLimit(2)
+                            Text(item.target)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            copyAndNotify(item.target, label: "已复制「\(item.target.prefix(16))」")
+                        }
 
-                    Button {
-                        controller.speakText(item.target, localeID: item.mode.outputSpeechLocaleID)
-                    } label: {
-                        Image(systemName: "speaker.wave.2.fill")
-                            .font(.caption)
-                            .foregroundStyle(Color(Design.Palette.accent))
-                            .padding(8)
-                            .background(Color(Design.Palette.accentSoft))
-                            .clipShape(Circle())
+                        VStack(spacing: 6) {
+                            iconButton("speaker.wave.2", label: "朗读") {
+                                controller.speakText(item.target, localeID: item.mode.outputSpeechLocaleID)
+                            }
+                            iconButton("doc.on.doc", label: "复制") {
+                                copyAndNotify(item.target, label: "已复制「\(item.target.prefix(16))」")
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
-                .padding(12)
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
+    }
+
+    private func iconButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 36, height: 36)
+                .background(Color(Design.Palette.accentSoft), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    // MARK: - Actions
+
+    private func pasteSource() {
+        guard let clip = ConcealedPasteboard.readNonConcealedStringForUserPaste() else {
+            toast = ConcealedPasteboard.isConcealed()
+                ? "受保护的保险箱内容不可直接粘贴翻译"
+                : "剪贴板是空的"
+            return
+        }
+        controller.transcript = clip
+        controller.translateCurrentTranscript(aiConfig: appState.aiConfig)
     }
 
     private func applyPendingExternalLaunchIfNeeded() {
@@ -724,6 +827,6 @@ struct VoiceLiveTranslatorView: View {
     private func copyAndNotify(_ text: String, label: String) {
         UIPasteboard.general.string = text
         appState.addClipboardEntry(text)
-        withAnimation { toast = "✓ \(label)" }
+        toast = label
     }
 }

@@ -85,6 +85,11 @@ enum SmartCandidateHelper {
                 appendCandidate(calcOrNum, lp: 14.0 - Double(idx) * 0.15, isExact: idx == 0, source: .smartHelper)
             }
 
+            // 支持 vdz / vkp / vmp / vcp / vshuihao 秒调个人常用速填名片夹（地址/开票/车牌单字段与整卡）
+            for (idx, cardVal) in PersonalFillCardStore.vModeCandidates(forBody: lowerBody).enumerated() {
+                appendCandidate(cardVal, lp: 14.9 - Double(idx) * 0.08, isExact: idx == 0, source: .smartHelper)
+            }
+
             // 支持 vwz / vdz / vweizhi / vdizhi 快速插入当前实时定位地址
             if settings.geoLocationBoostEnabled && ["wz", "dz", "weizhi", "dizhi", "cs", "chengshi"].contains(lowerBody) {
                 let geo = GeoLocationContext.load()
@@ -103,6 +108,11 @@ enum SmartCandidateHelper {
 
             for (idx, dtWord) in DateTimeHelper.candidates(forNormalizedPinyin: lowerBody, allowShortTriggers: true).enumerated() {
                 appendCandidate(dtWord, lp: 13.0 - Double(idx) * 0.1, isExact: idx == 0, source: .smartHelper)
+            }
+
+            // 支持相对日期(v+3d/vmingtian)、生活与工程单位换算(v180cm/v65kg/v38c/v10km/v1.5gb)、时间戳(vts)与 UUID(vuuid)
+            for (idx, toolVal) in VModeToolEngine.candidates(forBody: body).enumerated() {
+                appendCandidate(toolVal, lp: 14.3 - Double(idx) * 0.12, isExact: idx == 0, source: .smartHelper)
             }
         }
 
@@ -184,6 +194,8 @@ enum SmartCandidateHelper {
         if !DateTimeHelper.candidates(forNormalizedPinyin: lowerBody).isEmpty { return true }
         if lowerBody.hasSuffix("rmb"), Double(String(lowerBody.dropLast(3))) != nil { return true }
         if ["wz", "dz", "weizhi", "dizhi", "cs", "chengshi"].contains(lowerBody) { return true }
+        if PersonalFillCardStore.vModeTriggers.contains(lowerBody) { return true }
+        if VModeToolEngine.isRecognizedQuery(body) { return true }
         // 输入计算式中间态（如 `v1+` 或 `V12*` 或 `v10%3`）同样保持工具模式
         if body.allSatisfy({ $0.isNumber || "+-*/%^().".contains($0) }) { return true }
         return false

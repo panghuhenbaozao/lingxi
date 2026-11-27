@@ -6,6 +6,10 @@ struct LingxiApp: App {
     @StateObject private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        LingxiAppShortcuts.updateAppShortcutParameters()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -15,7 +19,15 @@ struct LingxiApp: App {
                     switch url.host {
                     case "auth-callback":
                         Task {
-                            try? await appState.completeApplePasskeySignIn(callbackURL: url)
+                            // 从浏览器回到 App 完成登录：成功或失败都要告诉用户，不能悄无声息
+                            do {
+                                try await appState.completeApplePasskeySignIn(callbackURL: url)
+                                appState.requestedTab = 0
+                                appState.globalToastMessage = "已登录云端账号"
+                            } catch {
+                                appState.requestedTab = 0
+                                appState.globalErrorMessage = "登录没有完成：\(error.localizedDescription)"
+                            }
                         }
                     case "ai-settings":
                         appState.requestedTab = 2
@@ -23,7 +35,7 @@ struct LingxiApp: App {
                         appState.showPermissionsCenter = true
                     case "voice-warmup":
                         appState.requestedTab = 0
-                        appState.voiceEngineBannerMessage = "🎙️ 正在激活键盘内实时语音引擎…"
+                        appState.voiceEngineBannerMessage = "正在准备键盘内的语音输入…"
                         Task {
                             try? await Task.sleep(nanoseconds: 150_000_000)
                             let res = await BackgroundVoiceEngine.shared.warmUp()
@@ -59,7 +71,9 @@ struct LingxiApp: App {
                             Task {
                                 if let items = try? await ClipboardRelayService.shared.pullLatest(pairCode: relayCfg.pairCode),
                                    let newest = items.first,
-                                   newest.id > relayCfg.lastPulledID {
+                                   newest.id > relayCfg.lastPulledID,
+                                   !newest.contentText.hasPrefix(ClipboardRelayCrypto.prefix),
+                                   !ClipboardClassifier.isSensitiveContent(newest.contentText) {
                                     await MainActor.run {
                                         UIPasteboard.general.string = newest.contentText
                                         appState.reloadClipboard()

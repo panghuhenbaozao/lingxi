@@ -1,16 +1,26 @@
 import Foundation
 
-/// AI 服务提供方。
+/// AI 服务提供方（原生三协议：Google Gemini / OpenAI 兼容 / Anthropic Claude 原生）。
 enum AIProvider: String, Codable, CaseIterable, Identifiable {
     case gemini
     case openAICompatible
+    case anthropic
 
     var id: String { rawValue }
+
+    var shortName: String {
+        switch self {
+        case .gemini: return "Gemini"
+        case .openAICompatible: return "OpenAI 兼容"
+        case .anthropic: return "Claude 原生"
+        }
+    }
 
     var displayName: String {
         switch self {
         case .gemini: return "Google Gemini"
         case .openAICompatible: return "OpenAI 兼容 (DeepSeek / Qwen / Ollama / 中转)"
+        case .anthropic: return "Anthropic Claude 原生 (/v1/messages)"
         }
     }
 }
@@ -137,6 +147,8 @@ struct AIProviderProfile: Codable, Identifiable, Equatable {
     var model: String
     var fastModel: String = ""
     var deepModel: String = ""
+    var visionModel: String = ""
+    var sttModel: String = ""
     var thinkingMode: AIThinkingMode = .auto
     var thinkingBudget: Int = 2048
     var fetchedModels: [AIModelInfo] = []
@@ -151,6 +163,8 @@ struct AIProviderProfile: Codable, Identifiable, Equatable {
         model: String,
         fastModel: String = "",
         deepModel: String = "",
+        visionModel: String = "",
+        sttModel: String = "",
         thinkingMode: AIThinkingMode = .auto,
         thinkingBudget: Int = 2048,
         fetchedModels: [AIModelInfo] = [],
@@ -164,6 +178,8 @@ struct AIProviderProfile: Codable, Identifiable, Equatable {
         self.model = model
         self.fastModel = fastModel
         self.deepModel = deepModel
+        self.visionModel = visionModel
+        self.sttModel = sttModel
         self.thinkingMode = thinkingMode
         self.thinkingBudget = thinkingBudget
         self.fetchedModels = fetchedModels
@@ -180,6 +196,8 @@ struct AIProviderProfile: Codable, Identifiable, Equatable {
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? "deepseek-chat"
         fastModel = try c.decodeIfPresent(String.self, forKey: .fastModel) ?? ""
         deepModel = try c.decodeIfPresent(String.self, forKey: .deepModel) ?? ""
+        visionModel = try c.decodeIfPresent(String.self, forKey: .visionModel) ?? ""
+        sttModel = try c.decodeIfPresent(String.self, forKey: .sttModel) ?? ""
         thinkingMode = try c.decodeIfPresent(AIThinkingMode.self, forKey: .thinkingMode) ?? .auto
         thinkingBudget = try c.decodeIfPresent(Int.self, forKey: .thinkingBudget) ?? 2048
         fetchedModels = try c.decodeIfPresent([AIModelInfo].self, forKey: .fetchedModels) ?? []
@@ -227,20 +245,206 @@ enum AIScenePersona: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// 个人背景知识卡片（RAG-Lite：无需每次重复介绍自己或业务背景，按需挂载）。
+/// 个人背景知识卡片（RAG-Lite：无需每次重复介绍自己或业务背景，支持全局或按沟通场景条件挂载）。
 struct PersonalContextCard: Codable, Identifiable, Equatable {
     var id: String = UUID().uuidString
     var title: String
     var content: String
     var sceneTag: String = "通用"
+    /// 绑定特定沟通场景（nil 或 .auto 表示所有场景均挂载；指定后仅在对应场景生效，节省 Token 且不串味）
+    var boundScene: AIScenePersona? = nil
     var isEnabled: Bool = true
 
-    init(id: String = UUID().uuidString, title: String, content: String, sceneTag: String = "通用", isEnabled: Bool = true) {
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        content: String,
+        sceneTag: String = "通用",
+        boundScene: AIScenePersona? = nil,
+        isEnabled: Bool = true
+    ) {
         self.id = id
         self.title = title
         self.content = content
         self.sceneTag = sceneTag
+        self.boundScene = boundScene
         self.isEnabled = isEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "知识卡"
+        content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
+        sceneTag = try c.decodeIfPresent(String.self, forKey: .sceneTag) ?? "通用"
+        boundScene = try c.decodeIfPresent(AIScenePersona.self, forKey: .boundScene)
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+    }
+
+    /// 判断本卡片在当前沟通对象下是否应当注入系统提示词
+    func matches(scene: AIScenePersona) -> Bool {
+        guard isEnabled, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard let bound = boundScene, bound != .auto else { return true }
+        return scene == .auto || scene == bound
+    }
+
+    /// 端侧 RAG-Lite 检索命中结果（纯函数，可直接用于 UI 预览与单元测试）
+    struct ScoredCard: Identifiable, Equatable {
+        let card: PersonalContextCard
+        let score: Double
+        let exactSceneMatch: Bool
+        var id: String { card.id }
+    }
+
+    /// 根据当前沟通场景 + 用户提问关键词，从知识卡库中筛选最相关的 Top-K 卡片（既准又省 Token）。
+    static func selectRelevantCards(
+        from cards: [PersonalContextCard],
+        query: String,
+        scene: AIScenePersona,
+        limit: Int = 4
+    ) -> [ScoredCard] {
+        let eligible = cards.filter { $0.matches(scene: scene) }
+        guard !eligible.isEmpty else { return [] }
+        let queryTerms = extractSearchTerms(from: query)
+
+        let scored: [ScoredCard] = eligible.map { card in
+            var score = 1.0
+            let exactScene = (scene != .auto && card.boundScene == scene)
+            if exactScene { score += 6.0 }
+            if !queryTerms.isEmpty {
+                let titleLower = card.title.lowercased()
+                let tagLower = card.sceneTag.lowercased()
+                let contentLower = card.content.lowercased()
+                var matchedTerms = 0
+                for term in queryTerms {
+                    if titleLower.contains(term) {
+                        score += 3.2
+                        matchedTerms += 1
+                    } else if tagLower.contains(term) {
+                        score += 2.5
+                        matchedTerms += 1
+                    } else if contentLower.contains(term) {
+                        score += 1.2
+                        matchedTerms += 1
+                    }
+                }
+                if matchedTerms >= 3 { score += 2.0 }
+            }
+            return ScoredCard(card: card, score: score, exactSceneMatch: exactScene)
+        }
+        return Array(scored.sorted { a, b in
+            if abs(a.score - b.score) > 0.01 { return a.score > b.score }
+            return a.exactSceneMatch && !b.exactSceneMatch
+        }.prefix(max(1, limit)))
+    }
+
+    /// 提取中英文双轨检索词（英文/数字词 + 中文二元组，零第三方分词依赖）。
+    static func extractSearchTerms(from text: String) -> [String] {
+        let lower = text.lowercased()
+        var seen = Set<String>()
+        var terms: [String] = []
+
+        // 1. 英文与数字词
+        var asciiBuf = ""
+        var hanRun: [Character] = []
+
+        func flushAscii() {
+            if asciiBuf.count >= 2 && seen.insert(asciiBuf).inserted {
+                terms.append(asciiBuf)
+            }
+            asciiBuf = ""
+        }
+
+        func flushHan() {
+            if hanRun.count >= 2 {
+                for i in 0..<(hanRun.count - 1) {
+                    let bi = String([hanRun[i], hanRun[i + 1]])
+                    if seen.insert(bi).inserted {
+                        terms.append(bi)
+                    }
+                }
+            }
+            hanRun = []
+        }
+
+        for ch in lower {
+            if ch.isASCII && (ch.isLetter || ch.isNumber) {
+                flushHan()
+                asciiBuf.append(ch)
+            } else if ch.unicodeScalars.first.map({ (0x4E00...0x9FFF).contains($0.value) }) == true {
+                flushAscii()
+                hanRun.append(ch)
+            } else {
+                flushAscii()
+                flushHan()
+            }
+        }
+        flushAscii()
+        flushHan()
+        return Array(terms.prefix(36))
+    }
+
+    /// 将导入的 Markdown / TXT 长文档智能切片为多张轻量知识卡（按 `#` 标题或自然段切分）。
+    static func chunkDocument(
+        title: String,
+        text: String,
+        sceneTag: String = "导入文档",
+        boundScene: AIScenePersona? = nil,
+        maxCharsPerCard: Int = 420
+    ) -> [PersonalContextCard] {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "知识文档" : title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        var sections: [(heading: String, body: String)] = []
+        var curHeading = cleanTitle
+        var curLines: [String] = []
+
+        func flushSection() {
+            let joined = curLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                sections.append((curHeading, joined))
+            }
+            curLines = []
+        }
+
+        for raw in lines {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("#") {
+                flushSection()
+                let heading = t.drop(while: { $0 == "#" || $0 == " " }).trimmingCharacters(in: .whitespaces)
+                curHeading = heading.isEmpty ? cleanTitle : String(heading.prefix(24))
+            } else {
+                curLines.append(raw)
+            }
+        }
+        flushSection()
+
+        let cap = max(120, maxCharsPerCard)
+        var cards: [PersonalContextCard] = []
+        for sec in sections {
+            if sec.body.count <= cap {
+                cards.append(PersonalContextCard(title: sec.heading, content: sec.body, sceneTag: sceneTag, boundScene: boundScene, isEnabled: true))
+            } else {
+                // 按段落二次切分
+                let paras = sec.body.components(separatedBy: "\n\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                var chunk = ""
+                var partIdx = 1
+                for p in paras {
+                    if !chunk.isEmpty && chunk.count + p.count + 2 > cap {
+                        cards.append(PersonalContextCard(title: "\(sec.heading) (\(partIdx))", content: chunk, sceneTag: sceneTag, boundScene: boundScene, isEnabled: true))
+                        partIdx += 1
+                        chunk = String(p.prefix(cap))
+                    } else {
+                        chunk = chunk.isEmpty ? String(p.prefix(cap)) : chunk + "\n\n" + p
+                    }
+                }
+                if !chunk.isEmpty {
+                    let finalTitle = partIdx == 1 ? sec.heading : "\(sec.heading) (\(partIdx))"
+                    cards.append(PersonalContextCard(title: finalTitle, content: String(chunk.prefix(cap)), sceneTag: sceneTag, boundScene: boundScene, isEnabled: true))
+                }
+            }
+            if cards.count >= 20 { break }
+        }
+        return cards
     }
 }
 
@@ -286,7 +490,7 @@ struct PersonalStyleDNA: Codable, Equatable {
     }
 }
 
-/// AI 单次调用消耗与延迟账本记录（纯数值元数据，不含原文）。
+/// AI 单次调用消耗与延迟账本记录（纯数值元数据，不含原文；兼容真实 Token 与字符统计）。
 struct AIUsageLedgerEntry: Codable, Identifiable, Equatable {
     var id: String = UUID().uuidString
     var timestamp: Int = Int(Date().timeIntervalSince1970)
@@ -299,6 +503,272 @@ struct AIUsageLedgerEntry: Codable, Identifiable, Equatable {
     var inputChars: Int
     var outputChars: Int
     var thoughtChars: Int
+    var promptTokens: Int? = nil
+    var completionTokens: Int? = nil
+    var reasoningTokens: Int? = nil
+
+    init(
+        id: String = UUID().uuidString,
+        timestamp: Int = Int(Date().timeIntervalSince1970),
+        provider: String,
+        model: String,
+        feature: String,
+        thinkingMode: String,
+        ttftMs: Int,
+        totalMs: Int,
+        inputChars: Int,
+        outputChars: Int,
+        thoughtChars: Int,
+        promptTokens: Int? = nil,
+        completionTokens: Int? = nil,
+        reasoningTokens: Int? = nil
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.provider = provider
+        self.model = model
+        self.feature = feature
+        self.thinkingMode = thinkingMode
+        self.ttftMs = ttftMs
+        self.totalMs = totalMs
+        self.inputChars = inputChars
+        self.outputChars = outputChars
+        self.thoughtChars = thoughtChars
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.reasoningTokens = reasoningTokens
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp) ?? Int(Date().timeIntervalSince1970)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        feature = try c.decodeIfPresent(String.self, forKey: .feature) ?? ""
+        thinkingMode = try c.decodeIfPresent(String.self, forKey: .thinkingMode) ?? "auto"
+        ttftMs = try c.decodeIfPresent(Int.self, forKey: .ttftMs) ?? 0
+        totalMs = try c.decodeIfPresent(Int.self, forKey: .totalMs) ?? 0
+        inputChars = try c.decodeIfPresent(Int.self, forKey: .inputChars) ?? 0
+        outputChars = try c.decodeIfPresent(Int.self, forKey: .outputChars) ?? 0
+        thoughtChars = try c.decodeIfPresent(Int.self, forKey: .thoughtChars) ?? 0
+        promptTokens = try c.decodeIfPresent(Int.self, forKey: .promptTokens)
+        completionTokens = try c.decodeIfPresent(Int.self, forKey: .completionTokens)
+        reasoningTokens = try c.decodeIfPresent(Int.self, forKey: .reasoningTokens)
+    }
+
+    var totalReportedTokens: Int {
+        (promptTokens ?? 0) + (completionTokens ?? 0)
+    }
+}
+
+/// App 内「AI 写作工作台」多轮对话消息条目（仅存本机，便于随时续聊）。
+struct AIChatTurn: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var role: String // "user" | "assistant"
+    var content: String
+    var thought: String = ""
+    var model: String = ""
+    var skillTitle: String = ""
+    var hasImageAttachment: Bool = false
+    var ttftMs: Int? = nil
+    var totalMs: Int? = nil
+    var createdAt: Date = Date()
+
+    init(
+        id: String = UUID().uuidString,
+        role: String,
+        content: String,
+        thought: String = "",
+        model: String = "",
+        skillTitle: String = "",
+        hasImageAttachment: Bool = false,
+        ttftMs: Int? = nil,
+        totalMs: Int? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.thought = thought
+        self.model = model
+        self.skillTitle = skillTitle
+        self.hasImageAttachment = hasImageAttachment
+        self.ttftMs = ttftMs
+        self.totalMs = totalMs
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        role = try c.decodeIfPresent(String.self, forKey: .role) ?? "user"
+        content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
+        thought = try c.decodeIfPresent(String.self, forKey: .thought) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        skillTitle = try c.decodeIfPresent(String.self, forKey: .skillTitle) ?? ""
+        hasImageAttachment = try c.decodeIfPresent(Bool.self, forKey: .hasImageAttachment) ?? false
+        ttftMs = try c.decodeIfPresent(Int.self, forKey: .ttftMs)
+        totalMs = try c.decodeIfPresent(Int.self, forKey: .totalMs)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+}
+
+/// 工作台多话题会话（支持新建、置顶、重命名、切换与导出 Markdown）
+struct AIWorkbenchThread: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String = "新对话"
+    var skillID: String = "free"
+    var isPinned: Bool = false
+    var turns: [AIChatTurn] = []
+    var updatedAt: Date = Date()
+
+    func exportMarkdown() -> String {
+        var lines: [String] = ["# \(title)", ""]
+        for t in turns {
+            let speaker = t.role == "user" ? "我" : "灵犀 AI（\(t.model.isEmpty ? "默认模型" : t.model)）"
+            lines.append("### \(speaker)")
+            if !t.thought.isEmpty {
+                lines.append("> 思考摘要：\(t.thought.replacingOccurrences(of: "\n", with: " "))")
+                lines.append("")
+            }
+            lines.append(t.content)
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+enum AIWorkbenchThreadsStore {
+    private static let fileName = "lingxi_ai_workbench_threads.json"
+
+    static func load() -> [AIWorkbenchThread] {
+        if let existing = AppGroup.readJSON([AIWorkbenchThread].self, from: fileName), !existing.isEmpty {
+            return sortThreads(existing)
+        }
+        // 兼容迁移旧版单会话记录，零丢失
+        let legacyTurns = AIWorkbenchSessionStore.load()
+        if !legacyTurns.isEmpty {
+            let firstTitle = String((legacyTurns.first(where: { $0.role == "user" })?.content ?? "历史对话").prefix(16))
+            let migrated = [AIWorkbenchThread(title: firstTitle.isEmpty ? "历史对话" : firstTitle, turns: legacyTurns)]
+            save(migrated)
+            return migrated
+        }
+        return []
+    }
+
+    static func save(_ threads: [AIWorkbenchThread]) {
+        let sorted = sortThreads(threads)
+        let capped = Array(sorted.prefix(24)).map { th -> AIWorkbenchThread in
+            var copy = th
+            if copy.turns.count > 40 { copy.turns = Array(copy.turns.suffix(40)) }
+            return copy
+        }
+        _ = AppGroup.writeJSON(capped, to: fileName, protected: true)
+    }
+
+    private static func sortThreads(_ list: [AIWorkbenchThread]) -> [AIWorkbenchThread] {
+        list.sorted { a, b in
+            if a.isPinned != b.isPinned { return a.isPinned }
+            return a.updatedAt > b.updatedAt
+        }
+    }
+}
+
+/// 多步 AI 链式流水线步骤与工作流定义（支持在 App 分步流式运行，也可一键编译为键盘技能）
+struct AIPromptPipelineStep: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var name: String
+    var instruction: String
+    var preferFast: Bool = false
+    var preferDeep: Bool = false
+}
+
+struct AIPromptPipeline: Codable, Identifiable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String
+    var icon: String = "arrow.triangle.branch"
+    var summary: String = ""
+    var steps: [AIPromptPipelineStep]
+
+    /// 将多步流水线编译为单条可直接放入键盘 AI 面板的自定义技能
+    func compiledAsCustomPrompt() -> CustomAIPromptTemplate {
+        let numbered = steps.enumerated().map { idx, st in
+            "第\(idx + 1)步【\(st.name)】：\(st.instruction)"
+        }.joined(separator: "\n")
+        let fullInstruction = "请严格按以下多步流水线依次完成处理，仅输出最终一步的成品结果：\n\(numbered)"
+        return CustomAIPromptTemplate(
+            id: "pipe_\(id)",
+            title: String(title.prefix(10)),
+            icon: icon,
+            instruction: fullInstruction,
+            category: "链式流水线",
+            isAIGenerated: false,
+            isPinned: true,
+            useDeepModel: steps.contains(where: \.preferDeep)
+        )
+    }
+
+    static let defaultPipelines: [AIPromptPipeline] = [
+        AIPromptPipeline(
+            id: "pipe_voice_to_bilingual_report",
+            title: "口述变双语汇报",
+            icon: "briefcase.fill",
+            summary: "去口水词 → 结论先行职场汇报 → 附地道英文同步",
+            steps: [
+                AIPromptPipelineStep(name: "整理口水稿", instruction: "去除口语重复词与语气词，理顺逻辑并补齐标点。", preferFast: true),
+                AIPromptPipelineStep(name: "提炼领导汇报", instruction: "改写为结论先行、条理清晰的 3 条简洁中文汇报要点。", preferDeep: false),
+                AIPromptPipelineStep(name: "生成双语对照", instruction: "保留中文汇报要点，并在下方附上自然地道的英文职场同步版本。", preferDeep: true),
+            ]
+        ),
+        AIPromptPipeline(
+            id: "pipe_tactful_counter",
+            title: "棘手消息拆解回复",
+            icon: "shield.lefthalf.filled",
+            summary: "拆解对方真实意图 → 生成温和但有底线的得体回复",
+            steps: [
+                AIPromptPipelineStep(name: "洞察潜台词", instruction: "冷静分析对方消息背后的真实诉求、压力点和隐含前提，用 2 句话总结。", preferDeep: true),
+                AIPromptPipelineStep(name: "拟定高情商回复", instruction: "基于上一步的洞察，写一段可直接发出的高情商回复：先共情缓冲、再亮明底线、最后给出建设性替代方案。", preferDeep: true),
+            ]
+        ),
+        AIPromptPipeline(
+            id: "pipe_article_to_social",
+            title: "长文转高级朋友圈",
+            icon: "camera.filters",
+            summary: "提炼核心金句 → 改写为松弛克制的朋友圈分享文案",
+            steps: [
+                AIPromptPipelineStep(name: "抽取金句观点", instruction: "从长文中提炼出最有洞察力的 1 个核心观点和 2 个细节亮点。", preferFast: true),
+                AIPromptPipelineStep(name: "润色社交分享", instruction: "改写为 2~3 句松弛自然、有画面感、绝不鸡汤的朋友圈分享文案。", preferFast: false),
+            ]
+        ),
+        AIPromptPipeline(
+            id: "pipe_idea_to_action",
+            title: "想法变可执行清单",
+            icon: "checklist",
+            summary: "结构化拆解目标 → 排优先级与首日落地动作",
+            steps: [
+                AIPromptPipelineStep(name: "拆解核心模块", instruction: "把零散想法拆解为目标、关键环节与主要风险。", preferDeep: true),
+                AIPromptPipelineStep(name: "输出行动清单", instruction: "转化为按优先级排序的 5 条可执行待办（含预计耗时与今天就能做的第 1 步）。", preferFast: false),
+            ]
+        ),
+    ]
+}
+
+enum AIWorkbenchSessionStore {
+    private static let fileName = "lingxi_ai_workbench_turns.json"
+
+    static func load() -> [AIChatTurn] {
+        AppGroup.readJSON([AIChatTurn].self, from: fileName) ?? []
+    }
+
+    static func save(_ turns: [AIChatTurn]) {
+        let trimmed = Array(turns.suffix(40))
+        _ = AppGroup.writeJSON(trimmed, to: fileName, protected: true)
+    }
+
+    static func clear() {
+        _ = AppGroup.writeJSON([AIChatTurn](), to: fileName, protected: true)
+    }
 }
 
 enum AIUsageLedgerStore {
@@ -619,32 +1089,110 @@ enum AIPromptMarketplaceCatalog {
     }
 }
 
-/// 仅含提示词、人设与知识卡的无密钥同步载荷（绝不把明文 API Key 放入云端同步快照）。
+/// 仅含提示词、人设、知识卡与流水线的无密钥同步载荷（绝不把明文 API Key 放入云端同步快照）。
 struct AIPromptsSyncPayload: Codable, Equatable {
     var customPersonaPrompt: String = ""
     var customPrompts: [CustomAIPromptTemplate] = []
     var contextCards: [PersonalContextCard] = []
+    var aiPipelines: [AIPromptPipeline] = []
+    var privacyCustomTerms: [String] = []
+    var aiTriggerPrefix: String = "@ai"
+    var aiContextCharLimit: Int = 240
     var temperature: Double = 0.7
     var thinkingMode: AIThinkingMode = .auto
     var smartContextRecommendEnabled: Bool = true
+    var enabledBuiltinActions: [String] = []
+    var keyboardShowAllCustomPrompts: Bool = true
     var updatedAt: Int = Int(Date().timeIntervalSince1970)
+
+    init(
+        customPersonaPrompt: String = "",
+        customPrompts: [CustomAIPromptTemplate] = [],
+        contextCards: [PersonalContextCard] = [],
+        aiPipelines: [AIPromptPipeline] = [],
+        privacyCustomTerms: [String] = [],
+        aiTriggerPrefix: String = "@ai",
+        aiContextCharLimit: Int = 240,
+        temperature: Double = 0.7,
+        thinkingMode: AIThinkingMode = .auto,
+        smartContextRecommendEnabled: Bool = true,
+        enabledBuiltinActions: [String] = [],
+        keyboardShowAllCustomPrompts: Bool = true,
+        updatedAt: Int = Int(Date().timeIntervalSince1970)
+    ) {
+        self.customPersonaPrompt = customPersonaPrompt
+        self.customPrompts = customPrompts
+        self.contextCards = contextCards
+        self.aiPipelines = aiPipelines
+        self.privacyCustomTerms = privacyCustomTerms
+        self.aiTriggerPrefix = aiTriggerPrefix
+        self.aiContextCharLimit = aiContextCharLimit
+        self.temperature = temperature
+        self.thinkingMode = thinkingMode
+        self.smartContextRecommendEnabled = smartContextRecommendEnabled
+        self.enabledBuiltinActions = enabledBuiltinActions
+        self.keyboardShowAllCustomPrompts = keyboardShowAllCustomPrompts
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        customPersonaPrompt = try c.decodeIfPresent(String.self, forKey: .customPersonaPrompt) ?? ""
+        customPrompts = try c.decodeIfPresent([CustomAIPromptTemplate].self, forKey: .customPrompts) ?? []
+        contextCards = try c.decodeIfPresent([PersonalContextCard].self, forKey: .contextCards) ?? []
+        aiPipelines = try c.decodeIfPresent([AIPromptPipeline].self, forKey: .aiPipelines) ?? []
+        privacyCustomTerms = try c.decodeIfPresent([String].self, forKey: .privacyCustomTerms) ?? []
+        let rawPrefix = (try c.decodeIfPresent(String.self, forKey: .aiTriggerPrefix) ?? "@ai").trimmingCharacters(in: .whitespacesAndNewlines)
+        aiTriggerPrefix = rawPrefix.isEmpty ? "@ai" : rawPrefix
+        aiContextCharLimit = max(60, min(800, try c.decodeIfPresent(Int.self, forKey: .aiContextCharLimit) ?? 240))
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.7
+        thinkingMode = try c.decodeIfPresent(AIThinkingMode.self, forKey: .thinkingMode) ?? .auto
+        smartContextRecommendEnabled = try c.decodeIfPresent(Bool.self, forKey: .smartContextRecommendEnabled) ?? true
+        enabledBuiltinActions = try c.decodeIfPresent([String].self, forKey: .enabledBuiltinActions) ?? []
+        keyboardShowAllCustomPrompts = try c.decodeIfPresent(Bool.self, forKey: .keyboardShowAllCustomPrompts) ?? true
+        updatedAt = try c.decodeIfPresent(Int.self, forKey: .updatedAt) ?? Int(Date().timeIntervalSince1970)
+    }
 }
 
-/// AI 配置与密钥持久化（存于 App Group 受保护文件中，支持多服务商、拉取模型、思考模式与文风 DNA）。
+/// 全套无密钥「灵犀 AI 智脑配置包」（用于个人备份、跨设备迁移或分享给朋友，绝对不含任何 API Key）
+struct AIBrainExportBundle: Codable, Equatable {
+    var format: String = "LINGXI-AI-BRAIN-BUNDLE-V1"
+    var exportedAt: Int = Int(Date().timeIntervalSince1970)
+    var customPersonaPrompt: String = ""
+    var styleDNA: PersonalStyleDNA = PersonalStyleDNA()
+    var customPrompts: [CustomAIPromptTemplate] = []
+    var contextCards: [PersonalContextCard] = []
+    var aiPipelines: [AIPromptPipeline] = []
+    var privacyCustomTerms: [String] = []
+    var enabledBuiltinActions: [String] = []
+}
+
+/// AI 配置与密钥持久化（存于 App Group 受保护文件中，支持三协议、拉取模型、自动容灾、思考模式与文风 DNA）。
 struct AIConfig: Codable, Equatable {
     static let defaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
+    static let defaultAnthropicBaseURL = "https://api.anthropic.com"
+    static let defaultAnthropicModel = "claude-sonnet-4-20250514"
+    static let defaultKeyboardBuiltinActions: [AIPresetAction] = [
+        .polish, .eqReply, .smartContinue, .strategist, .translateEn, .translateZh, .proofread, .summarize
+    ]
 
     var provider: AIProvider = .gemini
     var geminiAPIKey: String = ""
     var geminiBaseURL: String = AIConfig.defaultGeminiBaseURL
-    var geminiModel: String = GeminiModelOption.flash38.rawValue
+    var geminiModel: String = GeminiModelOption.flash25.rawValue
     var openAIBaseURL: String = "https://api.deepseek.com/v1"
     var openAIAPIKey: String = ""
     var openAIModel: String = "deepseek-chat"
+    var anthropicBaseURL: String = AIConfig.defaultAnthropicBaseURL
+    var anthropicAPIKey: String = ""
+    var anthropicModel: String = AIConfig.defaultAnthropicModel
 
-    // 双模型路由与动态拉取的模型列表
+    // 多场景路由模型、自动容灾备份渠道与动态拉取的模型列表
     var fastModel: String = ""
     var deepModel: String = ""
+    var visionModel: String = ""
+    var sttModel: String = ""
+    var failoverProfileID: String? = nil
     var fetchedModels: [AIModelInfo] = []
     var fetchedModelsSourceKey: String = ""
     var customHeaders: [String: String] = [:]
@@ -661,7 +1209,7 @@ struct AIConfig: Codable, Equatable {
     var profiles: [AIProviderProfile] = []
     var activeProfileID: String? = nil
 
-    // 个人人设、场景、提示词库、文风 DNA 与背景知识卡
+    // 个人人设、场景、提示词库、文风 DNA、背景知识卡与键盘 AI 栏排布
     var customPersonaPrompt: String = ""
     var activeScenePersona: AIScenePersona = .auto
     var customPrompts: [CustomAIPromptTemplate] = CustomAIPromptTemplate.defaultTemplates
@@ -669,6 +1217,18 @@ struct AIConfig: Codable, Equatable {
     var contextCards: [PersonalContextCard] = []
     var autoAnalyzeOnConnect: Bool = true
     var smartContextRecommendEnabled: Bool = true
+    var enabledBuiltinActions: [String] = []
+    var keyboardShowAllCustomPrompts: Bool = true
+    var autoDiffLearnEnabled: Bool = true
+    // 端侧 AI 隐私脱敏护盾 + 多步流水线 + 键盘 @ai 交互偏好
+    var privacyShieldEnabled: Bool = false
+    var privacyAutoRestore: Bool = true
+    var privacyCustomTerms: [String] = []
+    var aiPipelines: [AIPromptPipeline] = AIPromptPipeline.defaultPipelines
+    var aiTriggerPrefix: String = "@ai"
+    var aiContextCharLimit: Int = 240
+    /// 可选月度费用预算提醒阈值（人民币，0 表示不限）
+    var monthlyBudgetCNY: Double = 0
 
     private static let fileName = "lingxi_ai_config.json"
     static let promptsSyncFileName = "lingxi_ai_prompts_sync.json"
@@ -681,12 +1241,20 @@ struct AIConfig: Codable, Equatable {
         geminiAPIKey = try c.decodeIfPresent(String.self, forKey: .geminiAPIKey) ?? ""
         let rawGeminiURL = try c.decodeIfPresent(String.self, forKey: .geminiBaseURL) ?? Self.defaultGeminiBaseURL
         geminiBaseURL = rawGeminiURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultGeminiBaseURL : rawGeminiURL
-        geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? GeminiModelOption.flash38.rawValue
+        geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? GeminiModelOption.flash25.rawValue
         openAIBaseURL = try c.decodeIfPresent(String.self, forKey: .openAIBaseURL) ?? "https://api.deepseek.com/v1"
         openAIAPIKey = try c.decodeIfPresent(String.self, forKey: .openAIAPIKey) ?? ""
         openAIModel = try c.decodeIfPresent(String.self, forKey: .openAIModel) ?? "deepseek-chat"
+        let rawAnthropicURL = try c.decodeIfPresent(String.self, forKey: .anthropicBaseURL) ?? Self.defaultAnthropicBaseURL
+        anthropicBaseURL = rawAnthropicURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultAnthropicBaseURL : rawAnthropicURL
+        anthropicAPIKey = try c.decodeIfPresent(String.self, forKey: .anthropicAPIKey) ?? ""
+        let rawAnthropicModel = try c.decodeIfPresent(String.self, forKey: .anthropicModel) ?? Self.defaultAnthropicModel
+        anthropicModel = rawAnthropicModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultAnthropicModel : rawAnthropicModel
         fastModel = try c.decodeIfPresent(String.self, forKey: .fastModel) ?? ""
         deepModel = try c.decodeIfPresent(String.self, forKey: .deepModel) ?? ""
+        visionModel = try c.decodeIfPresent(String.self, forKey: .visionModel) ?? ""
+        sttModel = try c.decodeIfPresent(String.self, forKey: .sttModel) ?? ""
+        failoverProfileID = try c.decodeIfPresent(String.self, forKey: .failoverProfileID)
         fetchedModels = try c.decodeIfPresent([AIModelInfo].self, forKey: .fetchedModels) ?? []
         fetchedModelsSourceKey = try c.decodeIfPresent(String.self, forKey: .fetchedModelsSourceKey) ?? ""
         customHeaders = try c.decodeIfPresent([String: String].self, forKey: .customHeaders) ?? [:]
@@ -705,11 +1273,22 @@ struct AIConfig: Codable, Equatable {
         contextCards = try c.decodeIfPresent([PersonalContextCard].self, forKey: .contextCards) ?? []
         autoAnalyzeOnConnect = try c.decodeIfPresent(Bool.self, forKey: .autoAnalyzeOnConnect) ?? true
         smartContextRecommendEnabled = try c.decodeIfPresent(Bool.self, forKey: .smartContextRecommendEnabled) ?? true
+        enabledBuiltinActions = try c.decodeIfPresent([String].self, forKey: .enabledBuiltinActions) ?? []
+        keyboardShowAllCustomPrompts = try c.decodeIfPresent(Bool.self, forKey: .keyboardShowAllCustomPrompts) ?? true
+        autoDiffLearnEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoDiffLearnEnabled) ?? true
+        privacyShieldEnabled = try c.decodeIfPresent(Bool.self, forKey: .privacyShieldEnabled) ?? false
+        privacyAutoRestore = try c.decodeIfPresent(Bool.self, forKey: .privacyAutoRestore) ?? true
+        privacyCustomTerms = try c.decodeIfPresent([String].self, forKey: .privacyCustomTerms) ?? []
+        aiPipelines = try c.decodeIfPresent([AIPromptPipeline].self, forKey: .aiPipelines) ?? AIPromptPipeline.defaultPipelines
+        let rawPrefix = (try c.decodeIfPresent(String.self, forKey: .aiTriggerPrefix) ?? "@ai").trimmingCharacters(in: .whitespacesAndNewlines)
+        aiTriggerPrefix = rawPrefix.isEmpty ? "@ai" : rawPrefix
+        aiContextCharLimit = max(60, min(800, try c.decodeIfPresent(Int.self, forKey: .aiContextCharLimit) ?? 240))
+        monthlyBudgetCNY = max(0, min(10_000, try c.decodeIfPresent(Double.self, forKey: .monthlyBudgetCNY) ?? 0))
     }
 
     static func load() -> AIConfig {
         var cfg = AppGroup.readJSON(AIConfig.self, from: fileName) ?? AIConfig()
-        // 云端 E2EE 拉取的无密钥提示词快照自动增量并集合入，绝不覆盖本地新增条目
+        // 云端 E2EE 拉取的无密钥智脑快照自动增量并集合入，绝不覆盖本地新增条目或 API Key
         if let synced = AppGroup.readJSON(AIPromptsSyncPayload.self, from: promptsSyncFileName) {
             if !synced.customPrompts.isEmpty {
                 var existingIDs = Set(cfg.customPrompts.map(\.id))
@@ -723,8 +1302,26 @@ struct AIConfig: Codable, Equatable {
             if cfg.customPersonaPrompt.isEmpty && !synced.customPersonaPrompt.isEmpty {
                 cfg.customPersonaPrompt = synced.customPersonaPrompt
             }
-            if cfg.contextCards.isEmpty && !synced.contextCards.isEmpty {
-                cfg.contextCards = synced.contextCards
+            if !synced.contextCards.isEmpty {
+                var existingCardIDs = Set(cfg.contextCards.map(\.id))
+                var existingCardTitles = Set(cfg.contextCards.map(\.title))
+                for card in synced.contextCards where !existingCardIDs.contains(card.id) && !existingCardTitles.contains(card.title) {
+                    cfg.contextCards.append(card)
+                    existingCardIDs.insert(card.id)
+                    existingCardTitles.insert(card.title)
+                }
+            }
+            if !synced.aiPipelines.isEmpty {
+                var existingPipeIDs = Set(cfg.aiPipelines.map(\.id))
+                var existingPipeTitles = Set(cfg.aiPipelines.map(\.title))
+                for pipe in synced.aiPipelines where !existingPipeIDs.contains(pipe.id) && !existingPipeTitles.contains(pipe.title) {
+                    cfg.aiPipelines.append(pipe)
+                    existingPipeIDs.insert(pipe.id)
+                    existingPipeTitles.insert(pipe.title)
+                }
+            }
+            for term in synced.privacyCustomTerms where !cfg.privacyCustomTerms.contains(term) {
+                cfg.privacyCustomTerms.append(term)
             }
         }
         if let syncedDNA = AppGroup.readJSON(PersonalStyleDNA.self, from: PersonalStyleDNA.fileName),
@@ -740,9 +1337,15 @@ struct AIConfig: Codable, Equatable {
             customPersonaPrompt: customPersonaPrompt,
             customPrompts: customPrompts,
             contextCards: contextCards,
+            aiPipelines: aiPipelines,
+            privacyCustomTerms: privacyCustomTerms,
+            aiTriggerPrefix: aiTriggerPrefix,
+            aiContextCharLimit: aiContextCharLimit,
             temperature: temperature,
             thinkingMode: thinkingMode,
-            smartContextRecommendEnabled: smartContextRecommendEnabled
+            smartContextRecommendEnabled: smartContextRecommendEnabled,
+            enabledBuiltinActions: enabledBuiltinActions,
+            keyboardShowAllCustomPrompts: keyboardShowAllCustomPrompts
         )
         _ = AppGroup.writeJSON(syncPayload, to: Self.promptsSyncFileName, protected: true)
         _ = AppGroup.writeJSON(styleDNA, to: PersonalStyleDNA.fileName, protected: true)
@@ -760,6 +1363,9 @@ struct AIConfig: Codable, Equatable {
             return u.isEmpty ? Self.defaultGeminiBaseURL : u
         case .openAICompatible:
             return openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .anthropic:
+            let u = anthropicBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            return u.isEmpty ? Self.defaultAnthropicBaseURL : u
         }
     }
 
@@ -772,6 +1378,7 @@ struct AIConfig: Codable, Equatable {
         switch provider {
         case .gemini: return geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         case .openAICompatible: return openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .anthropic: return anthropicAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -779,11 +1386,95 @@ struct AIConfig: Codable, Equatable {
         switch provider {
         case .gemini:
             let m = geminiModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            return m.isEmpty ? GeminiModelOption.flash38.rawValue : m
+            return m.isEmpty ? GeminiModelOption.flash25.rawValue : m
         case .openAICompatible:
             let m = openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
             return m.isEmpty ? "deepseek-chat" : m
+        case .anthropic:
+            let m = anthropicModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            return m.isEmpty ? Self.defaultAnthropicModel : m
         }
+    }
+
+    mutating func setActiveModel(_ modelID: String) {
+        switch provider {
+        case .gemini: geminiModel = modelID
+        case .openAICompatible: openAIModel = modelID
+        case .anthropic: anthropicModel = modelID
+        }
+    }
+
+    /// 解析当前已配置的容灾自动兜底渠道（排除与当前渠道完全相同或无 Key 的无效档案）
+    func resolvedFailoverConfig() -> (profileName: String, config: AIConfig)? {
+        guard let fid = failoverProfileID, !fid.isEmpty, fid != activeProfileID,
+              let prof = profiles.first(where: { $0.id == fid }) else {
+            return nil
+        }
+        let backup = applying(profile: prof)
+        guard backup.isConfigured else { return nil }
+        return (prof.name, backup)
+    }
+
+    /// 导出无密钥全量 AI 智脑配置包 JSON（绝不导出任何 API Key）
+    func exportBrainBundleJSON() -> Data? {
+        let bundle = AIBrainExportBundle(
+            customPersonaPrompt: customPersonaPrompt,
+            styleDNA: styleDNA,
+            customPrompts: customPrompts,
+            contextCards: contextCards,
+            aiPipelines: aiPipelines,
+            privacyCustomTerms: privacyCustomTerms,
+            enabledBuiltinActions: enabledBuiltinActions
+        )
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? enc.encode(bundle)
+    }
+
+    /// 安全合入外部无密钥 AI 智脑配置包（返回新增条数统计，绝不覆盖本地 API Key）
+    @discardableResult
+    mutating func importBrainBundleJSON(_ data: Data) -> (prompts: Int, cards: Int, pipelines: Int)? {
+        guard let bundle = try? JSONDecoder().decode(AIBrainExportBundle.self, from: data),
+              bundle.format.hasPrefix("LINGXI-AI-BRAIN-BUNDLE") else {
+            return nil
+        }
+        if customPersonaPrompt.isEmpty && !bundle.customPersonaPrompt.isEmpty {
+            customPersonaPrompt = bundle.customPersonaPrompt
+        }
+        if styleDNA.clonedStyleSummary.isEmpty && !bundle.styleDNA.clonedStyleSummary.isEmpty {
+            styleDNA.clonedStyleSummary = bundle.styleDNA.clonedStyleSummary
+        }
+        for w in bundle.styleDNA.personalCatchphrases where !styleDNA.personalCatchphrases.contains(w) {
+            styleDNA.personalCatchphrases.append(w)
+        }
+        for w in bundle.styleDNA.bannedAICliches where !styleDNA.bannedAICliches.contains(w) {
+            styleDNA.bannedAICliches.append(w)
+        }
+        for term in bundle.privacyCustomTerms where !privacyCustomTerms.contains(term) {
+            privacyCustomTerms.append(term)
+        }
+        if enabledBuiltinActions.isEmpty && !bundle.enabledBuiltinActions.isEmpty {
+            enabledBuiltinActions = bundle.enabledBuiltinActions
+        }
+        var addedP = 0
+        var existingPTitles = Set(customPrompts.map(\.title))
+        for p in bundle.customPrompts where existingPTitles.insert(p.title).inserted {
+            customPrompts.insert(p, at: 0)
+            addedP += 1
+        }
+        var addedC = 0
+        var existingCTitles = Set(contextCards.map(\.title))
+        for c in bundle.contextCards where existingCTitles.insert(c.title).inserted {
+            contextCards.insert(c, at: 0)
+            addedC += 1
+        }
+        var addedPipe = 0
+        var existingPipeTitles = Set(aiPipelines.map(\.title))
+        for pipe in bundle.aiPipelines where existingPipeTitles.insert(pipe.title).inserted {
+            aiPipelines.insert(pipe, at: 0)
+            addedPipe += 1
+        }
+        return (addedP, addedC, addedPipe)
     }
 
     func resolvedModel(preferFast: Bool = false, preferDeep: Bool = false) -> String {
@@ -798,6 +1489,53 @@ struct AIConfig: Codable, Equatable {
         return activeModelName
     }
 
+    func resolvedVisionModel() -> String {
+        let vm = visionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return vm.isEmpty ? activeModelName : vm
+    }
+
+    func resolvedSTTModel(baseURL: String) -> String {
+        let sm = sttModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !sm.isEmpty { return sm }
+        let lower = baseURL.lowercased()
+        if lower.contains("siliconflow") { return "FunAudioLLM/SenseVoiceSmall" }
+        if lower.contains("groq.com") { return "whisper-large-v3-turbo" }
+        return "whisper-1"
+    }
+
+    /// 键盘 AI 面板实际展示的内置技能（按用户勾选顺序；未配置时使用推荐 8 项核心技能）
+    var resolvedKeyboardBuiltinActions: [AIPresetAction] {
+        let parsed = enabledBuiltinActions.compactMap { AIPresetAction(rawValue: $0) }
+        return parsed.isEmpty ? Self.defaultKeyboardBuiltinActions : parsed
+    }
+
+    /// 键盘 AI 面板实际展示的自定义技能（置顶优先；开启「显示全部」后市场装入的技能立即可见）
+    var resolvedKeyboardCustomPrompts: [CustomAIPromptTemplate] {
+        let pinned = customPrompts.filter(\.isPinned)
+        if !keyboardShowAllCustomPrompts {
+            return pinned
+        }
+        let others = customPrompts.filter { !$0.isPinned }
+        return pinned + others
+    }
+
+    /// 导出自定义技能为格式化 JSON 字节（便于文件分享与备份）
+    func exportCustomPromptsJSON() -> Data? {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? enc.encode(customPrompts)
+    }
+
+    static func decodeCustomPromptsJSON(_ data: Data) -> [CustomAIPromptTemplate]? {
+        if let arr = try? JSONDecoder().decode([CustomAIPromptTemplate].self, from: data) {
+            return arr
+        }
+        if let single = try? JSONDecoder().decode(CustomAIPromptTemplate.self, from: data) {
+            return [single]
+        }
+        return nil
+    }
+
     /// 兼容本地 Ollama 等无需 API Key 的局域网模型端点
     var isLocalNoKeyEndpoint: Bool {
         guard provider == .openAICompatible else { return false }
@@ -809,12 +1547,12 @@ struct AIConfig: Codable, Equatable {
         !activeAPIKey.isEmpty || isLocalNoKeyEndpoint
     }
 
-    /// 将当前活跃配置保存/更新为一个命名渠道档案
-    mutating func saveCurrentAsProfile(name: String) {
+    /// 将当前活跃配置保存/更新为一个命名渠道档案（createNew == true 时强制新建，绝不覆写旧档案）
+    mutating func saveCurrentAsProfile(name: String, createNew: Bool = false) {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = cleanName.isEmpty ? activeModelName : cleanName
-        let currentURL = provider == .gemini ? geminiBaseURL : openAIBaseURL
-        if let aid = activeProfileID, let idx = profiles.firstIndex(where: { $0.id == aid }) {
+        let currentURL = activeBaseURL
+        if !createNew, let aid = activeProfileID, let idx = profiles.firstIndex(where: { $0.id == aid }) {
             profiles[idx].name = label
             profiles[idx].provider = provider
             profiles[idx].baseURL = currentURL
@@ -822,9 +1560,12 @@ struct AIConfig: Codable, Equatable {
             profiles[idx].model = activeModelName
             profiles[idx].fastModel = fastModel
             profiles[idx].deepModel = deepModel
+            profiles[idx].visionModel = visionModel
+            profiles[idx].sttModel = sttModel
             profiles[idx].thinkingMode = thinkingMode
             profiles[idx].thinkingBudget = thinkingBudget
             profiles[idx].fetchedModels = fetchedModels
+            profiles[idx].customHeaders = customHeaders
         } else {
             let profile = AIProviderProfile(
                 name: label,
@@ -834,30 +1575,47 @@ struct AIConfig: Codable, Equatable {
                 model: activeModelName,
                 fastModel: fastModel,
                 deepModel: deepModel,
+                visionModel: visionModel,
+                sttModel: sttModel,
                 thinkingMode: thinkingMode,
                 thinkingBudget: thinkingBudget,
-                fetchedModels: fetchedModels
+                fetchedModels: fetchedModels,
+                customHeaders: customHeaders
             )
             profiles.insert(profile, at: 0)
             activeProfileID = profile.id
         }
     }
 
+    /// 依据某个渠道档案构造独立 AIConfig 快照（供跨渠道双模型 PK 并排对比使用）
+    func applying(profile: AIProviderProfile) -> AIConfig {
+        var copy = self
+        copy.activateProfile(profile)
+        return copy
+    }
+
     /// 一键切换到已保存的某个服务商档案
     mutating func activateProfile(_ profile: AIProviderProfile) {
         activeProfileID = profile.id
         provider = profile.provider
-        if profile.provider == .gemini {
+        switch profile.provider {
+        case .gemini:
             geminiBaseURL = profile.baseURL.isEmpty ? Self.defaultGeminiBaseURL : profile.baseURL
             geminiAPIKey = profile.apiKey
             geminiModel = profile.model
-        } else {
+        case .openAICompatible:
             openAIBaseURL = profile.baseURL
             openAIAPIKey = profile.apiKey
             openAIModel = profile.model
+        case .anthropic:
+            anthropicBaseURL = profile.baseURL.isEmpty ? Self.defaultAnthropicBaseURL : profile.baseURL
+            anthropicAPIKey = profile.apiKey
+            anthropicModel = profile.model
         }
         fastModel = profile.fastModel
         deepModel = profile.deepModel
+        visionModel = profile.visionModel
+        sttModel = profile.sttModel
         thinkingMode = profile.thinkingMode
         thinkingBudget = profile.thinkingBudget
         fetchedModels = profile.fetchedModels

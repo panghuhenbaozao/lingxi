@@ -21,10 +21,6 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     var onOpenScreenshotWorkbench: ((String?) -> Void)?
     var onClose: (() -> Void)?
 
-    private static let coreActions: [AIPresetAction] = [
-        .polish, .eqReply, .translateEn, .translateZh, .proofread, .summarize
-    ]
-
     private let client = AIClient()
     private var streamTask: Task<Void, Never>?
 
@@ -37,11 +33,19 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     private var lastAction: AIPresetAction? = nil
     private var lastCustomTemplateID: String?
     private var lastRunPair: (prompt: String, sys: String, title: String, preferFast: Bool, preferDeep: Bool)?
-    private var pinnedCustomPrompts: [CustomAIPromptTemplate] = []
+    private var visibleBuiltinActions: [AIPresetAction] = AIConfig.defaultKeyboardBuiltinActions
+    private var visibleCustomPrompts: [CustomAIPromptTemplate] = []
+    private var activeScenePersona: AIScenePersona = .auto
+    private var smartContextRecommendation: SmartContextRecommendation? = nil
     private var generatedText = ""
     private var thinkingText = ""
     private var isThinkingExpanded = false
     private var showingHistory = false
+    /// 非破坏性多版本草稿栈（重试不覆盖旧版 + 「✨ 三版」与「博弈军师」支持左右切换对比并直接插入当前选中版）
+    private var sessionDrafts: [(label: String, text: String)] = []
+    private var currentDraftIndex: Int = 0
+    /// 键盘内多轮追问锚点：用户点「💬 追问」后，下一次发送会携带当前生成稿作为上下文迭代改写
+    private var followUpAnchorText: String? = nil
     private var pendingDeleteScreenshotAssetID: String?
     private var screenshotStatusNotice: String?
     private(set) var isExpandedReadingHeight = false
@@ -64,8 +68,18 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     private let thoughtToggleButton = ActionClosureButton(type: .system)
     private let thoughtTextView = UITextView()
 
+    // 非破坏性多版本草稿切换条（出现 2 个及以上版本时自动显现）
+    private let draftBar = UIStackView()
+    private let prevDraftButton = ActionClosureButton(type: .system)
+    private let draftIndicatorLabel = UILabel()
+    private let nextDraftButton = ActionClosureButton(type: .system)
+
     // 流式正文输出区（支持自由长按选中复制 + 上下滑动翻看自动拉高键盘）
     private let outputTextView = UITextView()
+
+    // 一键精调追问条（AI 完稿后自动显现：更短 / 更礼貌 / 更口语 / 更犀利 / 扩写 / 译英 / 💬 追问）
+    private let refineScroll = LingxiScrollView()
+    private let refineStack = UIStackView()
 
     // 内置 AI 历史记录抽屉列表
     private let historyScroll = LingxiScrollView()
@@ -161,6 +175,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         historyToggleButton.setTitle("历史", for: .normal)
         let histImg = UIImage(systemName: "clock.arrow.circlepath", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         historyToggleButton.setImage(histImg, for: .normal)
+        historyToggleButton.accessibilityLabel = "历史记录"
         historyToggleButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
         historyToggleButton.layer.cornerRadius = 14
         historyToggleButton.layer.cornerCurve = .continuous
@@ -203,6 +218,39 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         thoughtTextView.isHidden = true
         addSubview(thoughtTextView)
 
+        // 3.5 非破坏性多版本草稿切换条
+        draftBar.axis = .horizontal
+        draftBar.spacing = 6
+        draftBar.alignment = .center
+        draftBar.isHidden = true
+        addSubview(draftBar)
+
+        prevDraftButton.setTitle("‹ 上一版", for: .normal)
+        prevDraftButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        prevDraftButton.layer.cornerRadius = 7
+        prevDraftButton.layer.cornerCurve = .continuous
+        prevDraftButton.contentEdgeInsets = UIEdgeInsets(top: 2, left: 8, bottom: 2, right: 8)
+        prevDraftButton.setContentHuggingPriority(.required, for: .horizontal)
+        prevDraftButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        prevDraftButton.actionHandler = { [weak self] in self?.stepDraft(by: -1) }
+        draftBar.addArrangedSubview(prevDraftButton)
+
+        draftIndicatorLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        draftIndicatorLabel.textAlignment = .center
+        draftIndicatorLabel.lineBreakMode = .byTruncatingTail
+        draftIndicatorLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        draftBar.addArrangedSubview(draftIndicatorLabel)
+
+        nextDraftButton.setTitle("下一版 ›", for: .normal)
+        nextDraftButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        nextDraftButton.layer.cornerRadius = 7
+        nextDraftButton.layer.cornerCurve = .continuous
+        nextDraftButton.contentEdgeInsets = UIEdgeInsets(top: 2, left: 8, bottom: 2, right: 8)
+        nextDraftButton.setContentHuggingPriority(.required, for: .horizontal)
+        nextDraftButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        nextDraftButton.actionHandler = { [weak self] in self?.stepDraft(by: 1) }
+        draftBar.addArrangedSubview(nextDraftButton)
+
         // 4. 正文输出区（显式开启自由选中复制 + 翻看滑动自动拉高键盘）
         outputTextView.isEditable = false
         outputTextView.isSelectable = true
@@ -212,6 +260,15 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         outputTextView.layer.cornerCurve = .continuous
         outputTextView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         addSubview(outputTextView)
+
+        // 4.5 生成后一键精调与多轮追问条
+        refineScroll.showsHorizontalScrollIndicator = false
+        refineScroll.isHidden = true
+        addSubview(refineScroll)
+        refineStack.axis = .horizontal
+        refineStack.spacing = 5
+        refineStack.alignment = .center
+        refineScroll.addSubview(refineStack)
 
         // 5. 历史记录抽屉
         historyScroll.showsVerticalScrollIndicator = true
@@ -355,6 +412,15 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             contentBottom = permissionBar.frame.minY
         }
 
+        if !showingHistory && !refineScroll.isHidden {
+            let refH: CGFloat = 26
+            refineScroll.frame = CGRect(x: 0, y: contentBottom - refH - 5, width: bounds.width, height: refH)
+            let refNatW = ceil(refineStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width)
+            refineStack.frame = CGRect(x: pad, y: 0, width: refNatW, height: refH)
+            refineScroll.contentSize = CGSize(width: max(bounds.width, refNatW + pad * 2), height: refH)
+            contentBottom = refineScroll.frame.minY
+        }
+
         var contentY = actionsScroll.frame.maxY + 6
         if !showingHistory && !thoughtToggleButton.isHidden {
             thoughtToggleButton.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: 22)
@@ -369,6 +435,11 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             }
         } else {
             thoughtTextView.isHidden = true
+        }
+
+        if !showingHistory && !draftBar.isHidden {
+            draftBar.frame = CGRect(x: pad, y: contentY, width: bounds.width - pad * 2, height: 24)
+            contentY = draftBar.frame.maxY + 4
         }
 
         let contentRect = CGRect(
@@ -434,6 +505,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         } else if generatedText.isEmpty {
             showIdleGuidance()
         } else {
+            refreshDraftBar()
             refreshPermissionBarVisibility()
         }
     }
@@ -461,6 +533,16 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         refreshInputBoxDisplay()
 
         let contextNote = (cleanBefore.isEmpty || cleanBefore == cleanQ) ? "" : "\n\n【当前输入上下文参考】\n\(cleanBefore)"
+        if let anchor = followUpAnchorText, !anchor.isEmpty {
+            followUpAnchorText = nil
+            let refinedPrompt = "【上一版生成内容】\n\(anchor)\n\n【用户的追加修改要求】\n\(cleanQ)"
+            let sysPrompt = "你是内嵌在 iOS 输入法中的灵犀 AI 助手。请严格根据用户的追加要求对上一版生成内容进行精准修改或续调，只直接输出修改后可直接发送的成品正文，不要多余解释。"
+            lastAction = nil
+            lastCustomTemplateID = nil
+            lastRunPair = (refinedPrompt, sysPrompt, "追问微调", true, false)
+            streamPrompt(prompt: refinedPrompt, systemInstruction: sysPrompt, featureTag: "ai_followup", displayPrompt: cleanQ, preferFast: true, appendToSessionDrafts: true)
+            return
+        }
         let fullPrompt = cleanQ + contextNote
         let sysPrompt = "你是内嵌在 iOS 输入法中的灵犀 AI 助手。请直接给出高质量、简洁、可直接发送的结果，不要多余客套。"
 
@@ -476,7 +558,9 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         sourceText: String,
         replaceCount: Int,
         theme: ResolvedTheme,
-        hasFullAccess: Bool
+        hasFullAccess: Bool,
+        preferFast: Bool = true,
+        preferDeep: Bool = false
     ) {
         self.theme = theme
         self.hasFullAccess = hasFullAccess
@@ -493,8 +577,46 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
 
         lastAction = nil
         lastCustomTemplateID = nil
-        lastRunPair = (sourceText, instruction, title, true, false)
-        streamPrompt(prompt: sourceText, systemInstruction: instruction, featureTag: "ai_direct", displayPrompt: sourceText, preferFast: true)
+        lastRunPair = (sourceText, instruction, title, preferFast, preferDeep)
+        streamPrompt(
+            prompt: sourceText,
+            systemInstruction: instruction,
+            featureTag: "ai_direct",
+            displayPrompt: sourceText,
+            preferFast: preferFast,
+            preferDeep: preferDeep
+        )
+    }
+
+    /// 供键盘斜杠宏 `/3v` 或仓式划动 `#ai3v` 直接触发并发三版生成（支持一键替换原句）。
+    func runThreeVariantsDirect(
+        sourceText: String,
+        replaceCount: Int,
+        theme: ResolvedTheme,
+        hasFullAccess: Bool
+    ) {
+        self.theme = theme
+        self.hasFullAccess = hasFullAccess
+        self.showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        self.inputDraftText = sourceText
+        self.hostReplaceCount = replaceCount
+
+        reloadPinnedPrompts()
+        applyTheme(theme)
+        lastAction = nil
+        lastCustomTemplateID = nil
+        lastRunPair = (sourceText, "", "三版并发", true, false)
+        rebuildActionButtons(theme: theme)
+        refreshInputBoxDisplay()
+
+        let cleanSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanSource.isEmpty {
+            runThreeVariantsAction()
+        } else {
+            runThreeVariantsInKeyboard(source: cleanSource)
+        }
     }
 
     func refreshAfterConfigChange(hasFullAccess: Bool) {
@@ -539,6 +661,12 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         thoughtTextView.backgroundColor = theme.specialKeyFill.withAlphaComponent(0.55)
         thoughtTextView.textColor = theme.keyHintText
 
+        prevDraftButton.backgroundColor = theme.specialKeyFill
+        prevDraftButton.setTitleColor(theme.keyText, for: .normal)
+        nextDraftButton.backgroundColor = theme.specialKeyFill
+        nextDraftButton.setTitleColor(theme.keyText, for: .normal)
+        draftIndicatorLabel.textColor = theme.candidateHighlight
+
         outputTextView.backgroundColor = theme.keyFill.withAlphaComponent(0.96)
         outputTextView.textColor = theme.keyText
         outputTextView.tintColor = theme.accentFill
@@ -559,6 +687,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
 
         insertButton.backgroundColor = theme.accentFill
         insertButton.setTitleColor(theme.accentText, for: .normal)
+        rebuildRefineButtons(theme: theme)
     }
 
     // MARK: - 历史记录抽屉
@@ -571,11 +700,15 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             outputTextView.isHidden = true
             thoughtToggleButton.isHidden = true
             thoughtTextView.isHidden = true
+            draftBar.isHidden = true
+            refineScroll.isHidden = true
             historyScroll.isHidden = false
         } else {
             historyScroll.isHidden = true
             outputTextView.isHidden = false
             thoughtToggleButton.isHidden = thinkingText.isEmpty
+            refreshDraftBar()
+            refreshRefineBarVisibility()
         }
         if let theme { applyTheme(theme) }
         setNeedsLayout()
@@ -705,6 +838,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
                 self.generatedText = item.output
                 self.outputTextView.text = item.output
                 self.outputTextView.contentOffset = .zero
+                self.resetSessionDrafts()
                 self.setExpandedReadingHeight(true)
                 if let t = self.theme { self.applyTheme(t) }
                 self.updateActionButtonsEnabled()
@@ -720,7 +854,52 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
 
     private func reloadPinnedPrompts() {
         let cfg = AIConfig.load()
-        pinnedCustomPrompts = cfg.customPrompts.filter(\.isPinned)
+        activeScenePersona = cfg.activeScenePersona
+        visibleBuiltinActions = cfg.resolvedKeyboardBuiltinActions
+        visibleCustomPrompts = cfg.resolvedKeyboardCustomPrompts
+        if cfg.smartContextRecommendEnabled {
+            let trimmed = inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+            smartContextRecommendation = SmartContextPromptDetector.analyze(
+                text: trimmed,
+                isClipboard: hostReplaceCount == 0 && !trimmed.isEmpty,
+                customPrompts: visibleCustomPrompts
+            )
+        } else {
+            smartContextRecommendation = nil
+        }
+    }
+
+    private func cycleScenePersona() {
+        let all = AIScenePersona.allCases
+        let curIdx = all.firstIndex(of: activeScenePersona) ?? 0
+        let next = all[(curIdx + 1) % all.count]
+        activeScenePersona = next
+        var cfg = AIConfig.load()
+        cfg.activeScenePersona = next
+        _ = cfg.save()
+        if let theme { rebuildActionButtons(theme: theme) }
+        if generatedText.isEmpty && !showingHistory {
+            outputTextView.text = "🎭 已切换沟通场景：\(next.shortTitle)\n\(next.systemRule.isEmpty ? "自动根据当前内容语境调整语气。" : next.systemRule)"
+        }
+    }
+
+    private func shortPillTitle(for action: AIPresetAction) -> String {
+        switch action {
+        case .polish: return "✨ 润色"
+        case .smartContinue: return "✍️ 续写"
+        case .eqReply: return "💬 回复"
+        case .strategist: return "🧠 军师"
+        case .proofread: return "✓ 纠错"
+        case .organizeVoice: return "📝 整理"
+        case .translateEn: return "🌐 译英"
+        case .translateZh: return "🇨🇳 译中"
+        case .replyClipboard: return "📋 回剪贴板"
+        case .summarize: return "✂️ 精简"
+        case .structureList: return "☑️ 清单"
+        case .xiaohongshu: return "🔥 小红书"
+        case .classical: return "📜 古风"
+        case .funny: return "😄 幽默"
+        }
     }
 
     private func refreshInputBoxDisplay() {
@@ -741,10 +920,8 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
 
     private func handlePasteIntoInputBox() {
         let clipText: String? = {
-            if hasFullAccess, let sys = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !sys.isEmpty {
-                if !ClipboardClassifier.isSensitiveContent(sys) {
-                    return sys
-                }
+            if let sys = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess) {
+                return sys
             }
             return ClipboardStore.items().first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
         }()
@@ -754,7 +931,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             historyScroll.isHidden = true
             outputTextView.isHidden = false
             outputTextView.text = hasFullAccess
-                ? "📋 剪贴板为空：先复制一段聊天消息或文章，再点「粘贴」即可直接让 AI 处理。"
+                ? "📋 剪贴板为空（或受隐私保护已屏蔽）：先复制一段普通聊天消息或文章，再点「粘贴」即可让 AI 处理。"
                 : "⚠️ 开启「允许完全访问」后即可一键读取系统剪贴板；也可以直接点上方输入框打字。"
             refreshPermissionBarVisibility()
             return
@@ -765,20 +942,27 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         outputTextView.isHidden = false
         inputDraftText = pasted
         hostReplaceCount = 0
+        reloadPinnedPrompts()
+        if let theme { rebuildActionButtons(theme: theme) }
         refreshInputBoxDisplay()
-        outputTextView.text = "✓ 已粘贴（\(pasted.count) 字）。点「发送」直接问 AI，或点下方「润色 / 回复 / 译英 / 译中」一键处理。"
+        outputTextView.text = "✓ 已粘贴（\(pasted.count) 字）。点「发送」直接问 AI，或点上方智能推荐技能一键处理。"
     }
 
     private func handleClearInputBox() {
         inputDraftText = ""
         hostReplaceCount = 0
+        followUpAnchorText = nil
         generatedText = ""
         thinkingText = ""
         thoughtToggleButton.isHidden = true
         thoughtTextView.isHidden = true
+        refineScroll.isHidden = true
+        resetSessionDrafts()
         showingHistory = false
         historyScroll.isHidden = true
         outputTextView.isHidden = false
+        reloadPinnedPrompts()
+        if let theme { rebuildActionButtons(theme: theme) }
         refreshInputBoxDisplay()
         showIdleGuidance()
     }
@@ -787,6 +971,17 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         let q = inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else {
             onBeginTypingPrompt?("")
+            return
+        }
+        if let anchor = followUpAnchorText, !anchor.isEmpty {
+            followUpAnchorText = nil
+            let refinedPrompt = "【上一版生成内容】\n\(anchor)\n\n【用户的追加修改要求】\n\(q)"
+            let sys = "你是内嵌在 iOS 输入法中的灵犀 AI 助手。请严格按用户追加要求微调上一版生成内容，只直接输出可直接发送的成品正文，不要多余客套。"
+            lastAction = nil
+            lastCustomTemplateID = nil
+            lastRunPair = (refinedPrompt, sys, "追问微调", true, false)
+            if let theme { rebuildActionButtons(theme: theme) }
+            streamPrompt(prompt: refinedPrompt, systemInstruction: sys, featureTag: "ai_followup", displayPrompt: q, preferFast: true, appendToSessionDrafts: true)
             return
         }
         let sys = "你是内嵌在 iOS 输入法中的灵犀 AI 助手。请直接给出高质量、简洁、可直接发送的结果，不要多余客套。"
@@ -822,24 +1017,56 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             self?.onTriggerScreenshotVision?()
         }
 
-        for action in Self.coreActions {
-            let shortTitle: String
-            switch action {
-            case .polish: shortTitle = "✨ 润色"
-            case .eqReply: shortTitle = "💬 回复"
-            case .translateEn: shortTitle = "🌐 译英"
-            case .translateZh: shortTitle = "🇨🇳 译中"
-            case .proofread: shortTitle = "✓ 纠错"
-            case .summarize: shortTitle = "✂️ 精简"
-            default: shortTitle = action.title
-            }
-            addPill(title: shortTitle, selected: lastAction == action && lastCustomTemplateID == nil) { [weak self] in
+        let sceneTitle = activeScenePersona == .auto ? "🎭 场景" : activeScenePersona.shortTitle
+        addPill(title: sceneTitle, selected: activeScenePersona != .auto) { [weak self] in
+            self?.cycleScenePersona()
+        }
+
+        addPill(title: "✨ 三版", selected: lastRunPair?.title == "三版并发") { [weak self] in
+            self?.runThreeVariantsAction()
+        }
+
+        addPill(title: "✓ 离线排版", selected: lastRunPair?.title == "离线体检") { [weak self] in
+            self?.runOfflineLintInKeyboard()
+        }
+
+        addPill(title: "🛡 离线脱敏", selected: lastRunPair?.title == "离线脱敏") { [weak self] in
+            self?.runOfflinePrivacyMaskInKeyboard()
+        }
+
+        addPill(title: "繁⇄简", selected: lastRunPair?.title == "繁简互转") { [weak self] in
+            self?.runOfflineTradToggleInKeyboard()
+        }
+
+        // 若开启语境智能推荐，优先把当前语境最匹配的内置与自定义技能提到前排
+        let recPresetIDs = smartContextRecommendation?.recommendedPresets ?? []
+        let recCustomIDs = Set(smartContextRecommendation?.recommendedCustomIDs ?? [])
+
+        var orderedActions: [AIPresetAction] = []
+        for a in recPresetIDs where visibleBuiltinActions.contains(a) && !orderedActions.contains(a) {
+            orderedActions.append(a)
+        }
+        for a in visibleBuiltinActions where !orderedActions.contains(a) {
+            orderedActions.append(a)
+        }
+
+        var orderedCustoms: [CustomAIPromptTemplate] = []
+        for tpl in visibleCustomPrompts where recCustomIDs.contains(tpl.id) {
+            orderedCustoms.append(tpl)
+        }
+        for tpl in visibleCustomPrompts where !recCustomIDs.contains(tpl.id) {
+            orderedCustoms.append(tpl)
+        }
+
+        for action in orderedActions {
+            addPill(title: shortPillTitle(for: action), selected: lastAction == action && lastCustomTemplateID == nil) { [weak self] in
                 self?.runAction(action)
             }
         }
 
-        for tpl in pinnedCustomPrompts {
-            addPill(title: "★ \(tpl.title)", selected: lastCustomTemplateID == tpl.id) { [weak self] in
+        for tpl in orderedCustoms {
+            let prefix = tpl.isPinned ? "★ " : "✦ "
+            addPill(title: "\(prefix)\(tpl.title)", selected: lastCustomTemplateID == tpl.id) { [weak self] in
                 self?.runCustomTemplate(tpl)
             }
         }
@@ -849,10 +1076,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
     private func resolveWorkingTextOrFallback() -> String {
         let draft = inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !draft.isEmpty { return draft }
-        if hasFullAccess,
-           let sys = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !sys.isEmpty,
-           !ClipboardClassifier.isSensitiveContent(sys) {
+        if let sys = ConcealedPasteboard.readNonSensitiveString(hasFullAccess: hasFullAccess) {
             inputDraftText = sys
             hostReplaceCount = 0
             refreshInputBoxDisplay()
@@ -880,6 +1104,10 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             refreshPermissionBarVisibility()
             return
         }
+        if action == .strategist {
+            runNegotiationStrategist(source: source)
+            return
+        }
         lastRunPair = (source, action.systemPrompt, action.title, !action.prefersDeepModel, action.prefersDeepModel)
         streamPrompt(
             prompt: source,
@@ -889,6 +1117,451 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             preferFast: !action.prefersDeepModel,
             preferDeep: action.prefersDeepModel
         )
+    }
+
+    private func runNegotiationStrategist(source: String) {
+        streamTask?.cancel()
+        guard hasFullAccess else {
+            showIdleGuidance()
+            return
+        }
+        let config = AIConfig.load()
+        guard config.isConfigured else {
+            showIdleGuidance()
+            return
+        }
+        showingHistory = false
+        pendingDeleteScreenshotAssetID = nil
+        screenshotStatusNotice = nil
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        if let theme { applyTheme(theme) }
+        permissionBar.isHidden = true
+        generatedText = ""
+        thinkingText = ""
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        resetSessionDrafts()
+        outputTextView.text = "🧠 博弈军师正在拆解对方潜台词并拟定 3 套回复策略…"
+        stopOrRetryButton.setTitle("停止", for: .normal)
+        lastRunPair = (source, AIPresetAction.strategist.systemPrompt, "博弈军师", false, true)
+        updateActionButtonsEnabled()
+
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await AIAutoInsightService.runNegotiationStrategist(
+                    message: source,
+                    config: config,
+                    client: self.client
+                )
+                if Task.isCancelled { return }
+                var lines: [String] = []
+                if !result.subtext.isEmpty {
+                    lines.append("【潜台词洞察】\(result.subtext)")
+                }
+                for (idx, opt) in result.options.enumerated() {
+                    lines.append("\n\(idx + 1). \(opt.tag)（\(opt.toneLabel)）\n\(opt.reply)")
+                }
+                let fullDisplay = lines.joined(separator: "\n")
+                let optionDrafts: [(label: String, text: String)] = result.options.compactMap { opt in
+                    let cleanReply = AITextSanitizer.clean(opt.reply, streaming: false)
+                    guard !cleanReply.isEmpty else { return nil }
+                    return (label: "\(opt.tag) · \(opt.toneLabel)", text: cleanReply)
+                }
+                await MainActor.run {
+                    if !result.subtext.isEmpty {
+                        self.thinkingText = "【潜台词洞察】\(result.subtext)"
+                        self.isThinkingExpanded = true
+                        self.thoughtToggleButton.isHidden = false
+                        self.thoughtToggleButton.setTitle("🧠 潜台词洞察 ▾", for: .normal)
+                        self.thoughtTextView.text = self.thinkingText
+                    }
+                    if let firstDraft = optionDrafts.first {
+                        self.sessionDrafts = optionDrafts
+                        self.currentDraftIndex = 0
+                        self.generatedText = firstDraft.text
+                        self.outputTextView.text = firstDraft.text
+                        self.refreshDraftBar()
+                    } else {
+                        self.generatedText = fullDisplay
+                        self.outputTextView.text = fullDisplay
+                    }
+                    self.setExpandedReadingHeight(true)
+                    AIRecentHistoryStore.record(title: "博弈军师", output: fullDisplay, prompt: source)
+                    self.stopOrRetryButton.setTitle("重试", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            } catch {
+                await MainActor.run {
+                    self.outputTextView.text = "⚠️ 博弈军师分析失败：\(error.localizedDescription)"
+                    self.stopOrRetryButton.setTitle("重试", for: .normal)
+                    self.updateActionButtonsEnabled()
+                }
+            }
+        }
+    }
+
+    /// 100% 离线 0 延迟文本体检与排版修复（无需完全访问权限、无需 API Key、0 Token）
+    private func runOfflineLintInKeyboard() {
+        streamTask?.cancel()
+        lastAction = nil
+        lastCustomTemplateID = nil
+        let source = resolveWorkingTextOrFallback()
+        guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
+            draftBar.isHidden = true
+            outputTextView.text = "请先点上方输入框打字，或点「粘贴」放入内容，再点「✓ 离线排版」即可 0 延迟离线修错字、补中英空格与隐私排雷。"
+            return
+        }
+
+        let cfg = AIConfig.load()
+        let report = OfflineTextLinter.analyze(
+            source,
+            bannedCliches: cfg.styleDNA.bannedAICliches,
+            privacyCustomTerms: cfg.privacyCustomTerms
+        )
+        showingHistory = false
+        pendingDeleteScreenshotAssetID = nil
+        screenshotStatusNotice = nil
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        permissionBar.isHidden = true
+        lastRunPair = (source, "", "离线体检", true, false)
+        if let theme {
+            applyTheme(theme)
+            rebuildActionButtons(theme: theme)
+        }
+
+        var diagLines: [String] = ["【离线体检 \(report.score) 分 · \(report.scoreLabel)】（\(report.totalChars)字 · 约\(report.estimatedSpeakSeconds)秒口播）"]
+        if report.findings.isEmpty {
+            diagLines.append("• 未检出重复字、AI 腔套话、标点混用或敏感隐私外泄。")
+        } else {
+            for f in report.findings.prefix(5) {
+                diagLines.append("• [\(f.category.rawValue)] \(f.message)")
+            }
+        }
+        thinkingText = diagLines.joined(separator: "\n")
+        isThinkingExpanded = true
+        thoughtToggleButton.isHidden = false
+        thoughtToggleButton.setTitle("🩺 离线体检报告（\(report.score)分） ▾", for: .normal)
+        thoughtTextView.text = thinkingText
+
+        var drafts: [(label: String, text: String)] = [
+            (label: report.hasAutoFixChanges ? "离线排版修复版" : "原文本（已很干净）", text: report.autoFixedText)
+        ]
+        if report.privacyHitCount > 0 && report.privacyRedactedText != report.autoFixedText {
+            drafts.append((label: "隐私脱敏安全版", text: OfflineTextLinter.autoFix(report.privacyRedactedText)))
+        }
+        sessionDrafts = drafts
+        currentDraftIndex = 0
+        generatedText = drafts[0].text
+        outputTextView.text = drafts[0].text
+        outputTextView.contentOffset = .zero
+        refreshDraftBar()
+        stopOrRetryButton.setTitle("重试", for: .normal)
+        updateActionButtonsEnabled()
+    }
+
+    /// 0ms 纯离线隐私脱敏（无需 API Key）
+    private func runOfflinePrivacyMaskInKeyboard() {
+        streamTask?.cancel()
+        lastAction = nil
+        lastCustomTemplateID = nil
+        let source = resolveWorkingTextOrFallback()
+        guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
+            outputTextView.text = "请先在输入框打字或粘贴含手机号/证件/邮箱的文字，再点「🛡 离线脱敏」。"
+            refreshPermissionBarVisibility()
+            return
+        }
+        let cfg = AIConfig.load()
+        let res = AIPrivacyShield.sanitize(source, customTerms: cfg.privacyCustomTerms)
+        showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        permissionBar.isHidden = true
+        lastRunPair = (source, "", "离线脱敏", true, false)
+        if let theme { applyTheme(theme); rebuildActionButtons(theme: theme) }
+        thinkingText = res.hits.isEmpty
+            ? "未检测到手机号、身份证、邮箱、银行卡或自定义敏感词。"
+            : "已本机离线隐藏 \(res.hits.count) 处敏感信息（零联网）。"
+        isThinkingExpanded = false
+        thoughtToggleButton.isHidden = false
+        thoughtToggleButton.setTitle("🛡 脱敏摘要（\(res.hits.count)处） ▸", for: .normal)
+        thoughtTextView.text = thinkingText
+        sessionDrafts = [(label: "隐私脱敏安全版", text: res.sanitizedText)]
+        currentDraftIndex = 0
+        generatedText = res.sanitizedText
+        outputTextView.text = res.sanitizedText
+        outputTextView.contentOffset = .zero
+        refreshDraftBar()
+        stopOrRetryButton.setTitle("重试", for: .normal)
+        updateActionButtonsEnabled()
+    }
+
+    /// 0ms 纯离线 OpenCC 两岸三地繁⇄简互转（无需 API Key）
+    private func runOfflineTradToggleInKeyboard() {
+        streamTask?.cancel()
+        lastAction = nil
+        lastCustomTemplateID = nil
+        let source = resolveWorkingTextOrFallback()
+        guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
+            outputTextView.text = "请先打字或粘贴内容，再点「繁⇄简」进行 OpenCC 词级双向转换。"
+            refreshPermissionBarVisibility()
+            return
+        }
+        let settings = LingxiSettings.load()
+        let trad = ChineseScriptConverter.toTraditional(source, variant: settings.traditionalVariant)
+        let simp = ChineseScriptConverter.toSimplified(source, normalizeRegionalTerms: true)
+        let converted = (trad != source) ? trad : simp
+        let label = (trad != source) ? settings.traditionalVariant.displayName : "简体中文（归并地区词）"
+        showingHistory = false
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        permissionBar.isHidden = true
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        lastRunPair = (source, "", "繁简互转", true, false)
+        if let theme { applyTheme(theme); rebuildActionButtons(theme: theme) }
+        var drafts: [(label: String, text: String)] = [(label: label, text: converted)]
+        if trad != source && simp != source && simp != converted {
+            drafts.append((label: "简体中文", text: simp))
+        }
+        sessionDrafts = drafts
+        currentDraftIndex = 0
+        generatedText = converted
+        outputTextView.text = converted
+        outputTextView.contentOffset = .zero
+        refreshDraftBar()
+        stopOrRetryButton.setTitle("重试", for: .normal)
+        updateActionButtonsEnabled()
+    }
+
+    // MARK: - 一键精调与多轮追问条
+
+    private func rebuildRefineButtons(theme: ResolvedTheme) {
+        refineStack.arrangedSubviews.forEach {
+            refineStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        let quickRefines: [(title: String, instruction: String)] = [
+            ("更短", "请将下面内容精简 40% 字数，保留核心意思、干脆利落，只输出精简后的正文。"),
+            ("更礼貌", "请将下面内容改写得更加礼貌委婉、照顾对方感受且不失专业，只输出改写后正文。"),
+            ("更口语", "请将下面内容改写为像真人微信聊天一样自然接地气的口语，去掉书面腔与 AI 味，只输出正文。"),
+            ("更犀利", "请将下面内容改写得立场更坚定、逻辑更有力、不卑不亢，只输出改写后正文。"),
+            ("扩写", "请将下面内容自然扩充合理细节与过渡，使表达更完整有说服力，只输出正文。"),
+            ("译英", "请将下面内容直接翻译为自然地道的英文，只输出英文正文。"),
+        ]
+
+        func makeRefineChip(title: String, accent: Bool, handler: @escaping () -> Void) {
+            let btn = ActionClosureButton(type: .system)
+            btn.setTitle(title, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .semibold)
+            btn.backgroundColor = accent ? theme.accentFill.withAlphaComponent(0.16) : theme.specialKeyFill
+            btn.setTitleColor(accent ? theme.candidateHighlight : theme.keyText, for: .normal)
+            btn.layer.cornerRadius = 11
+            btn.layer.cornerCurve = .continuous
+            btn.contentEdgeInsets = UIEdgeInsets(top: 3, left: 9, bottom: 3, right: 9)
+            btn.actionHandler = handler
+            refineStack.addArrangedSubview(btn)
+        }
+
+        makeRefineChip(title: "💬 追问", accent: true) { [weak self] in
+            self?.beginFollowUpOnCurrentDraft()
+        }
+        for spec in quickRefines {
+            makeRefineChip(title: spec.title, accent: false) { [weak self] in
+                self?.runQuickRefineOnCurrentDraft(label: spec.title, instruction: spec.instruction)
+            }
+        }
+        setNeedsLayout()
+    }
+
+    private func refreshRefineBarVisibility() {
+        let isBusy = stopOrRetryButton.title(for: .normal) == "停止"
+        let hasText = !generatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        refineScroll.isHidden = showingHistory || isBusy || !hasText
+    }
+
+    private func beginFollowUpOnCurrentDraft() {
+        let cur = AITextSanitizer.clean(generatedText, streaming: false)
+        guard !cur.isEmpty else { return }
+        followUpAnchorText = cur
+        inputDraftText = ""
+        refreshInputBoxDisplay()
+        outputTextView.text = "💬 追问模式：请直接打字输入修改要求（如「加上周三前确认」或「改得更幽默」），点发送即基于上一版精准微调。"
+        onBeginTypingPrompt?("")
+    }
+
+    private func runQuickRefineOnCurrentDraft(label: String, instruction: String) {
+        let cur = AITextSanitizer.clean(generatedText, streaming: false)
+        guard !cur.isEmpty else { return }
+        followUpAnchorText = nil
+        lastAction = nil
+        lastCustomTemplateID = nil
+        lastRunPair = (cur, instruction, label, true, false)
+        streamPrompt(
+            prompt: cur,
+            systemInstruction: instruction,
+            featureTag: "ai_quick_refine",
+            displayPrompt: cur,
+            preferFast: true,
+            appendToSessionDrafts: true
+        )
+    }
+
+    private func runThreeVariantsAction() {
+        lastAction = nil
+        lastCustomTemplateID = nil
+        let source = resolveWorkingTextOrFallback()
+        guard !source.isEmpty else {
+            showingHistory = false
+            historyScroll.isHidden = true
+            outputTextView.isHidden = false
+            draftBar.isHidden = true
+            outputTextView.text = "请先点上方输入框打字，或点「粘贴」放入内容，再点「✨ 三版」一次生成 3 种语气。"
+            refreshPermissionBarVisibility()
+            return
+        }
+        lastRunPair = (source, "", "三版并发", true, false)
+        if let theme { rebuildActionButtons(theme: theme) }
+        runThreeVariantsInKeyboard(source: source)
+    }
+
+    private func runThreeVariantsInKeyboard(source: String) {
+        streamTask?.cancel()
+        guard hasFullAccess else {
+            showIdleGuidance()
+            return
+        }
+        let config = AIConfig.load()
+        guard config.isConfigured else {
+            showIdleGuidance()
+            return
+        }
+        showingHistory = false
+        pendingDeleteScreenshotAssetID = nil
+        screenshotStatusNotice = nil
+        historyScroll.isHidden = true
+        outputTextView.isHidden = false
+        if let theme { applyTheme(theme) }
+        permissionBar.isHidden = true
+        generatedText = ""
+        thinkingText = ""
+        isThinkingExpanded = false
+        thoughtToggleButton.isHidden = true
+        thoughtTextView.isHidden = true
+        resetSessionDrafts()
+        outputTextView.text = "✨ 正在并发生成 3 种语气（职场得体 / 温和亲切 / 极简干脆）…"
+        stopOrRetryButton.setTitle("停止", for: .normal)
+        updateActionButtonsEnabled()
+
+        let specs: [(idx: Int, label: String, sys: String)] = [
+            (0, "职场得体", "你是中文职场写作专家。请把用户输入改写为「职场得体、礼貌专业、逻辑清晰」的版本。只直接输出可直接发送的纯文本，不要标题、引号或解释。"),
+            (1, "温和亲切", "你是高情商沟通专家。请把用户输入改写为「温和亲切、自然真诚、让人舒服」的版本。只直接输出可直接发送的纯文本，不要标题、引号或解释。"),
+            (2, "极简干脆", "你是极简表达专家。请把用户输入改写为「极简干脆、直击重点、字数更少」的版本。只直接输出可直接发送的纯文本，不要标题、引号或解释。"),
+        ]
+        let aiClient = self.client
+
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            let variants: [(Int, String, String)] = await withTaskGroup(of: (Int, String, String?).self) { group in
+                for spec in specs {
+                    group.addTask {
+                        var acc = ""
+                        do {
+                            for try await chunk in aiClient.streamText(
+                                prompt: source,
+                                systemInstruction: spec.sys,
+                                config: config,
+                                featureTag: "kb_three_variants",
+                                preferFast: true
+                            ) {
+                                if Task.isCancelled { return (spec.idx, spec.label, nil) }
+                                acc += chunk
+                            }
+                            let clean = AITextSanitizer.clean(acc, streaming: false)
+                            return (spec.idx, spec.label, clean.isEmpty ? nil : clean)
+                        } catch {
+                            return (spec.idx, spec.label, nil)
+                        }
+                    }
+                }
+                var collected: [(Int, String, String)] = []
+                for await (idx, label, text) in group {
+                    if let text { collected.append((idx, label, text)) }
+                }
+                return collected.sorted { $0.0 < $1.0 }
+            }
+
+            if Task.isCancelled { return }
+            await MainActor.run {
+                if variants.isEmpty {
+                    self.outputTextView.text = "⚠️ 三版并发生成失败，请检查网络或模型配置后点击重试。"
+                } else {
+                    self.sessionDrafts = variants.map { (label: $0.1, text: $0.2) }
+                    self.currentDraftIndex = 0
+                    self.generatedText = variants[0].2
+                    self.outputTextView.text = variants[0].2
+                    self.outputTextView.contentOffset = .zero
+                    self.refreshDraftBar()
+                    AIRecentHistoryStore.record(
+                        title: "三版并发 · \(variants[0].1)",
+                        output: variants[0].2,
+                        prompt: source
+                    )
+                }
+                self.stopOrRetryButton.setTitle("重试", for: .normal)
+                self.updateActionButtonsEnabled()
+            }
+        }
+    }
+
+    private func resetSessionDrafts() {
+        sessionDrafts.removeAll()
+        currentDraftIndex = 0
+        draftBar.isHidden = true
+        setNeedsLayout()
+    }
+
+    private func refreshDraftBar() {
+        let shouldShow = !showingHistory && sessionDrafts.count >= 2
+        draftBar.isHidden = !shouldShow
+        guard shouldShow else {
+            setNeedsLayout()
+            return
+        }
+        let safeIdx = max(0, min(currentDraftIndex, sessionDrafts.count - 1))
+        currentDraftIndex = safeIdx
+        let item = sessionDrafts[safeIdx]
+        draftIndicatorLabel.text = "第 \(safeIdx + 1)/\(sessionDrafts.count) 版 · \(item.label)"
+        prevDraftButton.isEnabled = safeIdx > 0
+        prevDraftButton.alpha = safeIdx > 0 ? 1.0 : 0.38
+        nextDraftButton.isEnabled = safeIdx < sessionDrafts.count - 1
+        nextDraftButton.alpha = safeIdx < sessionDrafts.count - 1 ? 1.0 : 0.38
+        setNeedsLayout()
+    }
+
+    private func stepDraft(by delta: Int) {
+        guard sessionDrafts.count >= 2 else { return }
+        let nextIdx = max(0, min(sessionDrafts.count - 1, currentDraftIndex + delta))
+        guard nextIdx != currentDraftIndex else { return }
+        currentDraftIndex = nextIdx
+        let selected = sessionDrafts[nextIdx]
+        generatedText = selected.text
+        outputTextView.text = selected.text
+        outputTextView.contentOffset = .zero
+        refreshDraftBar()
+        updateActionButtonsEnabled()
     }
 
     private func runCustomTemplate(_ template: CustomAIPromptTemplate) {
@@ -987,9 +1660,11 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
                 ? "✨ 尚未填写 AI API Key。点下方按钮直达「灵犀 App → AI 智脑」填好即可使用。"
                 : "✨ 免费侧载沙盒隔离：点下方打开「灵犀 App → AI 智脑」点击「同步给键盘」再切回即可。"
         } else if !inputDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n点「发送」直接问 AI，或点上方「润色 / 回复 / 译英 / 译中」一键生成。"
+            let shieldTag = config.privacyShieldEnabled ? " · 🛡️ 隐私脱敏已开启" : ""
+            outputTextView.text = "✓ 已就绪（\(config.activeModelName)\(shieldTag)）\n点「发送」直接问 AI，或点上方技能胶囊一键生成。"
         } else {
-            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n• 点上方输入框可直接打字问 AI，或点「粘贴」放入内容\n• 回答正文支持长按自由选词复制，也支持一键「复制 / 插入」\n• 点右侧「历史」可随时翻阅历史回答并自动拉高阅读空间"
+            let shieldLine = config.privacyShieldEnabled ? "\n• 🛡️ AI 隐私脱敏护盾已开启：手机/证件/邮箱发往模型前本机自动脱敏" : ""
+            outputTextView.text = "✓ 已就绪（\(config.activeModelName)）\n• 点上方输入框可直接打字问 AI，或点「粘贴」放入内容\n• 回答正文支持长按自由选词复制，也支持一键「复制 / 插入」\n• 点右侧「历史」可随时翻阅历史回答并自动拉高阅读空间\(shieldLine)"
         }
         refreshPermissionBarVisibility()
         updateActionButtonsEnabled()
@@ -1008,7 +1683,8 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         featureTag: String,
         displayPrompt: String = "",
         preferFast: Bool = false,
-        preferDeep: Bool = false
+        preferDeep: Bool = false,
+        appendToSessionDrafts: Bool = false
     ) {
         streamTask?.cancel()
 
@@ -1028,6 +1704,19 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
         historyScroll.isHidden = true
         outputTextView.isHidden = false
         if let theme { applyTheme(theme) }
+
+        if appendToSessionDrafts {
+            if sessionDrafts.isEmpty {
+                let prev = AITextSanitizer.clean(generatedText, streaming: false)
+                if !prev.isEmpty {
+                    sessionDrafts = [(label: lastRunPair?.title ?? "初版", text: prev)]
+                    currentDraftIndex = 0
+                }
+            }
+            draftBar.isHidden = true
+        } else {
+            resetSessionDrafts()
+        }
 
         permissionBar.isHidden = true
         generatedText = ""
@@ -1100,13 +1789,26 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
                     }
                     if finalClean.isEmpty {
                         self.outputTextView.text = "⚠️ 模型未返回正文，请检查模型配置或点击重试。"
+                        self.refreshDraftBar()
                     } else {
                         self.outputTextView.text = finalClean
-                        AIRecentHistoryStore.record(
-                            title: self.lastRunPair?.title ?? "AI 助手",
-                            output: finalClean,
-                            prompt: displayPrompt.isEmpty ? self.inputDraftText : displayPrompt
-                        )
+                        let baseTitle = self.lastRunPair?.title ?? "AI 助手"
+                        if appendToSessionDrafts {
+                            let label = "\(baseTitle) #\(self.sessionDrafts.count + 1)"
+                            self.sessionDrafts.append((label: label, text: finalClean))
+                            self.currentDraftIndex = self.sessionDrafts.count - 1
+                        } else {
+                            self.sessionDrafts = [(label: baseTitle, text: finalClean)]
+                            self.currentDraftIndex = 0
+                        }
+                        self.refreshDraftBar()
+                        if !LingxiSettings.load().incognitoModeEnabled {
+                            AIRecentHistoryStore.record(
+                                title: baseTitle,
+                                output: finalClean,
+                                prompt: displayPrompt.isEmpty ? self.inputDraftText : displayPrompt
+                            )
+                        }
                     }
                     self.stopOrRetryButton.setTitle("重试", for: .normal)
                     self.updateActionButtonsEnabled()
@@ -1114,6 +1816,7 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             } catch {
                 await MainActor.run {
                     self.outputTextView.text = "⚠️ 生成失败：\(error.localizedDescription)"
+                    self.refreshDraftBar()
                     self.stopOrRetryButton.setTitle("重试", for: .normal)
                     self.updateActionButtonsEnabled()
                 }
@@ -1123,14 +1826,17 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
 
     private func updateActionButtonsEnabled() {
         let ready = !generatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        refreshRefineBarVisibility()
         setNeedsLayout()
         copyButton.isEnabled = ready
         copyButton.alpha = ready ? 1.0 : 0.45
         insertButton.isEnabled = ready
         insertButton.alpha = ready ? 1.0 : 0.45
-        let canReplace = ready && hostReplaceCount > 0
+        let prefersAppend = lastAction?.prefersAppendInsert == true
+        let canReplace = ready && hostReplaceCount > 0 && !prefersAppend
         replaceButton.isEnabled = canReplace
         replaceButton.alpha = canReplace ? 1.0 : 0.42
+        insertButton.setTitle(prefersAppend ? "续写插入" : "插入", for: .normal)
     }
 
     private func handleCopyGeneratedText() {
@@ -1149,13 +1855,34 @@ final class AIAssistantPanelView: UIView, UITextViewDelegate {
             task.cancel()
             stopOrRetryButton.setTitle("重试", for: .normal)
         } else if let pair = lastRunPair {
+            if lastAction == .strategist {
+                runNegotiationStrategist(source: pair.prompt)
+                return
+            }
+            if pair.title == "三版并发" {
+                runThreeVariantsInKeyboard(source: pair.prompt)
+                return
+            }
+            if pair.title == "离线体检" {
+                runOfflineLintInKeyboard()
+                return
+            }
+            if pair.title == "离线脱敏" {
+                runOfflinePrivacyMaskInKeyboard()
+                return
+            }
+            if pair.title == "繁简互转" {
+                runOfflineTradToggleInKeyboard()
+                return
+            }
             streamPrompt(
                 prompt: pair.prompt,
                 systemInstruction: pair.sys,
                 featureTag: "ai_retry",
                 displayPrompt: inputDraftText,
                 preferFast: pair.preferFast,
-                preferDeep: pair.preferDeep
+                preferDeep: pair.preferDeep,
+                appendToSessionDrafts: true
             )
         } else {
             handleSendFreeQuestion()

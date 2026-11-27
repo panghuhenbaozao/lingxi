@@ -295,6 +295,7 @@ struct LingxiSettings: Codable, Equatable {
     var panguSpaceLetters: Bool = false
     var panguSpaceDigits: Bool = false
     var traditionalChineseEnabled: Bool = false
+    var traditionalVariant: TraditionalChineseVariant = .taiwanPhrase
     var typoCorrectionEnabled: Bool = true
     var fuzzyFallbackEnabled: Bool = true
     var glideTypingEnabled: Bool = true
@@ -330,6 +331,58 @@ struct LingxiSettings: Codable, Equatable {
     var autoAnalyzeNewScreenshot: Bool = false
     var customSwipeUpMap: [String: String] = [:]
     var customSwipeDownMap: [String: String] = [:]
+    var activeLayoutPackID: String = "standard"
+    /// 隐身无痕模式（对标 HeliBoard / FlorisBoard）：开启后暂停词库自学习、剪贴板记录、打字统计与 AI 历史留痕
+    var incognitoModeEnabled: Bool = false
+    /// 草稿防丢黑匣子（纯本机 24 小时滚动缓存 ≥18 字长输入，密码框/无痕模式自动跳过，永不上云）
+    var draftRecoveryEnabled: Bool = true
+    /// 短信验证码 15 分钟自动阅后即焚（仅清理未置顶验证码，保持剪贴板清爽）
+    var autoExpireOTPEnabled: Bool = true
+    /// 长辈 / 夜间护眼大字关怀一键模式
+    var elderCareModeEnabled: Bool = false
+    /// 选词轻声语音播报（帮长辈确认选字不错别字）
+    var speakSelectedCandidateEnabled: Bool = false
+    /// 开启长辈关怀模式前的外观快照，关闭时一键无损还原
+    var elderCareSnapshot: ElderCareSnapshot? = nil
+
+    struct ElderCareSnapshot: Codable, Equatable {
+        let heightPreset: KeyboardHeightPreset
+        let candidateBarHeight: Double
+        let candidateFontSize: Double
+        let hapticStrength: HapticStrength
+    }
+
+    /// 切换「长辈 / 护眼大字关怀模式」，自动备份与无损还原用户的原始尺寸偏好
+    mutating func setElderCareMode(_ enabled: Bool) {
+        guard enabled != elderCareModeEnabled else { return }
+        if enabled {
+            elderCareSnapshot = ElderCareSnapshot(
+                heightPreset: heightPreset,
+                candidateBarHeight: candidateBarHeight,
+                candidateFontSize: candidateFontSize,
+                hapticStrength: hapticStrength
+            )
+            heightPreset = .tall
+            candidateBarHeight = 60
+            candidateFontSize = 22
+            hapticStrength = .heavy
+            elderCareModeEnabled = true
+        } else {
+            if let snap = elderCareSnapshot {
+                heightPreset = snap.heightPreset
+                candidateBarHeight = snap.candidateBarHeight
+                candidateFontSize = snap.candidateFontSize
+                hapticStrength = snap.hapticStrength
+            } else {
+                heightPreset = .standard
+                candidateBarHeight = 50
+                candidateFontSize = 16.5
+                hapticStrength = .medium
+            }
+            elderCareSnapshot = nil
+            elderCareModeEnabled = false
+        }
+    }
 
     /// Ensure every known toolbar button appears exactly once, preserving saved order.
     static func normalizedToolbarLayout(_ layout: [ToolbarItemConfig]) -> [ToolbarItemConfig] {
@@ -354,7 +407,7 @@ struct LingxiSettings: Codable, Equatable {
         case keySoundEnabled, keyPopupEnabled, showSecondaryHints, showDownwardHints
         case swipeUpForHint, swipeDownForPunctuation, inlineComposingEnabled
         case spacebarTrackpadEnabled, autoPairPunctuation, punctuationStyle, smartQuotePairing
-        case panguSpaceLetters, panguSpaceDigits, traditionalChineseEnabled
+        case panguSpaceLetters, panguSpaceDigits, traditionalChineseEnabled, traditionalVariant
         case typoCorrectionEnabled, fuzzyFallbackEnabled, glideTypingEnabled
         case showNumberRow, dynamicKeyHitBoxEnabled
         case emojiSuggestionEnabled, smartEnglishCandidate
@@ -364,7 +417,8 @@ struct LingxiSettings: Codable, Equatable {
         case autoCapitalizeEnglish, doubleSpacePeriod, typingStatsEnabled, typingStatsDefaultMigratedV52
         case translateTargetLang, translateFormalTone, stylishFontID
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
-        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, autoAnalyzeNewScreenshot, customSwipeUpMap, customSwipeDownMap
+        case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, autoAnalyzeNewScreenshot, customSwipeUpMap, customSwipeDownMap, activeLayoutPackID, incognitoModeEnabled
+        case draftRecoveryEnabled, autoExpireOTPEnabled, elderCareModeEnabled, speakSelectedCandidateEnabled, elderCareSnapshot
     }
 
     init() {}
@@ -392,6 +446,7 @@ struct LingxiSettings: Codable, Equatable {
         panguSpaceLetters = try c.decodeIfPresent(Bool.self, forKey: .panguSpaceLetters) ?? d.panguSpaceLetters
         panguSpaceDigits = try c.decodeIfPresent(Bool.self, forKey: .panguSpaceDigits) ?? d.panguSpaceDigits
         traditionalChineseEnabled = try c.decodeIfPresent(Bool.self, forKey: .traditionalChineseEnabled) ?? d.traditionalChineseEnabled
+        traditionalVariant = try c.decodeIfPresent(TraditionalChineseVariant.self, forKey: .traditionalVariant) ?? d.traditionalVariant
         typoCorrectionEnabled = try c.decodeIfPresent(Bool.self, forKey: .typoCorrectionEnabled) ?? d.typoCorrectionEnabled
         fuzzyFallbackEnabled = try c.decodeIfPresent(Bool.self, forKey: .fuzzyFallbackEnabled) ?? d.fuzzyFallbackEnabled
         glideTypingEnabled = try c.decodeIfPresent(Bool.self, forKey: .glideTypingEnabled) ?? d.glideTypingEnabled
@@ -443,6 +498,13 @@ struct LingxiSettings: Codable, Equatable {
         autoAnalyzeNewScreenshot = try c.decodeIfPresent(Bool.self, forKey: .autoAnalyzeNewScreenshot) ?? d.autoAnalyzeNewScreenshot
         customSwipeUpMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeUpMap) ?? d.customSwipeUpMap
         customSwipeDownMap = try c.decodeIfPresent([String: String].self, forKey: .customSwipeDownMap) ?? d.customSwipeDownMap
+        activeLayoutPackID = try c.decodeIfPresent(String.self, forKey: .activeLayoutPackID) ?? d.activeLayoutPackID
+        incognitoModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .incognitoModeEnabled) ?? d.incognitoModeEnabled
+        draftRecoveryEnabled = try c.decodeIfPresent(Bool.self, forKey: .draftRecoveryEnabled) ?? d.draftRecoveryEnabled
+        autoExpireOTPEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoExpireOTPEnabled) ?? d.autoExpireOTPEnabled
+        elderCareModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .elderCareModeEnabled) ?? d.elderCareModeEnabled
+        speakSelectedCandidateEnabled = try c.decodeIfPresent(Bool.self, forKey: .speakSelectedCandidateEnabled) ?? d.speakSelectedCandidateEnabled
+        elderCareSnapshot = try c.decodeIfPresent(ElderCareSnapshot.self, forKey: .elderCareSnapshot)
     }
 
     private struct CustomKeymapSyncPayload: Codable {

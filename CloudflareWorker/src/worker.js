@@ -245,10 +245,57 @@ async function verifyToken(token, secret) {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key, X-Lingxi-Timestamp, X-Lingxi-Nonce, X-Lingxi-Signature"
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key, X-Admin-Token, X-Service-Key, X-Lingxi-Timestamp, X-Lingxi-Nonce, X-Lingxi-Signature"
 };
 const jres = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { "Content-Type": "application/json; charset=utf-8", ...CORS } });
 const eres = (s, c, m) => jres({ error: { code: c, message: m } }, s);
+
+function maskEmail(email) {
+  const s = String(email || "").trim();
+  const at = s.indexOf("@");
+  if (at <= 1) return s ? "***" : "";
+  return `${s.slice(0, Math.min(2, at))}***${s.slice(at)}`;
+}
+
+function isSensitiveClipboardText(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (t.startsWith("LXBRIDGE1:")) return true;
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(t)) return true;
+  if (/\b\d{17}[\dXx]\b/.test(t)) return true;
+  if (/(?:password|passwd|密码)\s*[:=：]\s*\S{6,}/i.test(t)) return true;
+  return false;
+}
+
+function checkAdminAccess(request, env) {
+  const expected = String(env.ADMIN_TOKEN || "").trim();
+  if (!expected) return { configured: false, authorized: false };
+  const hdrToken = (request.headers.get("X-Admin-Token") || "").trim();
+  const auth = request.headers.get("Authorization") || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const provided = hdrToken || bearer;
+  return { configured: true, authorized: Boolean(provided && eqSafe(provided, expected)) };
+}
+
+const relayRateBuckets = new Map();
+function checkRelayRateLimit(ip, kind, maxCalls = 45, windowSec = 60) {
+  const key = `${kind}:${ip || "unknown"}`;
+  const now = nowSec();
+  let arr = relayRateBuckets.get(key) || [];
+  arr = arr.filter((ts) => now - ts < windowSec);
+  if (arr.length >= maxCalls) {
+    relayRateBuckets.set(key, arr);
+    return false;
+  }
+  arr.push(now);
+  relayRateBuckets.set(key, arr);
+  if (relayRateBuckets.size > 500) {
+    for (const [k, v] of relayRateBuckets.entries()) {
+      if (!v.length || now - v[v.length - 1] >= windowSec) relayRateBuckets.delete(k);
+    }
+  }
+  return true;
+}
 
 async function rjson(req) {
   const t = await req.text();
@@ -484,6 +531,10 @@ export default {
       if (m === "GET" && (path === "/api/v1/health" || path === "/v1/health")) return jres(await getStats(env));
 
       if (m === "GET" && path === "/api/v1/dashboard/overview") {
+        const admin = checkAdminAccess(request, env);
+        if (admin.configured && !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "管理看板已启用管理员保护，请提供有效的 X-Admin-Token");
+        }
         const [stats, profRes, nsRes, devRes, b2bRes, conRes, audRes, packs] = await Promise.all([
           getStats(env),
           env.DB.prepare("SELECT u.id AS user_id,u.username,u.email,p.* FROM users u LEFT JOIN user_typing_profiles p ON p.user_id=u.id ORDER BY u.last_login_at DESC LIMIT 50").all(),
@@ -508,9 +559,9 @@ export default {
             ab[k].avgLatencyMs = v.avgLatencyMs || 0;
           }
           profiles.push({
-            userID: r.user_id,
+            userID: admin.authorized ? r.user_id : String(r.user_id || "").slice(0, 8),
             username: r.username || "灵犀用户",
-            email: r.email || "",
+            email: admin.authorized ? (r.email || "") : maskEmail(r.email),
             primaryScheme: r.primary_scheme || "quanpin",
             primaryLayout: r.primary_layout || "qwerty26",
             avgCPM: r.avg_cpm || 0,
@@ -579,6 +630,10 @@ export default {
         return jres({ packs: await listPacks(env) });
       }
       if (m === "POST" && path === "/api/v1/community/packs") {
+        const admin = checkAdminAccess(request, env);
+        if (admin.configured && !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "发布社区词包需要管理员 X-Admin-Token");
+        }
         const b = await rjson(request);
         if (!b.name?.trim() || !b.tsv?.trim()) return eres(400, "BAD_REQUEST", "词包名称与 TSV 不能为空");
         const id = "pack_" + randHex(6);
@@ -588,6 +643,10 @@ export default {
         return jres({ ok: true, id }, 201);
       }
       if (m === "DELETE" && path.startsWith("/api/v1/community/packs/")) {
+        const admin = checkAdminAccess(request, env);
+        if (admin.configured && !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "删除社区词包需要管理员 X-Admin-Token");
+        }
         const packId = decodeURIComponent(path.slice("/api/v1/community/packs/".length));
         await env.DB.prepare("DELETE FROM community_lexicons WHERE id=?").bind(packId).run();
         return jres({ ok: true, deleted: packId });
@@ -909,10 +968,13 @@ export default {
         return jres({ ok: true, profile: await recomputeProfile(env, a.user.id) });
       }
 
-      // 7. Cross-Device Clipboard Relay
+      // 7. Cross-Device Clipboard Relay (with per-IP sliding-window anti-bruteforce rate limiting)
       if (m === "POST" && path === "/api/v1/relay/clipboard") {
+        if (!checkRelayRateLimit(ip, "post", 30, 60)) return eres(429, "RATE_LIMITED", "跨屏发送过于频繁，请稍后再试");
         const b = await rjson(request), pc = String(b.pairCode || "").trim(), txt = String(b.contentText || "").trim();
-        if (!pc || !txt) return eres(400, "BAD_REQUEST", "匹配码和内容不能为空");
+        if (!pc || pc.length < 6 || !txt) return eres(400, "BAD_REQUEST", "匹配码至少 6 位且内容不能为空");
+        if (txt.length > 8192) return eres(400, "BAD_REQUEST", "跨屏传输文本不得超过 8192 字符");
+        if (isSensitiveClipboardText(txt)) return eres(400, "SENSITIVE_BLOCKED", "L1 安全防线：检测到身份证号、私钥、密码或侧载口令，已拒绝跨屏中转");
         const now = nowSec(), otp = extractOTP(txt), cat = otp ? "code" : (/^https?:\/\//i.test(txt) ? "url" : "text");
         await env.DB.prepare("DELETE FROM clipboard_relays WHERE expires_at < ?").bind(now).run();
         const ins = await env.DB.prepare("INSERT INTO clipboard_relays (pair_code,content_text,category,extracted_code,sender_device,created_at,expires_at) VALUES (?,?,?,?,?,?,?)")
@@ -921,22 +983,70 @@ export default {
       }
 
       if (m === "GET" && path === "/api/v1/relay/clipboard") {
+        if (!checkRelayRateLimit(ip, "get", 60, 60)) return eres(429, "RATE_LIMITED", "拉取过于频繁，请稍后再试");
         const c = (url.searchParams.get("code") || "").trim();
-        if (!c) return jres({ items: [] });
+        if (!c || c.length < 6) return jres({ items: [] });
         const rows = (await env.DB.prepare("SELECT id,pair_code AS pairCode,content_text AS contentText,category,extracted_code AS extractedCode,sender_device AS senderDevice,created_at AS createdAt FROM clipboard_relays WHERE pair_code=? AND expires_at>=? ORDER BY id DESC LIMIT 15").bind(c, nowSec()).all()).results || [];
         return jres({ items: rows });
       }
 
       if (m === "GET" && path === "/api/v1/relay/stream") {
+        if (!checkRelayRateLimit(ip, "sse", 30, 60)) return eres(429, "RATE_LIMITED", "推流连接过于频繁，请稍后再试");
         const c = (url.searchParams.get("code") || "").trim();
-        const rows = c ? ((await env.DB.prepare("SELECT id,pair_code AS pairCode,content_text AS contentText,category,extracted_code AS extractedCode,sender_device AS senderDevice,created_at AS createdAt FROM clipboard_relays WHERE pair_code=? AND expires_at>=? ORDER BY id DESC LIMIT 5").bind(c, nowSec()).all()).results || []) : [];
+        const rows = (c && c.length >= 6) ? ((await env.DB.prepare("SELECT id,pair_code AS pairCode,content_text AS contentText,category,extracted_code AS extractedCode,sender_device AS senderDevice,created_at AS createdAt FROM clipboard_relays WHERE pair_code=? AND expires_at>=? ORDER BY id DESC LIMIT 5").bind(c, nowSec()).all()).results || []) : [];
         return new Response(`retry: 3000\ndata: ${JSON.stringify({ items: rows })}\n\n`, {
           status: 200,
           headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", ...CORS }
         });
       }
 
-      // 8. Compliance & B2B
+      if (m === "GET" && path === "/api/v1/sustainability/status") {
+        const [uCnt, sCnt, pCnt] = await Promise.all([
+          env.DB.prepare("SELECT COUNT(*) AS c FROM users").first(),
+          env.DB.prepare("SELECT COUNT(*) AS c FROM sync_records WHERE tombstone=0").first(),
+          env.DB.prepare("SELECT COUNT(*) AS c FROM community_packs").first(),
+        ]);
+        return jres({
+          openCoreLicense: "MIT Permanent Open-Core",
+          e2eeProtocol: "LXE2 / LXE1 (PBKDF2 + ChaCha20-Poly1305 / AES-256-GCM)",
+          syncTransports: ["local_noop", "lan_p2p", "e2ee_cloud"],
+          tiers: ["free", "self_hosted", "pro", "enterprise"],
+          communityPacks: Number(pCnt?.c || 0),
+          serverStats: {
+            users: Number(uCnt?.c || 0),
+            syncRecords: Number(sCnt?.c || 0),
+          },
+        });
+      }
+
+      // 8. Compliance, Sync Summary & B2B
+      if (m === "GET" && path === "/api/v1/sync/summary") {
+        const a = await resolveAuth(request, env);
+        if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
+        const rows = (await env.DB.prepare("SELECT namespace, COUNT(*) AS count, MAX(lamport_ts) AS maxLamport, MAX(updated_at) AS lastUpdated FROM sync_records WHERE user_id=? AND tombstone=0 GROUP BY namespace").bind(a.user.id).all()).results || [];
+        return jres({ userID: a.user.id, vaultSummary: rows });
+      }
+
+      if (m === "GET" && path === "/api/v1/compliance/export") {
+        const a = await resolveAuth(request, env);
+        if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
+        const [recs, devs, consents, prof] = await Promise.all([
+          env.DB.prepare("SELECT namespace, record_key AS key, lamport_ts AS lamportTS, device_id AS deviceID, tombstone, updated_at AS updatedAt FROM sync_records WHERE user_id=?").bind(a.user.id).all(),
+          env.DB.prepare("SELECT id, name, platform, app_ver AS appVer, last_seen AS lastSeen FROM devices WHERE user_id=?").bind(a.user.id).all(),
+          env.DB.prepare("SELECT id, scope, granted, at, policy_version AS policyVersion FROM consent_records WHERE user_id=? ORDER BY at DESC").bind(a.user.id).all(),
+          recomputeProfile(env, a.user.id)
+        ]);
+        return jres({
+          format: "LINGXI-GDPR-PORTABLE-EXPORT",
+          exportedAt: nowSec(),
+          user: { userID: a.user.id, email: a.user.email || "", username: a.user.username || "" },
+          devices: devs.results || [],
+          syncRecordMetadata: recs.results || [],
+          consentAuditTrail: consents.results || [],
+          typingProfile: prof
+        });
+      }
+
       if (m === "POST" && path === "/api/v1/compliance/consent") {
         const a = await resolveAuth(request, env);
         if (!a) return eres(401, "UNAUTHORIZED", "请先登录");
@@ -959,6 +1069,10 @@ export default {
       }
 
       if (m === "POST" && path === "/api/v1/b2b/clients") {
+        const admin = checkAdminAccess(request, env);
+        if (!admin.configured || !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "签发 B 端企业密钥需要配置并携带管理员 X-Admin-Token");
+        }
         const b = await rjson(request), org = String(b.org || "灵犀企业客户").trim(), scopes = String(b.scopes || "profile:read,aggregate:read");
         const sk = `lxb_live_${randHex(18)}`, pre = sk.slice(0, 14) + "...", id = crypto.randomUUID();
         await env.DB.prepare("INSERT INTO api_clients (id,org,key_hash,key_prefix,scopes,created_at) VALUES (?,?,?,?,?,?)").bind(id, org, await sha256(sk), pre, scopes, nowSec()).run();
@@ -966,6 +1080,10 @@ export default {
       }
 
       if (m === "POST" && path === "/api/v1/b2b/simulate-query") {
+        const admin = checkAdminAccess(request, env);
+        if (!admin.configured || !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "执行 B 端模拟查询需要管理员 X-Admin-Token");
+        }
         const b = await rjson(request), cid = String(b.clientID || "");
         const cli = await env.DB.prepare("SELECT * FROM api_clients WHERE id=?").bind(cid).first();
         if (!cli) return eres(404, "NOT_FOUND", "企业客户不存在");
@@ -975,6 +1093,10 @@ export default {
       }
 
       if (m === "POST" && path === "/api/v1/dashboard/seed-demo") {
+        const admin = checkAdminAccess(request, env);
+        if (!admin.configured || !admin.authorized) {
+          return eres(401, "ADMIN_AUTH_REQUIRED", "注入演示数据需要管理员 X-Admin-Token");
+        }
         const now = nowSec();
         let d = await env.DB.prepare("SELECT * FROM users WHERE email='demo@lingxi.ime'").first();
         if (!d) {

@@ -19,6 +19,7 @@ final class NumberPadView: UIView {
     private var theme: ResolvedTheme?
     private var isChineseMode = true
     private var returnTitle = "换行"
+    private var packQuickTokens: [String] = []
     private var repeatTimer: Timer?
     private var repeatDeleteCount = 0
 
@@ -51,10 +52,16 @@ final class NumberPadView: UIView {
         layoutAll()
     }
 
-    func configure(theme: ResolvedTheme, isChineseMode: Bool, returnTitle: String = "换行") {
+    func configure(
+        theme: ResolvedTheme,
+        isChineseMode: Bool,
+        returnTitle: String = "换行",
+        packQuickTokens: [String] = []
+    ) {
         self.theme = theme
         self.isChineseMode = isChineseMode
         self.returnTitle = returnTitle
+        self.packQuickTokens = packQuickTokens.filter { KeyboardSwipeCommand.parse($0) == nil && !$0.isEmpty }
         rebuildButtons()
         setNeedsLayout()
     }
@@ -81,19 +88,29 @@ final class NumberPadView: UIView {
         }
         leftSymbolStack.addArrangedSubview(emojiEntryBtn)
 
-        let syms = isChineseMode ? chineseSideSymbols : englishSideSymbols
-        for sym in syms {
+        let baseSyms = isChineseMode ? chineseSideSymbols : englishSideSymbols
+        var orderedSyms: [(token: String, isPackToken: Bool)] = []
+        var seenSyms = Set<String>()
+        for tok in packQuickTokens where seenSyms.insert(tok).inserted {
+            orderedSyms.append((tok, true))
+        }
+        for sym in baseSyms where seenSyms.insert(sym).inserted {
+            orderedSyms.append((sym, false))
+        }
+        for item in orderedSyms {
             let btn = ActionClosureButton(type: .system)
-            btn.setTitle(sym, for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 17, weight: .medium)
-            btn.setTitleColor(theme.keyText, for: .normal)
-            btn.backgroundColor = theme.specialKeyFill
+            btn.setTitle(item.token, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: item.token.count >= 2 ? 13.5 : 17, weight: item.isPackToken ? .semibold : .medium)
+            btn.titleLabel?.adjustsFontSizeToFitWidth = true
+            btn.titleLabel?.minimumScaleFactor = 0.72
+            btn.setTitleColor(item.isPackToken ? theme.candidateHighlight : theme.keyText, for: .normal)
+            btn.backgroundColor = item.isPackToken ? theme.keyFill : theme.specialKeyFill
             btn.layer.cornerRadius = theme.keyCornerRadius
             btn.layer.cornerCurve = .continuous
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
             btn.actionHandler = { [weak self] in
-                self?.onEvent?(.insertText(sym))
+                self?.onEvent?(.insertText(item.token))
             }
             leftSymbolStack.addArrangedSubview(btn)
         }

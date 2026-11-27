@@ -7,6 +7,8 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             HomeTestView(onSelectTab: { selectedTab = $0 })
+                .lxToast($appState.globalToastMessage)
+                .lxToast($appState.globalErrorMessage, isError: true)
                 .tabItem {
                     Label("首页", systemImage: "keyboard")
                 }
@@ -37,6 +39,8 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(Color(Design.Palette.accent))
+        // 跟随系统字号；最大辅助字号下卡片会严重变形，上限设为 accessibility3
+        .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         .onChange(of: selectedTab) { _ in
             appState.reloadSharedThemeAndSettingsIfNeeded()
         }

@@ -188,7 +188,7 @@ enum AIAutoInsightService {
             ) {
                 collected += delta
             }
-            let modelTag = config.provider == .gemini ? config.geminiModel : config.openAIModel
+            let modelTag = config.activeModelName
             let parsed = parseLLMResponse(
                 collected,
                 fallback: fallback,
@@ -828,9 +828,19 @@ extension AIAutoInsightService {
         config: AIConfig = AIConfig.load(),
         client: AIClient = AIClient(timeout: 35)
     ) async -> PersonalStyleDNA {
+        let res = await cloneStyleDNAWithStatus(fromSamples: samples, config: config, client: client)
+        return res.dna
+    }
+
+    /// 带真实状态反馈的文风 DNA 克隆（明确告知是由大模型提取还是降级为本机规则分析）
+    static func cloneStyleDNAWithStatus(
+        fromSamples samples: String,
+        config: AIConfig = AIConfig.load(),
+        client: AIClient = AIClient(timeout: 35)
+    ) async -> (dna: PersonalStyleDNA, usedLLM: Bool, fallbackReason: String?) {
         var dna = config.styleDNA
         let trimmed = samples.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return dna }
+        guard !trimmed.isEmpty else { return (dna, false, "样本为空") }
 
         // 先做端侧标点与句长特征快速提取
         let usesTilde = trimmed.contains("～") || trimmed.contains("~")
@@ -840,7 +850,7 @@ extension AIAutoInsightService {
         guard config.isConfigured else {
             dna.clonedStyleSummary = localSummary
             dna.updatedAt = Int(Date().timeIntervalSince1970)
-            return dna
+            return (dna, false, "尚未配置 AI 密钥，已使用本机规则快速提取")
         }
 
         let sys = """
@@ -877,14 +887,89 @@ extension AIAutoInsightService {
                         dna.personalCatchphrases = Array(dna.personalCatchphrases.prefix(12))
                     }
                 }
+                dna.updatedAt = Int(Date().timeIntervalSince1970)
+                return (dna, true, nil)
             } else {
-                dna.clonedStyleSummary = collected.count >= 15 ? String(collected.prefix(160)) : localSummary
+                let fallbackText = collected.trimmingCharacters(in: .whitespacesAndNewlines)
+                dna.clonedStyleSummary = fallbackText.count >= 15 ? String(fallbackText.prefix(160)) : localSummary
+                dna.updatedAt = Int(Date().timeIntervalSince1970)
+                return (dna, fallbackText.count >= 15, fallbackText.count >= 15 ? nil : "模型未返回规范 JSON，已使用本机规则提取")
             }
         } catch {
             dna.clonedStyleSummary = localSummary
+            dna.updatedAt = Int(Date().timeIntervalSince1970)
+            return (dna, false, "大模型调用失败（\(error.localizedDescription)），已降级为本机规则提取")
         }
-        dna.updatedAt = Int(Date().timeIntervalSince1970)
-        return dna
+    }
+
+    /// AI 一键帮写键盘技能：用户输入一句大白话目标，自动生成标题、图标、分类与专业指令
+    static func generateCustomPromptTemplate(
+        fromGoal goal: String,
+        config: AIConfig = AIConfig.load(),
+        client: AIClient = AIClient(timeout: 35)
+    ) async throws -> CustomAIPromptTemplate {
+        let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanGoal.isEmpty else {
+            throw AIClientError.emptyResponse
+        }
+        let sys = """
+        你是「灵犀输入法」的资深提示词工程师。请把用户的一句话场景需求，设计为一条可直接放进手机键盘的 AI 快捷技能，并严格只输出一个合法 JSON 对象（不要额外解释）：
+        {
+          "title": "2-6字简洁按钮名（不含emoji）",
+          "icon": "从以下SF Symbol中选一个：sparkles/briefcase.fill/bolt.fill/doc.text.fill/bubble.left.and.text.bubble.right.fill/globe/checklist/hand.raised.fill/arrow.triangle.branch/lightbulb.fill",
+          "category": "效率沟通 或 职场商务 或 链式流水线 或 日常社交 或 学习创作",
+          "useDeepModel": false,
+          "instruction": "45-120字清晰具体、可直接作为 System Prompt 使用的专业指令（明确角色、语气、输出结构与约束）"
+        }
+        """
+        var collected = ""
+        for try await chunk in client.streamText(
+            prompt: "用户想要实现的键盘技能需求：\n\(cleanGoal)",
+            systemInstruction: sys,
+            config: config,
+            featureTag: "prompt_authoring"
+        ) {
+            collected += chunk
+        }
+        return parseGeneratedPromptTemplate(collected, fallbackGoal: cleanGoal)
+    }
+
+    static func parseGeneratedPromptTemplate(_ raw: String, fallbackGoal: String) -> CustomAIPromptTemplate {
+        let validIcons: Set<String> = [
+            "sparkles", "briefcase.fill", "bolt.fill", "doc.text.fill",
+            "bubble.left.and.text.bubble.right.fill", "globe", "checklist",
+            "hand.raised.fill", "arrow.triangle.branch", "lightbulb.fill"
+        ]
+        let cleaned = extractJSONObjectString(from: raw)
+        if let data = cleaned.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let rawTitle = (obj["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawInst = (obj["instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawIcon = (obj["icon"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "sparkles"
+            let rawCat = (obj["category"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "效率沟通"
+            let useDeep = (obj["useDeepModel"] as? Bool) ?? false
+            if !rawInst.isEmpty {
+                return CustomAIPromptTemplate(
+                    title: String((rawTitle.isEmpty ? String(fallbackGoal.prefix(6)) : rawTitle).prefix(10)),
+                    icon: validIcons.contains(rawIcon) ? rawIcon : "sparkles",
+                    instruction: rawInst,
+                    category: rawCat.isEmpty ? "效率沟通" : rawCat,
+                    isAIGenerated: true,
+                    isPinned: true,
+                    useDeepModel: useDeep
+                )
+            }
+        }
+        let plain = AITextSanitizer.clean(raw, streaming: false)
+        return CustomAIPromptTemplate(
+            title: String(fallbackGoal.prefix(6)),
+            icon: "sparkles",
+            instruction: plain.isEmpty ? "请根据用户输入完成以下任务：\(fallbackGoal)，保持语气自然直接、可直接发送。" : plain,
+            category: "AI 自动定制",
+            isAIGenerated: true,
+            isPinned: true,
+            useDeepModel: false
+        )
     }
 
     /// AI 改写 Diff 反向自学习：当用户手动删改 AI 生成文本并发送时，自动提炼个人偏好规则。
@@ -991,21 +1076,179 @@ extension AIAutoInsightService {
     }
 }
 
-// MARK: - 键盘随打随唤内联 AI 指令识别器（@ai / /ai / // 零切面板直接执行）
+// MARK: - 键盘随打随唤内联 AI 宏指令引擎（@ai / 全栈斜杠宏 /fix /en /zh /eq /sum /list /xhs /boss /3v /tr /自定义技能名）
+
+enum InlineOfflineMacroKind: String, Equatable {
+    case lintFix
+    case privacyMask
+    case toggleTraditional
+    case cleanURL
+    case platformSafe
+}
 
 struct InlineAICommandMatch: Equatable {
     let command: String
     let fullMatchCount: Int
     let triggerPrefix: String
+    var actionTitle: String = "@ai 随打即唤"
+    var systemInstruction: String? = nil
+    var preferFast: Bool = true
+    var preferDeep: Bool = false
+    var isThreeVariants: Bool = false
+    var offlineMacro: InlineOfflineMacroKind? = nil
 }
 
 enum InlineAICommandDetector {
-    /// 检测光标前文本末尾是否以 `@ai ...`、`/ai ...`、`@灵犀 ...` 或 `// ...` 结尾。
-    static func detect(in beforeCursor: String) -> InlineAICommandMatch? {
-        let tail = String(beforeCursor.suffix(180))
+    private struct SlashMacroSpec {
+        let token: String
+        let title: String
+        let systemPrompt: String
+        let preferFast: Bool
+        let preferDeep: Bool
+        let isThreeVariants: Bool
+        var offlineMacro: InlineOfflineMacroKind? = nil
+    }
+
+    private static func builtInSlashMacros(translateTargetLang: String) -> [SlashMacroSpec] {
+        [
+            SlashMacroSpec(token: "/lint", title: "✓ 离线排版", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: false, offlineMacro: .lintFix),
+            SlashMacroSpec(token: "/mask", title: "🛡 离线脱敏", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: false, offlineMacro: .privacyMask),
+            SlashMacroSpec(token: "/trad", title: "繁⇄简互转", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: false, offlineMacro: .toggleTraditional),
+            SlashMacroSpec(token: "/cleanurl", title: "🧼 净化链接", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: false, offlineMacro: .cleanURL),
+            SlashMacroSpec(token: "/checkpost", title: "📢 防限流平替", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: false, offlineMacro: .platformSafe),
+            SlashMacroSpec(token: "/fix", title: "⚡ 纠错润色", systemPrompt: AIPresetAction.polish.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/en", title: "⚡ 译为英文", systemPrompt: AIPresetAction.translateEn.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/zh", title: "⚡ 译为中文", systemPrompt: AIPresetAction.translateZh.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/eq", title: "⚡ 高情商回复", systemPrompt: AIPresetAction.eqReply.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/sum", title: "⚡ 精简提炼", systemPrompt: AIPresetAction.summarize.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/list", title: "⚡ 转待办清单", systemPrompt: AIPresetAction.structureList.systemPrompt, preferFast: false, preferDeep: true, isThreeVariants: false),
+            SlashMacroSpec(token: "/xhs", title: "⚡ 小红书风", systemPrompt: AIPresetAction.xiaohongshu.systemPrompt, preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/boss", title: "⚡ 老板汇报风", systemPrompt: "你是资深职场沟通专家。请把内容改写为向老板/客户汇报的得体专业表达：先给结论、逻辑清晰、不卑不亢。只直接输出可直接发送的正文。", preferFast: true, preferDeep: false, isThreeVariants: false),
+            SlashMacroSpec(token: "/3v", title: "⚡ 一键三版", systemPrompt: "", preferFast: true, preferDeep: false, isThreeVariants: true),
+            SlashMacroSpec(token: "/tr", title: "⚡ 译为\(translateTargetLang)", systemPrompt: TranslateTargetLanguage.systemPrompt(for: translateTargetLang, formal: false), preferFast: true, preferDeep: false, isThreeVariants: false),
+        ]
+    }
+
+    /// 校验斜杠 `/` 之前是否为合法边界（行首、空白或中文标点），彻底避免误命中 URL 路径（如 `https://a.com/en`）。
+    private static func isValidSlashBoundary(in text: String, before slashIndex: String.Index) -> Bool {
+        if slashIndex == text.startIndex { return true }
+        let prev = text[text.index(before: slashIndex)]
+        if prev.isWhitespace { return true }
+        return "，。！？；：、（）【】《》".contains(prev)
+    }
+
+    /// 检测光标前文本末尾是否命中：
+    /// 1) 内置或用户自定义斜杠宏（支持前缀带参 `/en 明天开会` 与尾缀作用于前文 `明天开会 /en`、`/周报 ...`、`/3v`）；
+    /// 2) 用户自定义前缀或 `@ai ...`、`/ai ...`、`@灵犀 ...`、`// ...` 自由指令。
+    /// 纯内存无磁盘 I/O：严禁在键盘每键热路径触发磁盘解码。
+    static func detect(
+        in beforeCursor: String,
+        customPrefix: String? = nil,
+        customPrompts: [CustomAIPromptTemplate] = [],
+        pipelines: [AIPromptPipeline] = [],
+        translateTargetLang: String = "英文"
+    ) -> InlineAICommandMatch? {
+        guard beforeCursor.count >= 4 else { return nil }
+        let tail = String(beforeCursor.suffix(220))
         // 只检查最后一个换行符之后的内容，避免误抓前一段旧文本
         let currentLine = tail.components(separatedBy: .newlines).last ?? tail
-        let prefixes = ["@ai ", "@AI ", "/ai ", "/AI ", "@灵犀 ", "@灵犀", "// "]
+        guard currentLine.count >= 4 else { return nil }
+
+        // A. 优先检测全栈斜杠 AI 宏（内置 10 宏 + 用户自定义技能 + 链式流水线）
+        if currentLine.contains("/") {
+            var allMacros = builtInSlashMacros(translateTargetLang: translateTargetLang)
+            var seenTokens = Set(allMacros.map { $0.token.lowercased() })
+            for tpl in customPrompts {
+                let cleanTitle = tpl.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanTitle.isEmpty else { continue }
+                let tok = "/\(cleanTitle)"
+                if seenTokens.insert(tok.lowercased()).inserted {
+                    allMacros.append(SlashMacroSpec(
+                        token: tok,
+                        title: "⚡ 技能：\(cleanTitle)",
+                        systemPrompt: tpl.effectiveSystemPrompt,
+                        preferFast: !tpl.useDeepModel,
+                        preferDeep: tpl.useDeepModel,
+                        isThreeVariants: false
+                    ))
+                }
+            }
+            for pipe in pipelines {
+                let cleanTitle = pipe.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanTitle.isEmpty else { continue }
+                let tok = "/\(cleanTitle)"
+                if seenTokens.insert(tok.lowercased()).inserted {
+                    let compiled = pipe.compiledAsCustomPrompt()
+                    allMacros.append(SlashMacroSpec(
+                        token: tok,
+                        title: "⚡ 流水线：\(cleanTitle)",
+                        systemPrompt: compiled.effectiveSystemPrompt,
+                        preferFast: false,
+                        preferDeep: compiled.useDeepModel,
+                        isThreeVariants: false
+                    ))
+                }
+            }
+
+            let trimmedEnd = currentLine.trimmingCharacters(in: .whitespaces)
+            let lowerTrimmedEnd = trimmedEnd.lowercased()
+            // A1. 尾缀模式：用户先打完句子，末尾敲 ` /fix` / ` /en` / ` /3v` / ` /周报`
+            for spec in allMacros {
+                let lowTok = spec.token.lowercased()
+                if lowerTrimmedEnd.hasSuffix(lowTok) && trimmedEnd.count > spec.token.count {
+                    let tokStart = trimmedEnd.index(trimmedEnd.endIndex, offsetBy: -spec.token.count)
+                    guard isValidSlashBoundary(in: trimmedEnd, before: tokStart) else { continue }
+                    let preceding = String(trimmedEnd[..<tokStart]).trimmingCharacters(in: .whitespaces)
+                    guard preceding.count >= 2 else { continue }
+                    return InlineAICommandMatch(
+                        command: preceding,
+                        fullMatchCount: currentLine.count,
+                        triggerPrefix: spec.token,
+                        actionTitle: spec.title,
+                        systemInstruction: spec.systemPrompt.isEmpty ? nil : spec.systemPrompt,
+                        preferFast: spec.preferFast,
+                        preferDeep: spec.preferDeep,
+                        isThreeVariants: spec.isThreeVariants,
+                        offlineMacro: spec.offlineMacro
+                    )
+                }
+            }
+
+            // A2. 前缀带参模式：`/en 明天三点开会` 或 `/周报 完成了登录和支付`
+            for spec in allMacros {
+                let needle = "\(spec.token) "
+                if let range = currentLine.range(of: needle, options: [.backwards, .caseInsensitive]) {
+                    guard isValidSlashBoundary(in: currentLine, before: range.lowerBound) else { continue }
+                    let arg = String(currentLine[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard arg.count >= 2 else { continue }
+                    let fullSub = String(currentLine[range.lowerBound...])
+                    return InlineAICommandMatch(
+                        command: arg,
+                        fullMatchCount: fullSub.count,
+                        triggerPrefix: spec.token,
+                        actionTitle: spec.title,
+                        systemInstruction: spec.systemPrompt.isEmpty ? nil : spec.systemPrompt,
+                        preferFast: spec.preferFast,
+                        preferDeep: spec.preferDeep,
+                        isThreeVariants: spec.isThreeVariants,
+                        offlineMacro: spec.offlineMacro
+                    )
+                }
+            }
+        }
+
+        // B. 自由自然语言前缀（自定义前缀 / @ai / /ai / @灵犀 / //）
+        var prefixes: [String] = []
+        let configured = (customPrefix ?? "@ai").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            prefixes.append("\(configured) ")
+            if configured.lowercased() != configured {
+                prefixes.append("\(configured.lowercased()) ")
+            }
+        }
+        for p in ["@ai ", "@AI ", "/ai ", "/AI ", "@灵犀 ", "@灵犀", "// "] where !prefixes.contains(p) {
+            prefixes.append(p)
+        }
         for prefix in prefixes {
             if let range = currentLine.range(of: prefix, options: .backwards) {
                 let rawCmd = String(currentLine[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)

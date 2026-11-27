@@ -41,7 +41,8 @@ final class TopToolbarView: UIView {
         case askAIForClipboard(String)
         case clipboardIntentAI(ClipboardIntentAction, String)
         case selectionQuickAI(title: String, instruction: String)
-        case executeInlineAICommand(command: String, replaceCount: Int)
+        case selectionLocalTransform(SelectionTextTransform)
+        case executeInlineAICommand(InlineAICommandMatch)
         case tapComposingSyllable(Int)
         case askAIForWord(String)
         case saveWordAsPhrase(String)
@@ -52,6 +53,8 @@ final class TopToolbarView: UIView {
         case pickLastChar(String)
         case sendAIPrompt
         case cancelAIPrompt
+        case exitIncognito
+        case coolDownImpulse(String)
         case dismissSuggestions
         case dismissKeyboard
     }
@@ -86,6 +89,16 @@ final class TopToolbarView: UIView {
     private let settingsButton = UIButton(type: .system)
     private let undoButton = UIButton(type: .system)
     private let dismissKeyboardButton = UIButton(type: .system)
+    private let incognitoPillButton = ActionClosureButton(type: .system)
+
+    // 情绪防冲动发前降火轻提示条（检测到当前待发句子语气偏冲时 0ms 柔和弹出，不打断打字）
+    private let impulseNoticeBar = UIView()
+    private let impulseNoticeLabel = UILabel()
+    private let impulseCoolBtn = ActionClosureButton(type: .system)
+    private let impulseDismissBtn = ActionClosureButton(type: .system)
+    private var activeImpulseDraft: String?
+    private var dismissedImpulseDraft: String?
+    private var isIncognitoActive = false
 
     // 框选即改（Selection In-Place Magic）：检测到宿主输入框选中文字时自动替换顶栏
     private let selectionMagicScroll = ToolbarHorizontalScrollView()
@@ -303,6 +316,7 @@ final class TopToolbarView: UIView {
         undoButton.accessibilityLabel = "撤销"
         undoButton.addTarget(self, action: #selector(didTapUndo), for: .touchUpInside)
 
+        leftClusterStack.addArrangedSubview(incognitoPillButton)
         leftClusterStack.addArrangedSubview(aiButton)
         leftClusterStack.addArrangedSubview(translateButton)
         leftClusterStack.addArrangedSubview(screenshotButton)
@@ -310,6 +324,53 @@ final class TopToolbarView: UIView {
         [undoButton, emojiButton, layoutButton, editPadButton, clipboardButton, settingsButton, dismissKeyboardButton].forEach {
             rightClusterStack.addArrangedSubview($0)
         }
+
+        // 无痕隐私模式常驻提醒胶囊（1 点即退出无痕，避免用户忘记关掉导致一直不记词）
+        incognitoPillButton.setTitle("🕶 无痕", for: .normal)
+        incognitoPillButton.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .bold)
+        incognitoPillButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
+        incognitoPillButton.layer.cornerRadius = 14
+        incognitoPillButton.layer.cornerCurve = .continuous
+        incognitoPillButton.layer.borderWidth = 0.6
+        incognitoPillButton.isHidden = true
+        incognitoPillButton.accessibilityLabel = "无痕模式已开启，点按退出无痕模式"
+        incognitoPillButton.actionHandler = { [weak self] in
+            self?.onAction?(.exitIncognito)
+        }
+
+        // 发前情绪防冲动降火轻提示条
+        impulseNoticeBar.isHidden = true
+        impulseNoticeBar.layer.cornerRadius = 17
+        impulseNoticeBar.layer.cornerCurve = .continuous
+        impulseNoticeBar.layer.borderWidth = 0.6
+        idleContainer.addSubview(impulseNoticeBar)
+
+        impulseNoticeLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        impulseNoticeLabel.lineBreakMode = .byTruncatingTail
+        impulseNoticeBar.addSubview(impulseNoticeLabel)
+
+        impulseCoolBtn.setTitle("🧊 保底线降火", for: .normal)
+        impulseCoolBtn.titleLabel?.font = .systemFont(ofSize: 11.5, weight: .bold)
+        impulseCoolBtn.layer.cornerRadius = 13
+        impulseCoolBtn.layer.cornerCurve = .continuous
+        impulseCoolBtn.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
+        impulseCoolBtn.actionHandler = { [weak self] in
+            guard let self, let draft = self.activeImpulseDraft else { return }
+            self.onAction?(.coolDownImpulse(draft))
+        }
+        impulseNoticeBar.addSubview(impulseCoolBtn)
+
+        let impXCfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .bold)
+        impulseDismissBtn.setImage(UIImage(systemName: "xmark", withConfiguration: impXCfg), for: .normal)
+        impulseDismissBtn.accessibilityLabel = "忽略本次情绪降火提示"
+        impulseDismissBtn.actionHandler = { [weak self] in
+            guard let self else { return }
+            self.dismissedImpulseDraft = self.activeImpulseDraft
+            self.activeImpulseDraft = nil
+            self.updateIdleOverlayVisibility()
+            self.setNeedsLayout()
+        }
+        impulseNoticeBar.addSubview(impulseDismissBtn)
 
         // 框选即改顶栏胶囊条
         selectionMagicScroll.isHidden = true
@@ -330,7 +391,7 @@ final class TopToolbarView: UIView {
         inlineAICommandBtn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 12, bottom: 5, right: 12)
         inlineAICommandBtn.actionHandler = { [weak self] in
             guard let self, let match = self.activeInlineCommand else { return }
-            self.onAction?(.executeInlineAICommand(command: match.command, replaceCount: match.fullMatchCount))
+            self.onAction?(.executeInlineAICommand(match))
         }
         inlineAICommandBar.addSubview(inlineAICommandBtn)
 
@@ -506,6 +567,21 @@ final class TopToolbarView: UIView {
     }
 
     private func setupSelectionMagicPills() {
+        // 0ms 纯本地原地包裹与大小写转换（优先置前，零联网零耗 Token）
+        for transform in SelectionTextTransform.allCases {
+            let btn = ActionClosureButton(type: .system)
+            btn.setTitle(transform.pillTitle, for: .normal)
+            btn.accessibilityLabel = transform.accessibilityLabel
+            btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+            btn.layer.cornerRadius = 14
+            btn.layer.cornerCurve = .continuous
+            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 9, bottom: 5, right: 9)
+            btn.actionHandler = { [weak self] in
+                self?.onAction?(.selectionLocalTransform(transform))
+            }
+            selectionMagicStack.addArrangedSubview(btn)
+        }
+
         let items: [(String, String)] = [
             ("✨ 润色选中", "请保持原意，将用户选中的这段文字润色得更加流畅自然得体。只输出改写后的文字。"),
             ("🌐 译为英文", "Translate the selected text into natural, idiomatic English. Output only the translation."),
@@ -549,7 +625,8 @@ final class TopToolbarView: UIView {
                 btn.isHidden = !item.isVisible
             }
         }
-        // 收起键盘键永远固定在右侧簇最末端，任何配置下都一键可达
+        // 无痕提醒胶囊永远位于左侧簇最前端；收起键盘键永远固定在右侧簇最末端
+        leftClusterStack.insertArrangedSubview(incognitoPillButton, at: 0)
         rightClusterStack.addArrangedSubview(dismissKeyboardButton)
         setNeedsLayout()
     }
@@ -639,6 +716,23 @@ final class TopToolbarView: UIView {
             screenshotNoticeLabel.frame = CGRect(x: 12, y: 0, width: max(40, screenshotAnalyzeBtn.frame.minX - 18), height: sH)
         }
 
+        if !impulseNoticeBar.isHidden {
+            let iH: CGFloat = min(34, bounds.height - 10)
+            impulseNoticeBar.frame = CGRect(
+                x: 10,
+                y: (bounds.height - iH) / 2,
+                width: max(0, bounds.width - 20),
+                height: iH
+            )
+            let xW: CGFloat = 28
+            let actW: CGFloat = 94
+            let btnH: CGFloat = max(24, iH - 8)
+            let btnY: CGFloat = (iH - btnH) / 2
+            impulseDismissBtn.frame = CGRect(x: impulseNoticeBar.bounds.width - xW - 4, y: btnY, width: xW, height: btnH)
+            impulseCoolBtn.frame = CGRect(x: impulseDismissBtn.frame.minX - actW - 4, y: btnY, width: actW, height: btnH)
+            impulseNoticeLabel.frame = CGRect(x: 12, y: 0, width: max(40, impulseCoolBtn.frame.minX - 16), height: iH)
+        }
+
         // 全栏独占接管胶囊：当用户新复制内容或收到验证码时，占据整个顶栏宽度
         let bannerH: CGFloat = min(36, bounds.height - 10)
         bannerContainer.frame = CGRect(
@@ -703,6 +797,17 @@ final class TopToolbarView: UIView {
         undoButton.backgroundColor = theme.accentFill
         undoButton.tintColor = theme.accentText
         undoButton.setTitleColor(theme.accentText, for: .normal)
+
+        incognitoPillButton.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.18)
+        incognitoPillButton.setTitleColor(.systemOrange, for: .normal)
+        incognitoPillButton.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.45).cgColor
+
+        impulseNoticeBar.backgroundColor = theme.keyFill
+        impulseNoticeBar.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.42).cgColor
+        impulseNoticeLabel.textColor = theme.keyText
+        impulseCoolBtn.backgroundColor = theme.accentFill
+        impulseCoolBtn.setTitleColor(theme.accentText, for: .normal)
+        impulseDismissBtn.tintColor = theme.keyHintText
 
         bannerContainer.backgroundColor = theme.keyFill
         bannerContainer.layer.borderColor = theme.candidateHighlight.withAlphaComponent(0.28).cgColor
@@ -786,11 +891,15 @@ final class TopToolbarView: UIView {
         toolbarLayout: [ToolbarItemConfig] = defaultToolbarLayout,
         showComposingStrip: Bool = true,
         isIdlePredictionMode: Bool = false,
-        screenshotDetectedLabel: String? = nil
+        screenshotDetectedLabel: String? = nil,
+        isIncognito: Bool = false,
+        impulseDraft: String? = nil
     ) {
         self.toolbarLayout = toolbarLayout
         self.showComposingStrip = showComposingStrip
         self.activeEditingSyllableIdx = activeSyllableIndex
+        self.isIncognitoActive = isIncognito
+        incognitoPillButton.isHidden = !isIncognito
         applyToolbarConfiguration()
         self.hasCandidates = !candidates.isEmpty
         let hasTypedComposing = !composingDisplay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || composingSyllables.count >= 2
@@ -805,6 +914,20 @@ final class TopToolbarView: UIView {
         self.activeScreenshotNoticeLabel = (!hasComposingBar && !isAIPromptMode && !isTranslateBarActive && bannerState == .hidden && !isSelectionMagicActive && activeInlineCommand == nil) ? screenshotDetectedLabel : nil
         if let shotText = self.activeScreenshotNoticeLabel {
             screenshotNoticeLabel.text = shotText
+        }
+        if let rawDraft = impulseDraft, !rawDraft.isEmpty {
+            if dismissedImpulseDraft != rawDraft,
+               !hasComposingBar, !isAIPromptMode, !isTranslateBarActive,
+               bannerState == .hidden, !isSelectionMagicActive,
+               activeInlineCommand == nil, activeScreenshotNoticeLabel == nil {
+                self.activeImpulseDraft = rawDraft
+                impulseNoticeLabel.text = "🔥 语气偏冲，发前先冷静 3 秒？"
+            } else {
+                self.activeImpulseDraft = nil
+            }
+        } else {
+            self.activeImpulseDraft = nil
+            self.dismissedImpulseDraft = nil
         }
 
         let desiredLayoutTitle = layoutMode == .qwerty26 ? "九键" : "26键"
@@ -833,7 +956,8 @@ final class TopToolbarView: UIView {
         undoButton.isHidden = !showUndo || !undoConfiguredVisible
 
         if let cmd = activeInlineCommand {
-            inlineAICommandBtn.setTitle("✨ 点此执行 AI：\(cmd.command)", for: .normal)
+            let prefixLabel = cmd.actionTitle.isEmpty ? "✨ 执行 AI" : cmd.actionTitle
+            inlineAICommandBtn.setTitle("\(prefixLabel)：\(cmd.command)", for: .normal)
         }
 
         if let theme {
@@ -852,10 +976,12 @@ final class TopToolbarView: UIView {
         let isBannerTakeoverActive = (currentBannerState != .hidden)
         let isInlineAIActive = (activeInlineCommand != nil)
         let isScreenshotNoticeActive = (activeScreenshotNoticeLabel != nil)
+        let isImpulseNoticeActive = (activeImpulseDraft != nil)
         inlineAICommandBar.isHidden = !isInlineAIActive
         selectionMagicScroll.isHidden = !isSelectionMagicActive
         screenshotNoticeBar.isHidden = !isScreenshotNoticeActive
-        let hideStandardIdle = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive || isScreenshotNoticeActive
+        impulseNoticeBar.isHidden = !isImpulseNoticeActive
+        let hideStandardIdle = isBannerTakeoverActive || isSelectionMagicActive || isInlineAIActive || isScreenshotNoticeActive || isImpulseNoticeActive
         leftClusterStack.isHidden = hideStandardIdle
         rightClusterStack.isHidden = hideStandardIdle
         idleScrollView.isHidden = hideStandardIdle
@@ -1057,8 +1183,19 @@ final class TopToolbarView: UIView {
                 }
                 bannerStack.addArrangedSubview(makeCloseButton(tint: theme.keyHintText))
             } else {
-                // 模式 B：刚复制的内容全栏独占预览与一键粘贴（支持左右滑动查看完整复制文字）
+                // 模式 B：刚复制的内容全栏独占预览与一键粘贴（内置 0ms 离线防诈雷达 + 链接去追踪防社死净链器）
+                let scamReport = CommunicationGuardEngine.analyzeScam(item.text)
+                let linkReport = LinkPrivacyCleaner.clean(item.text)
                 let (icon, tagTitle): (String, String) = {
+                    if scamReport.level == .highRisk {
+                        return ("exclamationmark.shield.fill", "防诈预警")
+                    }
+                    if scamReport.level == .caution {
+                        return ("exclamationmark.triangle.fill", "风险提醒")
+                    }
+                    if linkReport.hasIdentityLeakRisk {
+                        return ("shield.lefthalf.filled", "含追踪")
+                    }
                     switch item.category {
                     case .url: return ("link", "新链接")
                     case .phone: return ("phone.fill", "号码")
@@ -1066,7 +1203,12 @@ final class TopToolbarView: UIView {
                     case .text: return ("doc.on.clipboard.fill", "刚复制")
                     }
                 }()
-                let badge = makeTagBadge(icon: icon, text: tagTitle, theme: theme)
+                let badge = makeTagBadge(
+                    icon: icon,
+                    text: tagTitle,
+                    theme: theme,
+                    overrideTint: scamReport.level == .highRisk ? .systemRed : (scamReport.level == .caution || linkReport.hasIdentityLeakRisk ? .systemOrange : nil)
+                )
 
                 let contentView = ScrollableBannerTextView(
                     text: singleLine,
@@ -1087,8 +1229,19 @@ final class TopToolbarView: UIView {
 
                 bannerStack.addArrangedSubview(badge)
                 bannerStack.addArrangedSubview(contentView)
+                if linkReport.hasChanges, let cleanTarget = linkReport.extractedCleanURL ?? (linkReport.cleanedText.isEmpty ? nil : linkReport.cleanedText) {
+                    let cleanLinkBtn = makeCapsuleButton(
+                        title: "🧼 净链",
+                        bg: theme.accentFill.withAlphaComponent(0.18),
+                        fg: theme.candidateHighlight
+                    ) { [weak self] in
+                        self?.onAction?(.pasteCaptured(cleanTarget))
+                    }
+                    cleanLinkBtn.accessibilityLabel = "去除追踪参数后粘贴纯净链接"
+                    bannerStack.addArrangedSubview(cleanLinkBtn)
+                }
                 // 剪贴板语义意图直达胶囊（如复制了外文/提问/报错/长段文字，顶栏 1 步直达 AI 处理）
-                if hasFullAccess, let intent = SmartContextPromptDetector.detectClipboardIntent(for: item.text) {
+                if !linkReport.hasChanges, hasFullAccess, let intent = SmartContextPromptDetector.detectClipboardIntent(for: item.text) {
                     let aiIntentBtn = makeCapsuleButton(
                         title: intent.badge,
                         bg: theme.accentFill.withAlphaComponent(0.16),
@@ -1105,16 +1258,17 @@ final class TopToolbarView: UIView {
         setNeedsLayout()
     }
 
-    private func makeTagBadge(icon: String, text: String, theme: ResolvedTheme) -> UIView {
+    private func makeTagBadge(icon: String, text: String, theme: ResolvedTheme, overrideTint: UIColor? = nil) -> UIView {
         let pill = UIButton(type: .system)
         pill.isUserInteractionEnabled = false
         let cfg = UIImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         pill.setImage(UIImage(systemName: icon, withConfiguration: cfg), for: .normal)
         pill.setTitle(" " + text, for: .normal)
         pill.titleLabel?.font = .systemFont(ofSize: 11, weight: .semibold)
-        pill.tintColor = theme.candidateHighlight
-        pill.setTitleColor(theme.candidateHighlight, for: .normal)
-        pill.backgroundColor = theme.accentFill.withAlphaComponent(0.12)
+        let fg = overrideTint ?? theme.candidateHighlight
+        pill.tintColor = fg
+        pill.setTitleColor(fg, for: .normal)
+        pill.backgroundColor = (overrideTint ?? theme.accentFill).withAlphaComponent(overrideTint == nil ? 0.12 : 0.16)
         pill.layer.cornerRadius = 12
         pill.layer.cornerCurve = .continuous
         pill.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)

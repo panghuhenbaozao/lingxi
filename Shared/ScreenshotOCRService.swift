@@ -11,8 +11,8 @@ import Vision
 enum ScreenshotOCRService {
     /// 判断指定模型 ID 与渠道是否原生支持多模态视觉图片输入。
     static func modelLikelySupportsVision(modelID: String, provider: AIProvider) -> Bool {
-        if provider == .gemini {
-            // Gemini 1.5 / 2.0 / 2.5 / 3.x / 4.x 系列原生全模态支持图片
+        if provider == .gemini || provider == .anthropic {
+            // Gemini 与现代 Claude 3 / 3.5 / 3.7 / 4 系列均原生支持图片理解
             return true
         }
         let lower = modelID.lowercased()

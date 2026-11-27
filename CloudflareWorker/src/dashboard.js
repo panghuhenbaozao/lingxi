@@ -181,10 +181,11 @@ pre.tsv{background:var(--card);border:1px solid var(--line);border-radius:8px;pa
       <div class="ch"><div class="ct">📋 跨设备 6 位匹配码实时剪贴板接力</div><span class="pill" id="sse-st">SSE 实时流就绪</span></div>
       <div class="cd">在电脑与 iPhone「灵犀账号 → 跨屏剪贴板」输入相同 6 位匹配码，电脑发送的文字、链接或短信验证码将在手机键盘顶部全宽胶囊实时弹出（默认 10 分钟自动过期销毁）。</div>
       <div class="row">
-        <input id="relay-code" class="in mono" style="max-width:150px;font-weight:700;letter-spacing:2px" value="886699" maxlength="8" placeholder="6位匹配码" />
+        <input id="relay-code" class="in mono" style="max-width:150px;font-weight:700;letter-spacing:2px" value="" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="手机上显示的 6 位码" />
         <button class="btn" onclick="connectSSE()">⚡ 连接实时通道</button>
         <button class="btn" onclick="loadRelay()">↻ 拉取最新</button>
         <button class="btn" onclick="sendDemoOTP()">💬 模拟发短信验证码到手机</button>
+        <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);cursor:pointer;user-select:none" title="与 iOS ClipboardRelayCrypto 字节级互通：浏览器本地 HKDF-SHA256 + AES-256-GCM 加密，Cloudflare 边缘节点不可见明文"><input id="relay-e2ee" type="checkbox" checked /> 🔒 E2EE 加密发送 (LXRL1)</label>
       </div>
       <div class="row">
         <input id="relay-txt" class="in" placeholder="输入要秒传到 iPhone 键盘顶栏的长文本、网址或验证码…" />
@@ -313,9 +314,20 @@ document.getElementById('tab-bar').addEventListener('click', e => {
 async function api(method, path, body = null, token = null) {
   const hdrs = { 'Content-Type': 'application/json' };
   if (token) hdrs['Authorization'] = 'Bearer ' + token;
+  const adminTok = localStorage.getItem('lx_admin_token') || '';
+  if (adminTok) hdrs['X-Admin-Token'] = adminTok;
   const res = await fetch(path, { method, headers: hdrs, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || ('HTTP ' + res.status));
+  if (!res.ok) {
+    if (res.status === 401 && data?.error?.code === 'ADMIN_AUTH_REQUIRED') {
+      const entered = window.prompt('此控制台已开启管理员保护，请输入 ADMIN_TOKEN：');
+      if (entered && entered.trim()) {
+        localStorage.setItem('lx_admin_token', entered.trim());
+        return api(method, path, body, token);
+      }
+    }
+    throw new Error(data?.error?.message || ('HTTP ' + res.status));
+  }
   return data;
 }
 
@@ -495,21 +507,70 @@ function renderAudits(consents, audits) {
   tb.innerHTML = rows.length ? rows.slice(0, 25).map(r => '<tr><td class="mono" style="font-size:11px">' + fmtTime(r.ts) + '</td><td>' + r.who + '</td><td class="mono" style="font-size:11px">' + r.sc + '</td><td>' + r.st + '</td></tr>').join('') : '<tr><td colspan="4" style="color:var(--mut)">暂无审计流水</td></tr>';
 }
 
+const LXRL_PREFIX = 'LXRL1:';
+async function lxRelayDeriveKey(pairCode) {
+  if (!window.crypto || !window.crypto.subtle) throw new Error('浏览器当前环境不支持 WebCrypto');
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode('lingxi-relay-e2ee.v1|' + pairCode), 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('com.lingxi.sync'), info: enc.encode('lingxi-e2ee-sync.v1') },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+async function lxRelaySeal(text, pairCode) {
+  if (!text || text.startsWith(LXRL_PREFIX)) return text;
+  const key = await lxRelayDeriveKey(pairCode);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+  const combined = new Uint8Array(12 + ct.length);
+  combined.set(iv, 0); combined.set(ct, 12);
+  let bin = '';
+  for (let i = 0; i < combined.length; i++) bin += String.fromCharCode(combined[i]);
+  return LXRL_PREFIX + btoa(bin);
+}
+async function lxRelayOpen(payload, pairCode) {
+  const rawText = payload || '';
+  if (!rawText.startsWith(LXRL_PREFIX)) return { text: rawText, encrypted: false, decrypted: false };
+  if (!window.crypto || !window.crypto.subtle) return { text: rawText, encrypted: true, decrypted: false };
+  try {
+    const bin = atob(rawText.slice(LXRL_PREFIX.length));
+    const raw = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+    if (raw.length < 28) return { text: rawText, encrypted: true, decrypted: false };
+    const key = await lxRelayDeriveKey(pairCode);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, key, raw.slice(12));
+    return { text: new TextDecoder().decode(plain), encrypted: true, decrypted: true };
+  } catch (_) {
+    return { text: rawText, encrypted: true, decrypted: false };
+  }
+}
+
 async function loadRelay() {
   const code = document.getElementById('relay-code').value.trim(); if (!code) return;
   const r = await api('GET', '/api/v1/relay/clipboard?code=' + encodeURIComponent(code));
   const f = document.getElementById('relay-feed'); f.innerHTML = '';
   if (!(r.items||[]).length) { f.innerHTML = '<div class="fi" style="color:var(--mut)">匹配码 ' + esc(code) + ' 暂无记录，可点击上方「模拟发短信验证码」或直接输入发送。</div>'; return; }
-  r.items.forEach(it => {
+  for (const it of r.items) {
+    const opened = await lxRelayOpen(it.contentText || '', code);
+    const displayText = opened.text;
     const d = document.createElement('div'); d.className = 'fi';
     const left = document.createElement('div');
     const tag = document.createElement('span'); tag.className = 'tag';
     tag.textContent = it.extractedCode ? ('💬 验证码 ' + it.extractedCode) : (it.senderDevice || '跨屏');
-    left.append(tag, document.createTextNode(' ' + (it.contentText || '')));
+    left.append(tag);
+    if (opened.encrypted) {
+      const etag = document.createElement('span'); etag.className = 'tag'; etag.style.marginLeft = '6px';
+      etag.textContent = opened.decrypted ? '🔒 E2EE 已解密' : '🔒 密文(码不匹配)';
+      left.append(etag);
+    }
+    left.append(document.createTextNode(' ' + displayText));
     const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = '复制';
-    btn.onclick = () => { navigator.clipboard?.writeText(it.contentText || ''); toast('已复制到剪贴板'); };
+    btn.onclick = () => { navigator.clipboard?.writeText(displayText); toast(opened.decrypted ? '已复制解密后的明文到剪贴板' : '已复制到剪贴板'); };
     d.append(left, btn); f.append(d);
-  });
+  }
 }
 
 function connectSSE() {
@@ -524,12 +585,21 @@ function connectSSE() {
 async function pushRelay() {
   const c = document.getElementById('relay-code').value.trim(), t = document.getElementById('relay-txt').value.trim();
   if (!c || !t) return toast('请输入匹配码和内容');
-  await api('POST', '/api/v1/relay/clipboard', { pairCode: c, contentText: t, senderDevice: 'Cloudflare Web' });
-  document.getElementById('relay-txt').value = ''; toast('已秒传至手机匹配码 ' + c); loadRelay();
+  const useE2EE = document.getElementById('relay-e2ee')?.checked;
+  let wireText = t, sealed = false;
+  if (useE2EE) {
+    try { wireText = await lxRelaySeal(t, c); sealed = wireText.startsWith(LXRL_PREFIX); }
+    catch (e) { toast('E2EE 不可用，已回退普通通道发送'); }
+  }
+  await api('POST', '/api/v1/relay/clipboard', { pairCode: c, contentText: wireText, senderDevice: 'Cloudflare Web' });
+  document.getElementById('relay-txt').value = '';
+  toast(sealed ? ('🔒 已端到端加密秒传至手机匹配码 ' + c) : ('已秒传至手机匹配码 ' + c));
+  loadRelay();
 }
 
 async function sendDemoOTP() {
-  const c = document.getElementById('relay-code').value.trim() || '886699', otp = Math.floor(100000 + Math.random() * 900000);
+  const c = document.getElementById('relay-code').value.trim(), otp = Math.floor(100000 + Math.random() * 900000);
+  if (!c) { toast('请先输入手机上显示的 6 位匹配码'); return; }
   await api('POST', '/api/v1/relay/clipboard', { pairCode: c, contentText: '【灵犀云安全】您的跨设备登录验证码为 ' + otp + '，5分钟内有效。', senderDevice: 'Cloudflare 控制台' });
   toast('已发送验证码 ' + otp + ' 到通道 ' + c); loadRelay();
 }

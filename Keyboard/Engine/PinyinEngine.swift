@@ -117,6 +117,8 @@ final class PinyinEngine {
 
     private var sysBigramCache: [String: [(next: String, bonus: Double)]] = [:]
     private var sysBigramOrder: [String] = []
+    /// 递归并发锁：保护只读 SQLite 复用预处理语句与内存缓存，防止预热/打字/内存警告并发竞态
+    private let engineLock = NSRecursiveLock()
 
     init(databaseURL: URL? = nil, userLexicon: UserLexicon = UserLexicon()) {
         self.userLexicon = userLexicon
@@ -150,7 +152,7 @@ final class PinyinEngine {
 
     private func openSystemDict(at url: URL) {
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK, let handle else {
             if let handle { sqlite3_close(handle) }
             return
@@ -186,12 +188,16 @@ final class PinyinEngine {
     }
 
     func invalidateCache() {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         cache.removeAll(keepingCapacity: true)
         cacheOrder.removeAll(keepingCapacity: true)
     }
 
     /// 响应 iOS `didReceiveMemoryWarning()`，主动清空查询与二元缓存并释放 SQLite 页缓存，严防 Jetsam 杀掉键盘扩展。
     func releaseMemory() {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         cache.removeAll(keepingCapacity: false)
         cacheOrder.removeAll(keepingCapacity: false)
         sysBigramCache.removeAll(keepingCapacity: false)
@@ -211,6 +217,8 @@ final class PinyinEngine {
         contextBeforeCursor: String? = nil,
         limit: Int = 128
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], correctedHint: String?) {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ([], [], nil) }
         let lower = trimmed.lowercased()
@@ -587,6 +595,8 @@ final class PinyinEngine {
         settings: LingxiSettings,
         limit: Int = 360
     ) -> [PinyinCandidate] {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let single = lookup(tokens: [token], start: 0, end: 1, openEnd: false, isT9: isT9, settings: settings)
             .filter { $0.word.count == 1 }
         return Array(single.prefix(limit))
@@ -600,6 +610,8 @@ final class PinyinEngine {
         contextBeforeCursor: String? = nil,
         limit: Int = 36
     ) -> WubiQueryResult {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let lower = raw.lowercased()
         guard !lower.isEmpty else {
             return WubiQueryResult(candidates: [], isEmptyCode: false, isUnique4: false, isTempPinyin: false, displayBuffer: "")
@@ -721,6 +733,8 @@ final class PinyinEngine {
 
     /// 反查汉字/词条的五笔 86 编码（如「工」-> `a/aaaa`，「你好」-> `wqvb`）。
     func wubiReverseHint(for word: String) -> String {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         guard !word.isEmpty, let stmt = wubiReverseStmt else { return "" }
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
@@ -746,6 +760,8 @@ final class PinyinEngine {
         raw: String,
         limit: Int = 36
     ) -> (candidates: [PinyinCandidate], displayBuffer: String) {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ([], "") }
         let body = String(trimmed.dropFirst()).lowercased().replacingOccurrences(of: "'", with: "")
@@ -848,6 +864,8 @@ final class PinyinEngine {
         endKeys: [Character],
         isEnglish: Bool
     ) -> [(pyFlat: String, py: String, word: String, lp: Double)] {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         guard !startKeys.isEmpty, !endKeys.isEmpty else { return [] }
         var out: [(String, String, String, Double)] = []
 
@@ -908,6 +926,8 @@ final class PinyinEngine {
         contextBeforeCursor: String? = nil,
         limit: Int = 128
     ) -> (tokens: [PinyinToken], candidates: [PinyinCandidate], leftSyllables: [String]) {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let ctxMap = settings.bigramPredictionEnabled
             ? contextBonusMap(from: contextBeforeCursor, userLearning: settings.userLearningEnabled)
             : [:]
@@ -952,6 +972,8 @@ final class PinyinEngine {
     // MARK: - 英文词表精确与前缀联想 (melt_eng)
 
     func exactEnglish(for raw: String) -> String? {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let lower = raw.lowercased()
         guard lower.count >= 2, lower.allSatisfy({ $0.isASCII && $0.isLetter }), let stmt = enExactStmt else {
             return nil
@@ -966,6 +988,8 @@ final class PinyinEngine {
     }
 
     func queryEnglish(prefix: String, limit: Int = 8) -> [String] {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         let lower = prefix.lowercased()
         guard !lower.isEmpty, lower.allSatisfy({ $0.isASCII && $0.isLetter }), let stmt = enStmt else {
             return []
@@ -1000,6 +1024,8 @@ final class PinyinEngine {
     // MARK: - 二元上下文下一词预测 & 光标上文消歧图
 
     func predictNext(after prevWord: String, userLearning: Bool, limit: Int = 10) -> [String] {
+        engineLock.lock()
+        defer { engineLock.unlock() }
         guard !prevWord.isEmpty else { return [] }
         var seen = Set<String>()
         var out: [String] = []
@@ -1018,13 +1044,16 @@ final class PinyinEngine {
 
     private func contextBonusMap(from context: String?, userLearning: Bool) -> [String: Double] {
         guard let context, !context.isEmpty else { return [:] }
+        // 1. 端侧零延迟结构化语境消歧（支持末尾数字+量词、星期/序数、高频动宾搭配）
+        var merged = ContextualReranker.bonusMap(forContextBeforeCursor: context)
+
+        // 2. 系统 Bigram + 个人习惯 Bigram
         let hanChars = context.suffix(8).filter { ch in
             guard let s = ch.unicodeScalars.first?.value else { return false }
             return (0x4E00...0x9FFF).contains(s)
         }
-        guard !hanChars.isEmpty else { return [:] }
+        guard !hanChars.isEmpty else { return merged }
         let arr = Array(hanChars)
-        var merged: [String: Double] = [:]
         for len in stride(from: min(4, arr.count), through: 1, by: -1) {
             let sub = String(arr[(arr.count - len)..<arr.count])
             let scale = 1.0 + 0.15 * Double(len - 1)

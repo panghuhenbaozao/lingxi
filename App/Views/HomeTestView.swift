@@ -1,7 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// 极简首页工作台（v5.2）：一屏看清状态、今日字数统计与纯净试打区，告别重复入口与演示噪音。
+/// 极简首页工作台（v6）：状态卡（键盘就绪 / 权限 / 云端 / 侧载同步）→ 今日打字 → 常用入口 → 试打区。
+/// 一屏看清状态，下一步该做什么永远只有一个主按钮。
 struct HomeTestView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var bgVoice = BackgroundVoiceEngine.shared
@@ -13,34 +14,44 @@ struct HomeTestView: View {
     @State private var showSignInSheet = false
     @State private var navigateToAccount = false
     @State private var navigateToStats = false
-    @State private var bridgeToast: String?
+    @State private var toast: String?
     @State private var isSyncingBridge = false
+    @State private var isTogglingVoice = false
     @State private var statsDebounceTask: Task<Void, Never>?
     @FocusState private var isTestingFocused: Bool
+
+    private enum KeyboardSetupState {
+        case notEnabled, noFullAccess, ready
+    }
+
+    private var setupState: KeyboardSetupState {
+        if !appState.isKeyboardEnabled { return .notEnabled }
+        if !appState.isKeyboardFullAccessConfirmed { return .noFullAccess }
+        return .ready
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    compactStatusCard
+                VStack(spacing: Design.Spacing.md) {
+                    statusCard
                     todayStatsCard
-                    cleanSandboxCard
+                    quickEntriesCard
+                    sandboxCard
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-                .padding(.bottom, 28)
+                .lxReadableWidth()
+                .padding(.horizontal, Design.Spacing.md)
+                .padding(.top, Design.Spacing.xs)
+                .padding(.bottom, Design.Spacing.xxl)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
             .navigationTitle("灵犀")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        if appState.isCloudAuthenticated {
-                            navigateToAccount = true
-                        } else {
-                            showSignInSheet = true
-                        }
+                        openAccount()
                     } label: {
                         UserAvatarView(size: 32, showEditBadge: false)
                     }
@@ -48,8 +59,12 @@ struct HomeTestView: View {
                     .accessibilityLabel(appState.isCloudAuthenticated ? "个人账号" : "登录灵犀账号")
                 }
             }
+            .lxToast($toast)
             .onAppear {
                 appState.reloadSharedThemeAndSettingsIfNeeded()
+            }
+            .onDisappear {
+                statsDebounceTask?.cancel()
             }
             .navigationDestination(isPresented: $navigateToAccount) {
                 CloudAccountView()
@@ -66,175 +81,283 @@ struct HomeTestView: View {
         }
     }
 
-    // MARK: - 1. 顶部精简状态卡（键盘状态 · 云端在线 · 侧载跨进程同步灯）
+    // MARK: - 1. 状态卡
 
-    private var compactStatusCard: some View {
+    private var statusCard: some View {
         let activePreset = appState.theme.activePreset(isSystemDark: colorScheme == .dark)
-        return VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(Color(Design.Palette.accent))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: appState.isKeyboardEnabled ? "checkmark.seal.fill" : "keyboard")
-                        .font(.system(size: 17, weight: .semibold))
+        let ready = setupState == .ready
+        return LXCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: ready ? "checkmark.seal.fill" : "keyboard")
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(Color.white)
-                }
+                        .frame(width: 44, height: 44)
+                        .background(
+                            ready ? Color(Design.Palette.success) : Color(Design.Palette.accent),
+                            in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+                        )
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(appState.isKeyboardEnabled ? "灵犀键盘已就绪" : "尚未启用灵犀键盘")
-                            .font(.system(size: 15.5, weight: .semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Circle()
-                            .fill(appState.isKeyboardEnabled ? Color(Design.Palette.success) : Color.orange)
-                            .frame(width: 7, height: 7)
-                    }
-                    Text("\(appState.settings.inputScheme.displayName) · \(activePreset.name)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 4)
-
-                Button {
-                    if appState.isCloudAuthenticated {
-                        navigateToAccount = true
-                    } else {
-                        showSignInSheet = true
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: appState.isCloudAuthenticated ? "icloud.fill" : "person.crop.circle")
-                            .font(.caption.bold())
-                        Text(appState.isCloudAuthenticated ? "云端在线" : "登录云端")
-                            .font(.caption.bold())
-                    }
-                    .padding(.horizontal, 11)
-                    .frame(height: 30)
-                    .background(
-                        appState.isCloudAuthenticated
-                            ? Color(Design.Palette.success).opacity(0.14)
-                            : Color(Design.Palette.accentSoft)
-                    )
-                    .foregroundStyle(
-                        appState.isCloudAuthenticated
-                            ? Color(Design.Palette.success)
-                            : Color(Design.Palette.accent)
-                    )
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-
-            if !appState.isKeyboardEnabled {
-                HStack(spacing: 10) {
-                    actionPill("开启教程", icon: "book", filled: false) { showGuide = true }
-                    actionPill("一键开启权限", icon: "lock.open.fill", filled: true) {
-                        appState.showPermissionsCenter = true
-                    }
-                }
-            } else if !appState.isKeyboardFullAccessConfirmed {
-                HStack(spacing: 8) {
-                    actionPill("一键权限", icon: "checkmark.shield", filled: false) {
-                        appState.showPermissionsCenter = true
-                    }
-                    actionPill(
-                        bgVoice.isWarm ? "🟢 后台语音增强在线" : "🎙️ 后台低延迟语音",
-                        icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
-                        filled: false
-                    ) {
-                        if bgVoice.isWarm {
-                            bgVoice.shutdown()
-                            appState.voiceEngineBannerMessage = "已关闭后台语音保活"
-                        } else {
-                            Task {
-                                let res = await bgVoice.warmUp()
-                                appState.voiceEngineBannerMessage = res.message
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(ready ? Color(Design.Palette.success) : Color(Design.Palette.warning))
+                                .frame(width: 8, height: 8)
+                            Text(statusTitle)
+                                .font(.callout.weight(.bold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            if appState.settings.incognitoModeEnabled {
+                                Button {
+                                    appState.settings.incognitoModeEnabled = false
+                                    toast = "已关闭无痕模式，恢复正常学习与记录"
+                                } label: {
+                                    LXTag(text: "无痕中", icon: "eye.slash.fill", tint: Color(Design.Palette.warning), filled: true)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("无痕模式已开启，点按退出")
                             }
                         }
+                        let packName = CustomKeyboardLayoutPack.find(id: appState.settings.activeLayoutPackID)?.name ?? "自定义布局"
+                        Text("\(appState.settings.inputScheme.displayName) · \(packName) · \(activePreset.name)")
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                            .lineLimit(1)
                     }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    actionPill("一键权限", icon: "checkmark.shield.fill", filled: false) {
-                        appState.showPermissionsCenter = true
-                    }
-                    actionPill(
-                        bgVoice.isWarm ? "🟢 后台语音增强在线" : "🎙️ 后台低延迟语音",
-                        icon: bgVoice.isWarm ? "waveform.circle.fill" : "mic.fill",
-                        filled: false
-                    ) {
-                        if bgVoice.isWarm {
-                            bgVoice.shutdown()
-                            appState.voiceEngineBannerMessage = "已关闭后台语音保活"
-                        } else {
-                            Task {
-                                let res = await bgVoice.warmUp()
-                                appState.voiceEngineBannerMessage = res.message
-                            }
-                        }
-                    }
-                }
-            }
 
-            if let voiceMsg = appState.voiceEngineBannerMessage {
-                Text(voiceMsg)
-                    .font(.caption2)
-                    .foregroundStyle(voiceMsg.hasPrefix("✓") ? Color(Design.Palette.success) : Color.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                    Spacer(minLength: 4)
 
-            // 仅当检测到免费侧载被系统剥离 App Group 时展示一键同步（含 AI 密钥、外观、设置与字数）
-            if !AppGroup.isAvailable {
-                Button {
-                    Task {
-                        isSyncingBridge = true
-                        defer { isSyncingBridge = false }
-                        let res = await appState.copySideloadBridgeTokenAndSync()
-                        bridgeToast = res.message
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        if isSyncingBridge {
-                            ProgressView().scaleEffect(0.75)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                                .font(.caption.bold())
-                                .foregroundStyle(.orange)
-                        }
-                        Text("免费侧载沙盒隔离 · 点此一键同步 AI 密钥、外观与设置给键盘")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .lineLimit(2)
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.bold())
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.orange.opacity(0.11))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    cloudPill
                 }
-                .buttonStyle(.plain)
-                .disabled(isSyncingBridge)
-            }
 
-            if let toast = bridgeToast {
-                Text(toast)
-                    .font(.caption2)
-                    .foregroundStyle(toast.hasPrefix("✓") ? Color(Design.Palette.success) : Color.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                setupActions
+
+                if let voiceMsg = appState.voiceEngineBannerMessage {
+                    inlineStatus(voiceMsg)
+                }
+
+                if !AppGroup.isAvailable {
+                    sideloadBanner
+                }
             }
         }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 2. 今日打字 3 指标卡（实时联动键盘上屏计数）
+    private var statusTitle: String {
+        switch setupState {
+        case .notEnabled: return "尚未启用灵犀键盘"
+        case .noFullAccess: return "键盘已启用 · 差一步"
+        case .ready: return "灵犀键盘已就绪"
+        }
+    }
+
+    private var cloudPill: some View {
+        let online = appState.isCloudAuthenticated
+        let tint = online ? Color(Design.Palette.success) : Color(Design.Palette.accent)
+        return Button {
+            openAccount()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: online ? "icloud.fill" : "person.crop.circle")
+                Text(online ? "云端在线" : "登录")
+            }
+            .font(.caption.bold())
+            .padding(.horizontal, 11)
+            .frame(height: 32)
+            .foregroundStyle(tint)
+            .background(tint.opacity(0.12), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(online ? "云端账号在线" : "登录云端账号")
+    }
+
+    @ViewBuilder
+    private var setupActions: some View {
+        switch setupState {
+        case .notEnabled:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("在系统设置里添加「灵犀输入法」并允许完全访问，就能在任何 App 里使用。")
+                    .font(.footnote)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button {
+                        showGuide = true
+                    } label: {
+                        Label("查看教程", systemImage: "book")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+
+                    Button {
+                        appState.showPermissionsCenter = true
+                    } label: {
+                        Label("一键开启", systemImage: "lock.open.fill")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                }
+            }
+
+        case .noFullAccess:
+            VStack(spacing: 10) {
+                Button {
+                    appState.showPermissionsCenter = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color(Design.Palette.warning))
+                        Text("开启「允许完全访问」后才能用 AI、剪贴板和语音")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        Text("去开启")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color(Design.Palette.warning), in: Capsule())
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(Design.Palette.warning).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                voiceToggleRow
+            }
+
+        case .ready:
+            HStack(spacing: 10) {
+                Button {
+                    appState.showPermissionsCenter = true
+                } label: {
+                    Label("权限中心", systemImage: "checkmark.shield")
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true, tint: Color(Design.Palette.ink)))
+
+                voiceToggleButton
+            }
+        }
+    }
+
+    /// 后台低延迟语音：一行说明 + 开关按钮（用于权限未全开时）
+    private var voiceToggleRow: some View {
+        HStack(spacing: 12) {
+            LXIconTile(
+                icon: bgVoice.isWarm ? "waveform" : "mic.fill",
+                tint: bgVoice.isWarm ? Color(Design.Palette.success) : Color(Design.Palette.accent)
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text("后台低延迟语音")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                Text(bgVoice.isWarm ? "已在后台保持，键盘里说话立即识别" : "保持后台待命，键盘语音免跳转")
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            Button(bgVoice.isWarm ? "关闭" : "开启") {
+                toggleBackgroundVoice()
+            }
+            .buttonStyle(LXCapsuleButtonStyle(prominent: !bgVoice.isWarm))
+            .disabled(isTogglingVoice)
+        }
+    }
+
+    private var voiceToggleButton: some View {
+        Button {
+            toggleBackgroundVoice()
+        } label: {
+            HStack(spacing: 6) {
+                if isTogglingVoice {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: bgVoice.isWarm ? "waveform" : "mic.fill")
+                }
+                Text(bgVoice.isWarm ? "语音增强在线" : "开启后台语音")
+            }
+        }
+        .buttonStyle(LXCapsuleButtonStyle(
+            prominent: false,
+            wide: true,
+            tint: bgVoice.isWarm ? Color(Design.Palette.success) : Color(Design.Palette.accent)
+        ))
+        .disabled(isTogglingVoice)
+        .accessibilityHint(bgVoice.isWarm ? "点按关闭后台语音保活" : "点按开启后台低延迟语音")
+    }
+
+    private func inlineStatus(_ message: String) -> some View {
+        let ok = message.hasPrefix("✓") || message.hasPrefix("已")
+        let clean = message.hasPrefix("✓")
+            ? String(message.dropFirst()).trimmingCharacters(in: .whitespaces)
+            : message
+        return HStack(alignment: .top, spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "info.circle.fill")
+                .font(.caption)
+                .foregroundStyle(ok ? Color(Design.Palette.success) : Color(Design.Palette.warning))
+            Text(clean)
+                .font(.caption)
+                .foregroundStyle(Color(Design.Palette.stone))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 仅当检测到免费侧载被系统剥离 App Group 时展示一键同步（含 AI 密钥、外观、设置与字数）
+    private var sideloadBanner: some View {
+        Button {
+            Task {
+                isSyncingBridge = true
+                defer { isSyncingBridge = false }
+                let res = await appState.copySideloadBridgeTokenAndSync()
+                toast = res.message.hasPrefix("✓")
+                    ? String(res.message.dropFirst()).trimmingCharacters(in: .whitespaces)
+                    : res.message
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Group {
+                    if isSyncingBridge {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color(Design.Palette.accent))
+                    }
+                }
+                .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("免费侧载模式")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    Text("改完 AI 密钥、外观或设置后，需要手动同步给键盘")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Text("同步")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(Design.Palette.accent), in: Capsule())
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(Design.Palette.accentSoft), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isSyncingBridge)
+    }
+
+    // MARK: - 2. 今日打字（实时联动键盘上屏计数）
 
     private var todayStatsCard: some View {
         let stats = appState.typingStatsSummary
@@ -244,148 +367,271 @@ struct HomeTestView: View {
         return Button {
             navigateToStats = true
         } label: {
-            HStack(spacing: 0) {
-                statCell(value: "\(todayCount)", unit: "字", label: "今日打字")
-                Divider().frame(height: 30)
-                statCell(
-                    value: avgSpeed > 0.5 ? String(format: "%.0f", avgSpeed) : "--",
-                    unit: avgSpeed > 0.5 ? "字/分" : "",
-                    label: "平均速率"
-                )
-                Divider().frame(height: 30)
-                statCell(value: "\(stats.streakDays)", unit: "天", label: "连续打卡")
+            LXCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("今日打字")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                        Spacer()
+                        HStack(spacing: 2) {
+                            Text("详细统计")
+                            Image(systemName: "chevron.right")
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.stone))
+                    }
+                    HStack(spacing: 0) {
+                        statCell(value: todayCount.formatted(), unit: "字", label: "今日上屏")
+                        statDivider
+                        statCell(
+                            value: avgSpeed > 0.5 ? String(format: "%.0f", avgSpeed) : "--",
+                            unit: avgSpeed > 0.5 ? "字/分" : "",
+                            label: "平均速率"
+                        )
+                        statDivider
+                        statCell(value: "\(stats.streakDays)", unit: "天", label: "连续打卡")
+                    }
+                }
             }
-            .padding(.vertical, 14)
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityHint("查看详细打字统计")
+    }
+
+    private var statDivider: some View {
+        Rectangle()
+            .fill(Color(Design.Palette.hairline))
+            .frame(width: 0.5, height: 32)
     }
 
     private func statCell(value: String, unit: String, label: String) -> some View {
         VStack(spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 24, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(Color(Design.Palette.ink))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                 if !unit.isEmpty {
                     Text(unit)
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color(Design.Palette.stone))
                 }
             }
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color(Design.Palette.stone))
         }
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - 3. 纯净试打框（零广告、零演示按钮、专心试打）
+    // MARK: - 3. 常用入口
 
-    private var cleanSandboxCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text("试打区")
-                    .font(.system(size: 15, weight: .semibold))
+    private var quickEntriesCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("常用功能")
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color(Design.Palette.ink))
-
-                Spacer()
-
-                Button {
-                    appState.showVoiceTranslator = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "mic.fill")
-                            .font(.caption2.bold())
-                        Text("语音互译")
-                            .font(.caption.bold())
+                HStack(spacing: 8) {
+                    quickEntry("语音互译", icon: "mic.fill") {
+                        appState.showVoiceTranslator = true
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color(Design.Palette.accentSoft))
-                    .foregroundStyle(Color(Design.Palette.accent))
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-
-                if !sandboxText.isEmpty {
-                    Text("\(sandboxText.count) 字")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-
-                    Button {
-                        sandboxText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.tertiary)
+                    quickEntry("截屏识图", icon: "text.viewfinder") {
+                        appState.showScreenshotVision = true
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("清空试打区")
-                }
-
-                if isTestingFocused {
-                    Button {
-                        isTestingFocused = false
-                    } label: {
-                        Image(systemName: "keyboard.chevron.compact.down")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    quickEntry("AI 智脑", icon: "sparkles") {
+                        selectTab(2)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("收起键盘")
-                }
-            }
-
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $sandboxText)
-                    .focused($isTestingFocused)
-                    .scrollContentBackground(.hidden)
-                    .font(.system(size: 16))
-                    .padding(12)
-                    .frame(minHeight: 196)
-                    .background(Color(.tertiarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .onChange(of: sandboxText) { _ in
-                        statsDebounceTask?.cancel()
-                        statsDebounceTask = Task {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                            guard !Task.isCancelled else { return }
-                            await MainActor.run {
-                                appState.reloadTypingStatsSummary()
-                            }
-                        }
+                    quickEntry("换皮肤", icon: "paintpalette") {
+                        selectTab(1)
                     }
-
-                if sandboxText.isEmpty {
-                    Text("点这里切出「灵犀输入法」试打，上方今日字数会实时更新。")
-                        .font(.system(size: 14.5))
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 17)
-                        .padding(.top, 20)
-                        .allowsHitTesting(false)
                 }
             }
         }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func actionPill(_ title: String, icon: String, filled: Bool, action: @escaping () -> Void) -> some View {
+    private func quickEntry(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
+            VStack(spacing: 8) {
+                LXIconTile(icon: icon, size: 44)
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color(Design.Palette.charcoal))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            .foregroundStyle(filled ? Color.white : Color(Design.Palette.ink))
-            .frame(maxWidth: .infinity, minHeight: 38)
-            .background(filled ? Color(Design.Palette.accent) : Color(Design.Palette.surface))
-            .clipShape(Capsule())
+            .frame(maxWidth: .infinity, minHeight: 72)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - 4. 试打区
+
+    private var sandboxCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("试打区")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    if !sandboxText.isEmpty {
+                        Text("\(sandboxText.count) 字")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color(Design.Palette.stone))
+                    }
+                    Spacer()
+                    if isTestingFocused {
+                        Button {
+                            isTestingFocused = false
+                        } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(Color(Design.Palette.stone))
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("收起键盘")
+                    }
+                }
+
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $sandboxText)
+                        .focused($isTestingFocused)
+                        .scrollContentBackground(.hidden)
+                        .font(.system(size: 16))
+                        .padding(10)
+                        .frame(minHeight: 180)
+                        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+                                .stroke(isTestingFocused ? Color(Design.Palette.accent).opacity(0.6) : Color.clear, lineWidth: 1)
+                        )
+                        .onChange(of: sandboxText) { _ in
+                            statsDebounceTask?.cancel()
+                            statsDebounceTask = Task {
+                                try? await Task.sleep(nanoseconds: 350_000_000)
+                                guard !Task.isCancelled else { return }
+                                await MainActor.run {
+                                    appState.reloadTypingStatsSummary()
+                                }
+                            }
+                        }
+
+                    if sandboxText.isEmpty {
+                        Text("点这里切到「灵犀输入法」试打：\n可试试 v+3d 相对日期、v180cm 换算、/en 斜杠宏或仓式划动。")
+                            .font(.subheadline)
+                            .foregroundStyle(Color(Design.Palette.muted))
+                            .lineSpacing(3)
+                            .padding(.leading, 15)
+                            .padding(.top, 18)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        sandboxTipChip("填离线体检样例") {
+                            sandboxText = "各位好,我们在iPhone16上完成了的的闭环联调!明天3点见"
+                            isTestingFocused = true
+                        }
+                        if !sandboxText.isEmpty {
+                            sandboxTipChip("一键离线排版") {
+                                let fixed = OfflineTextLinter.autoFix(sandboxText)
+                                if fixed != sandboxText {
+                                    sandboxText = fixed
+                                    toast = "已完成离线盘古排版与错字修复"
+                                } else {
+                                    toast = "当前文本排版已很规范"
+                                }
+                            }
+                            sandboxTipChip("一键转繁体") {
+                                sandboxText = ChineseScriptConverter.toTraditional(sandboxText, variant: appState.settings.traditionalVariant)
+                                toast = "已按「\(appState.settings.traditionalVariant.displayName)」转换"
+                            }
+                        }
+                        sandboxTipChip("模拟验证码短信") {
+                            let code = String(Int.random(in: 100000...999999))
+                            let sms = "【灵犀】您的登录验证码为 \(code)，5分钟内有效。"
+                            UIPasteboard.general.string = sms
+                            _ = ClipboardStore.record(sms)
+                            toast = "已复制模拟验证码 \(code)，点输入框即可见顶栏一键填入"
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if !sandboxText.isEmpty {
+                    HStack(spacing: 8) {
+                        Button {
+                            UIPasteboard.general.string = sandboxText
+                            toast = "已复制试打内容"
+                        } label: {
+                            Label("复制", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+
+                        Button {
+                            sandboxText = ""
+                        } label: {
+                            Label("清空", systemImage: "xmark")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.stone)))
+
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func sandboxTipChip(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Color(Design.Palette.ink))
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Color(Design.Palette.surface), in: Capsule())
+            .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
+            .buttonStyle(.plain)
+    }
+
+    private func openAccount() {
+        if appState.isCloudAuthenticated {
+            navigateToAccount = true
+        } else {
+            showSignInSheet = true
+        }
+    }
+
+    private func selectTab(_ index: Int) {
+        if let onSelectTab {
+            onSelectTab(index)
+        } else {
+            appState.requestedTab = index
+        }
+    }
+
+    @MainActor
+    private func toggleBackgroundVoice() {
+        if bgVoice.isWarm {
+            bgVoice.shutdown()
+            appState.voiceEngineBannerMessage = "已关闭后台语音保活"
+        } else {
+            isTogglingVoice = true
+            Task {
+                let res = await bgVoice.warmUp()
+                await MainActor.run {
+                    appState.voiceEngineBannerMessage = res.message
+                    isTogglingVoice = false
+                }
+            }
+        }
     }
 }

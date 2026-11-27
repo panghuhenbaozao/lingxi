@@ -70,7 +70,7 @@ final class PasteboardMonitor {
     private var lastObservedChangeCount: Int = -1
 
     func refresh(settings: LingxiSettings, force: Bool = false, onChange: @escaping (ClipboardBannerState) -> Void) {
-        guard settings.clipboardBannerEnabled else {
+        guard settings.clipboardBannerEnabled && !settings.incognitoModeEnabled else {
             if bannerState != .hidden {
                 bannerState = .hidden
                 onChange(.hidden)
@@ -104,6 +104,17 @@ final class PasteboardMonitor {
                 bannerState = .readyPreview(item: pending)
                 onChange(bannerState)
             } else {
+                bannerState = .hidden
+                onChange(.hidden)
+            }
+            return
+        }
+
+        // 1.5 保险箱复制的敏感内容带有 Concealed 标记：不入历史、不弹预览（只检查类型，不读取内容）
+        if ConcealedPasteboard.isConcealed(pb) {
+            dismissedChangeCount = currentCount
+            ClipboardStore.markChangeCountHandled(currentCount)
+            if bannerState != .hidden {
                 bannerState = .hidden
                 onChange(.hidden)
             }
@@ -170,6 +181,11 @@ final class PasteboardMonitor {
 
     func handleCapturedPaste(_ text: String, settings: LingxiSettings) -> (item: ClipboardItem?, shouldOfferOTPChoice: Bool) {
         let count = UIPasteboard.general.changeCount
+        // 隐身无痕模式或保险箱内容：照常粘贴，但绝不写入剪贴板历史
+        if settings.incognitoModeEnabled || ConcealedPasteboard.isConcealed() {
+            dismissCurrent()
+            return (nil, false)
+        }
         let item = ClipboardStore.record(text, changeCount: nil)
         if let item, settings.smartOTPExtraction, let code = item.extractedCode, item.text.count > code.count + 4 {
             activeChangeCount = count

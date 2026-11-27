@@ -139,7 +139,7 @@ final class BackgroundVoiceEngine: ObservableObject {
             liveState.errorText = nil
             liveState.statusText = "✓ 后台语音引擎已就绪 · 切回微信/抖音即可在键盘内直接说话"
             broadcastState(force: true)
-            return (true, "✓ 后台语音引擎已激活！请点左上角返回原 App，即可在键盘内直接点「🎙️ 开始说话」实时转换（无需再次跳出）。")
+            return (true, "✓ 语音输入已就绪。点左上角返回原来的 App，在键盘里点「开始说话」即可，不用再跳回来。")
         } catch {
             return (false, "激活语音引擎失败：\(error.localizedDescription)")
         }

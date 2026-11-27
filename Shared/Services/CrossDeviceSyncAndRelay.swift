@@ -27,7 +27,7 @@ public enum SyncTransportMode: String, Codable, CaseIterable, Identifiable {
         case .lan:
             return "同 Wi-Fi 双机通过 NWListener + 6 位配对码 ChaCha20-Poly1305 直连互导"
         case .e2eeCloud:
-            return "端侧 LXE1 密文封装，服务端零知识存取，支持官方云与 Vaultwarden 式自托管"
+            return "端侧 LXE2 零知识密文封装，服务端数学不可解，支持官方云与自托管"
         }
     }
 
@@ -92,9 +92,44 @@ public struct RelayedClipboardItem: Codable, Equatable, Identifiable {
     public let createdAt: Int
 }
 
+/// 跨屏剪贴板可选端到端加密信封（由匹配码经 HKDF-SHA256 派生 AES-256-GCM 密钥，前缀 `LXRL1:`；明文自动直通兼容网页端）
+public enum ClipboardRelayCrypto {
+    public static let prefix = "LXRL1:"
+
+    private static func deriveKey(pairCode: String) -> SymmetricKey {
+        SyncCrypto.deriveSyncKey(from: Data(("lingxi-relay-e2ee.v1|" + pairCode).utf8))
+    }
+
+    public static func seal(_ text: String, pairCode: String) throws -> String {
+        guard !text.hasPrefix(prefix) else { return text }
+        let key = deriveKey(pairCode: pairCode)
+        let sealed = try SyncCrypto.seal(Data(text.utf8), key: key)
+        return prefix + sealed.base64EncodedString()
+    }
+
+    public static func open(_ payload: String, pairCode: String) -> String {
+        guard payload.hasPrefix(prefix) else { return payload }
+        let b64 = String(payload.dropFirst(prefix.count))
+        guard let raw = Data(base64Encoded: b64) else { return payload }
+        let key = deriveKey(pairCode: pairCode)
+        guard let plain = try? SyncCrypto.open(raw, key: key),
+              let text = String(data: plain, encoding: .utf8) else {
+            return payload
+        }
+        return text
+    }
+}
+
 public struct ClipboardRelayConfig: Codable, Equatable {
-    public var pairCode: String = "886699"
+    /// 旧版本所有用户共用的默认匹配码。所有没改过码的人都在同一个通道里，
+    /// 会互相收到对方的剪贴板内容，因此读取时自动换成本机随机码。
+    public static let legacySharedPairCode = "886699"
+
+    /// 新安装默认生成随机匹配码，不再共用固定值
+    public var pairCode: String = ClipboardRelayService.generateSixDigitCode()
     public var autoRelayEnabled: Bool = true
+    /// 可选：手机对手机接力开启后，正文使用匹配码派生的 AES-256-GCM 密文 (`LXRL1:`) 中转
+    public var relayEncryptEnabled: Bool = false
     public var lastPulledID: Int = 0
     public var syncTransportMode: SyncTransportMode = .e2eeCloud
     public var planTier: OpenCorePlanTier = .free
@@ -105,8 +140,39 @@ public struct ClipboardRelayConfig: Codable, Equatable {
 
     public init() {}
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pairCode = try c.decodeIfPresent(String.self, forKey: .pairCode) ?? ClipboardRelayService.generateSixDigitCode()
+        autoRelayEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoRelayEnabled) ?? true
+        relayEncryptEnabled = try c.decodeIfPresent(Bool.self, forKey: .relayEncryptEnabled) ?? false
+        lastPulledID = try c.decodeIfPresent(Int.self, forKey: .lastPulledID) ?? 0
+        syncTransportMode = try c.decodeIfPresent(SyncTransportMode.self, forKey: .syncTransportMode) ?? .e2eeCloud
+        planTier = try c.decodeIfPresent(OpenCorePlanTier.self, forKey: .planTier) ?? .free
+        lanPeerHost = try c.decodeIfPresent(String.self, forKey: .lanPeerHost) ?? "127.0.0.1"
+        lanPort = try c.decodeIfPresent(Int.self, forKey: .lanPort) ?? 18787
+    }
+
     public static func load() -> ClipboardRelayConfig {
-        AppGroup.readJSON(ClipboardRelayConfig.self, from: fileName) ?? ClipboardRelayConfig()
+        guard let stored = AppGroup.readJSON(ClipboardRelayConfig.self, from: fileName) else {
+            // 首次使用：生成随机码并立即保存，保证 App 与键盘读到同一个码
+            let fresh = ClipboardRelayConfig()
+            fresh.save()
+            return fresh
+        }
+        if needsPrivatePairCode(stored.pairCode) {
+            var migrated = stored
+            migrated.pairCode = ClipboardRelayService.generateSixDigitCode()
+            migrated.lastPulledID = 0
+            // 只有写入成功才换码（例如键盘未开完全访问时写不进共享目录），避免每次读取都得到不同的码
+            if migrated.save() { return migrated }
+        }
+        return stored
+    }
+
+    /// 空码或旧版共用码都需要换成本机私有码
+    public static func needsPrivatePairCode(_ code: String) -> Bool {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == legacySharedPairCode
     }
 
     @discardableResult
@@ -119,11 +185,18 @@ public final class ClipboardRelayService {
     public static let shared = ClipboardRelayService()
 
     private let session: URLSession
+    private let sseSession: URLSession
 
     public init(timeout: TimeInterval = 10) {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = timeout
+        cfg.timeoutIntervalForResource = timeout + 5
         self.session = URLSession(configuration: cfg)
+
+        let sseCfg = URLSessionConfiguration.ephemeral
+        sseCfg.timeoutIntervalForRequest = 35
+        sseCfg.timeoutIntervalForResource = 90
+        self.sseSession = URLSession(configuration: sseCfg)
     }
 
     /// 生成随机 6 位数字跨屏匹配码
@@ -153,9 +226,13 @@ public final class ClipboardRelayService {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let relayCfg = ClipboardRelayConfig.load()
+        let wireText = relayCfg.relayEncryptEnabled
+            ? ((try? ClipboardRelayCrypto.seal(trimmed, pairCode: code)) ?? trimmed)
+            : trimmed
         req.httpBody = try JSONSerialization.data(withJSONObject: [
             "pairCode": code,
-            "contentText": trimmed,
+            "contentText": wireText,
             "senderDevice": senderDevice
         ])
 
@@ -163,7 +240,17 @@ public final class ClipboardRelayService {
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw CloudBackendError.serverError("跨屏秒传失败，请检查后端连接")
         }
-        let item = try JSONDecoder().decode(RelayedClipboardItem.self, from: data)
+        let rawItem = try JSONDecoder().decode(RelayedClipboardItem.self, from: data)
+        let decodedText = ClipboardRelayCrypto.open(rawItem.contentText, pairCode: code)
+        let item = RelayedClipboardItem(
+            id: rawItem.id,
+            pairCode: rawItem.pairCode,
+            contentText: decodedText,
+            category: rawItem.category,
+            extractedCode: rawItem.extractedCode,
+            senderDevice: rawItem.senderDevice,
+            createdAt: rawItem.createdAt
+        )
         _ = ClipboardStore.record(item.contentText, changeCount: nil)
         return item
     }
@@ -185,14 +272,25 @@ public final class ClipboardRelayService {
             let items: [RelayedClipboardItem]
         }
         let wrapper = try JSONDecoder().decode(Wrapper.self, from: data)
+        let decryptedItems = wrapper.items.map { item in
+            RelayedClipboardItem(
+                id: item.id,
+                pairCode: item.pairCode,
+                contentText: ClipboardRelayCrypto.open(item.contentText, pairCode: code),
+                category: item.category,
+                extractedCode: item.extractedCode,
+                senderDevice: item.senderDevice,
+                createdAt: item.createdAt
+            )
+        }
         var relayCfg = ClipboardRelayConfig.load()
-        if let newest = wrapper.items.first, newest.id > relayCfg.lastPulledID {
+        if let newest = decryptedItems.first, newest.id > relayCfg.lastPulledID {
             relayCfg.lastPulledID = newest.id
             relayCfg.save()
             // 入库且不标记 lastHandledChangeCount，使键盘顶部栏立即接管展示该跨屏内容或验证码
             _ = ClipboardStore.record(newest.contentText, changeCount: nil)
         }
-        return wrapper.items
+        return decryptedItems
     }
 
     /// 建立原生 Server-Sent Events (SSE) 实时推流长连接，电脑端点击「秒传」时手机毫秒级收到并自动写入剪贴板与顶栏接管队列
@@ -201,6 +299,7 @@ public final class ClipboardRelayService {
         onUpdate: @escaping @MainActor ([RelayedClipboardItem]) -> Void
     ) -> Task<Void, Never> {
         let code = pairCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let streamSession = self.sseSession
         return Task {
             while !Task.isCancelled && !code.isEmpty {
                 let baseURL = CloudBackendConfig.load().normalizedBaseURL
@@ -212,7 +311,7 @@ public final class ClipboardRelayService {
                 req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                 req.timeoutInterval = 30
                 do {
-                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    let (bytes, resp) = try await streamSession.bytes(for: req)
                     guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         try? await Task.sleep(nanoseconds: 4_000_000_000)
                         continue
@@ -226,13 +325,24 @@ public final class ClipboardRelayService {
                               let parsed = try? JSONDecoder().decode(SSEWrapper.self, from: data),
                               !parsed.items.isEmpty else { continue }
 
+                        let opened = parsed.items.map { item in
+                            RelayedClipboardItem(
+                                id: item.id,
+                                pairCode: item.pairCode,
+                                contentText: ClipboardRelayCrypto.open(item.contentText, pairCode: code),
+                                category: item.category,
+                                extractedCode: item.extractedCode,
+                                senderDevice: item.senderDevice,
+                                createdAt: item.createdAt
+                            )
+                        }
                         var relayCfg = ClipboardRelayConfig.load()
-                        if let newest = parsed.items.first, newest.id > relayCfg.lastPulledID {
+                        if let newest = opened.first, newest.id > relayCfg.lastPulledID {
                             relayCfg.lastPulledID = newest.id
                             relayCfg.save()
                             _ = ClipboardStore.record(newest.contentText, changeCount: nil)
                         }
-                        await onUpdate(parsed.items)
+                        await onUpdate(opened)
                     }
                 } catch {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -256,7 +366,7 @@ public final class LANSyncService: SyncService {
     public private(set) var isListening: Bool = false
     public private(set) var receivedPacketCount: Int = 0
 
-    public init(pairCode: String = "886699", hostEndpoint: String = "127.0.0.1", port: UInt16 = 18787) {
+    public init(pairCode: String = ClipboardRelayService.generateSixDigitCode(), hostEndpoint: String = "127.0.0.1", port: UInt16 = 18787) {
         self.pairCode = pairCode
         self.hostEndpoint = hostEndpoint
         self.port = port
@@ -408,6 +518,12 @@ public struct CommunityLexiconPack: Codable, Equatable, Identifiable {
 public final class CommunityLexiconService {
     public static let shared = CommunityLexiconService()
     private static let subscribedFileName = "lingxi_community_subscriptions.json"
+    private let remoteSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 15
+        cfg.timeoutIntervalForResource = 30
+        return URLSession(configuration: cfg)
+    }()
     private static let customPacksFileName = "lingxi_community_custom_packs.json"
 
     /// 内置离线可用的开源社区 TSV 词包目录（即使未联网也能在 App 内一键订阅并注入引擎）
@@ -566,7 +682,7 @@ public final class CommunityLexiconService {
         guard let url = URL(string: baseURL + "/api/v1/community/packs") else {
             throw CloudBackendError.invalidURL
         }
-        let (data, resp) = try await URLSession.shared.data(from: url)
+        let (data, resp) = try await remoteSession.data(from: url)
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw CloudBackendError.serverError("拉取社区词典仓失败")
         }
@@ -691,6 +807,25 @@ public struct EngineHealthReport: Equatable {
     public let activeTransport: SyncTransportMode
     public let activePlan: OpenCorePlanTier
     public let suggestions: [String]
+}
+
+extension EngineHealthReport {
+    /// 页面首次出现前的轻量占位（不读盘），真实结果由 `diagnose()` 在页面出现后计算
+    static let placeholder = EngineHealthReport(
+        healthScore: 100,
+        userWordCount: 0,
+        pinnedWordCount: 0,
+        lowFreqNoiseCount: 0,
+        customPhraseCount: 0,
+        clipboardItemCount: 0,
+        syncLedgerRecordCount: 0,
+        tombstoneCount: 0,
+        appGroupAvailable: AppGroup.isAvailable,
+        fileProtectionEnabled: true,
+        activeTransport: ClipboardRelayConfig().syncTransportMode,
+        activePlan: ClipboardRelayConfig().planTier,
+        suggestions: []
+    )
 }
 
 public struct SelfHealingOutcome: Equatable {

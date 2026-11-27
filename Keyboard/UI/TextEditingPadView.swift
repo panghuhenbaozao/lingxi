@@ -1,6 +1,8 @@
 import UIKit
 
-/// 专业文本编辑台（借鉴 FlorisBoard / HeliBoard 精华：精准方向键、单指扩选模式、行首行尾、全选复制剪切粘贴、一键排版微整形）。
+/// 专业文本编辑台 v2（借鉴 FlorisBoard / HeliBoard / WeType 精华）：
+/// - 4 行 16 键桌面级控制：精准 4 向光标、行首/行尾、撤销、按词删、隐私安全粘贴/复制/剪切；
+/// - 零联网文本工坊行：离线文案体检排版（修重复字+标点+盘古空格）、一键隐私脱敏、OpenCC 繁⇄简互转、一键去乱空行。
 final class TextEditingPadView: UIView {
     enum EditAction {
         case moveLeft
@@ -14,6 +16,11 @@ final class TextEditingPadView: UIView {
         case paste
         case selectAll
         case deleteBackward
+        case undo
+        case deleteWordBefore
+        case offlineLintFix
+        case privacyRedact
+        case toggleTraditional
         case formatPanguSpace
         case formatCollapseLines
     }
@@ -26,7 +33,8 @@ final class TextEditingPadView: UIView {
     private let titleLabel = UILabel()
     private let closeButton = ActionClosureButton(type: .system)
     private let bodyStack = UIStackView()
-    private var allActionButtons: [ActionClosureButton] = []
+    private var standardButtons: [ActionClosureButton] = []
+    private var smartToolButtons: [ActionClosureButton] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -43,7 +51,7 @@ final class TextEditingPadView: UIView {
         headerStack.spacing = 8
         addSubview(headerStack)
 
-        titleLabel.text = "📐 专业光标与排版编辑台"
+        titleLabel.text = "📐 专业光标与离线排版编辑台"
         titleLabel.font = .systemFont(ofSize: 13.5, weight: .bold)
         headerStack.addArrangedSubview(titleLabel)
 
@@ -57,49 +65,63 @@ final class TextEditingPadView: UIView {
 
         bodyStack.axis = .vertical
         bodyStack.distribution = .fillEqually
-        bodyStack.spacing = 7
+        bodyStack.spacing = 6
         addSubview(bodyStack)
 
-        // 第 1 行：快捷编辑动作
+        // 第 1 行：行首/上移/行尾/退格
         bodyStack.addArrangedSubview(makeRow([
             ("行首 ⇤", .lineStart),
             ("↑ 上移", .moveUp),
             ("行尾 ⇥", .lineEnd),
             ("⌫ 删除", .deleteBackward),
-        ]))
+        ], smartStyle: false))
 
-        // 第 2 行：核心左右移动 + 复制粘贴
+        // 第 2 行：核心方向 + 撤销
         bodyStack.addArrangedSubview(makeRow([
             ("← 左移", .moveLeft),
             ("↓ 下移", .moveDown),
             ("右移 →", .moveRight),
-            ("📋 粘贴", .paste),
-        ]))
+            ("↶ 撤销", .undo),
+        ], smartStyle: false))
 
-        // 第 3 行：剪贴操作 + 一键排版微整形
+        // 第 3 行：隐私粘贴 / 复制 / 剪切 / 按词删
         bodyStack.addArrangedSubview(makeRow([
+            ("📋 粘贴", .paste),
             ("复制", .copy),
             ("剪切", .cut),
-            ("✨ 中英加空格", .formatPanguSpace),
-            ("🧹 去乱空行", .formatCollapseLines),
-        ]))
+            ("✂️ 删前词", .deleteWordBefore),
+        ], smartStyle: false))
+
+        // 第 4 行：零联网智能文本工具
+        bodyStack.addArrangedSubview(makeRow([
+            ("🩺 离线排版", .offlineLintFix),
+            ("🛡️ 脱敏", .privacyRedact),
+            ("繁⇄简", .toggleTraditional),
+            ("🧹 去空行", .formatCollapseLines),
+        ], smartStyle: true))
     }
 
-    private func makeRow(_ items: [(String, EditAction)]) -> UIStackView {
+    private func makeRow(_ items: [(String, EditAction)], smartStyle: Bool) -> UIStackView {
         let row = UIStackView()
         row.axis = .horizontal
         row.distribution = .fillEqually
-        row.spacing = 7
+        row.spacing = 6
         for (title, act) in items {
             let btn = ActionClosureButton(type: .system)
             btn.setTitle(title, for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 13.5, weight: .semibold)
+            btn.titleLabel?.font = .systemFont(ofSize: smartStyle ? 12.5 : 13, weight: .semibold)
+            btn.titleLabel?.adjustsFontSizeToFitWidth = true
+            btn.titleLabel?.minimumScaleFactor = 0.78
             btn.layer.cornerRadius = 9
             btn.layer.cornerCurve = .continuous
             btn.actionHandler = { [weak self] in
                 self?.onAction?(act)
             }
-            allActionButtons.append(btn)
+            if smartStyle {
+                smartToolButtons.append(btn)
+            } else {
+                standardButtons.append(btn)
+            }
             row.addArrangedSubview(btn)
         }
         return row
@@ -108,9 +130,9 @@ final class TextEditingPadView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let pad: CGFloat = 10
-        headerStack.frame = CGRect(x: pad, y: 6, width: bounds.width - pad * 2, height: 28)
-        let bodyY = headerStack.frame.maxY + 8
-        bodyStack.frame = CGRect(x: pad, y: bodyY, width: bounds.width - pad * 2, height: max(90, bounds.height - bodyY - 8))
+        headerStack.frame = CGRect(x: pad, y: 6, width: bounds.width - pad * 2, height: 26)
+        let bodyY = headerStack.frame.maxY + 7
+        bodyStack.frame = CGRect(x: pad, y: bodyY, width: bounds.width - pad * 2, height: max(120, bounds.height - bodyY - 8))
     }
 
     func apply(theme: ResolvedTheme) {
@@ -119,11 +141,17 @@ final class TextEditingPadView: UIView {
         titleLabel.textColor = theme.keyText
         closeButton.backgroundColor = theme.accentFill
         closeButton.setTitleColor(theme.accentText, for: .normal)
-        for btn in allActionButtons {
+        for btn in standardButtons {
             btn.backgroundColor = theme.keyFill
             btn.setTitleColor(theme.keyText, for: .normal)
             btn.layer.borderWidth = 0.5
             btn.layer.borderColor = theme.keyBorder.cgColor
+        }
+        for btn in smartToolButtons {
+            btn.backgroundColor = theme.accentFill.withAlphaComponent(0.14)
+            btn.setTitleColor(theme.candidateHighlight, for: .normal)
+            btn.layer.borderWidth = 0.5
+            btn.layer.borderColor = theme.accentFill.withAlphaComponent(0.28).cgColor
         }
     }
 }

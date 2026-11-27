@@ -198,8 +198,34 @@ final class ClipboardStore {
         set { _ = AppGroup.writeJSON(newValue, to: fileName, protected: true) }
     }
 
+    static let otpAutoExpireInterval: TimeInterval = 15 * 60
+
+    /// 纯函数：清理超过 15 分钟的未置顶验证码条目（防止剪贴板历史被废验证码刷屏）
+    static func pruneExpiredOTPs(_ list: [ClipboardItem], enabled: Bool, now: Date = Date()) -> [ClipboardItem] {
+        guard enabled else { return list }
+        let cutoff = now.addingTimeInterval(-otpAutoExpireInterval)
+        return list.filter { item in
+            if item.isPinned { return true }
+            let isOTP = (item.category == .code || item.extractedCode != nil)
+            if isOTP && item.createdAt < cutoff {
+                return false
+            }
+            return true
+        }
+    }
+
     static func items() -> [ClipboardItem] {
-        sortItems(storage.items)
+        var st = storage
+        let autoExpire = LingxiSettings.load().autoExpireOTPEnabled
+        let pruned = pruneExpiredOTPs(st.items, enabled: autoExpire)
+        if pruned.count != st.items.count {
+            st.items = pruned
+            if let pid = st.pendingBannerItemID, !pruned.contains(where: { $0.id == pid }) {
+                st.pendingBannerItemID = nil
+            }
+            storage = st
+        }
+        return sortItems(pruned)
     }
 
     /// 返回尚未在键盘顶栏粘贴或关闭的最新待展示剪贴板/跨屏接力条目

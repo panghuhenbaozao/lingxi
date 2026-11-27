@@ -157,6 +157,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
 
         let expImg = UIImage(systemName: "arrow.up.left.and.arrow.down.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         heightToggleButton.setImage(expImg, for: .normal)
+        heightToggleButton.accessibilityLabel = "拉高或还原阅读高度"
         heightToggleButton.layer.cornerRadius = 13
         heightToggleButton.layer.cornerCurve = .continuous
         heightToggleButton.actionHandler = { [weak self] in
@@ -641,7 +642,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
                 return
             }
 
-            let chosenModel = cfg.resolvedModel()
+            let chosenModel = cfg.resolvedVisionModel()
             let supportsNativeVision = ScreenshotOCRService.modelLikelySupportsVision(modelID: chosenModel, provider: cfg.provider)
             var acc = ""
             var lastFlush = CACurrentMediaTime()

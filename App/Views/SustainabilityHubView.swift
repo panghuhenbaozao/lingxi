@@ -1,20 +1,51 @@
 import SwiftUI
 import UIKit
 
-/// 可持续发展、三模可插拔同步、M2 局域网双机直连、引擎自愈巡检与 Open-Core 开源生态中心
+/// App 内显示用的同步方式文案（共享层 `title` / `subtitle` 是开发者术语，这里换成用户能看懂的说法）
+private extension SyncTransportMode {
+    var appTitle: String {
+        switch self {
+        case .localNoop: return "只在本机"
+        case .lan: return "同一 Wi-Fi 下两台设备互传"
+        case .e2eeCloud: return "云端加密同步"
+        }
+    }
+
+    var appSubtitle: String {
+        switch self {
+        case .localNoop: return "不联网，所有数据只存在这台设备上"
+        case .lan: return "不经过服务器，两台设备输入相同的 6 位配对码即可互传"
+        case .e2eeCloud: return "登录后在多台设备间自动同步，内容端到端加密，服务器看不到"
+        }
+    }
+}
+
+/// 同步方式与词库维护（v6）：词库健康 → 同步方式 → 局域网互传 → 社区词包 → 开源承诺。
 struct SustainabilityHubView: View {
     @EnvironmentObject private var appState: AppState
 
-    @State private var relayConfig: ClipboardRelayConfig = ClipboardRelayConfig.load()
-    @State private var healthReport: EngineHealthReport = EngineHealthAndSustainabilityService.shared.diagnose()
-    @State private var statusBanner: String?
-    @State private var isErrorBanner: Bool = false
+    // 注意：@State 的初始值表达式在每次创建视图结构体时都会执行；
+    // iOS 16 的 NavigationLink 会在上级页面每次重绘时创建目标视图，所以这里只放轻量占位，真实数据在 onAppear 中加载
+    @State private var relayConfig: ClipboardRelayConfig = ClipboardRelayConfig()
+    @State private var healthReport: EngineHealthReport = EngineHealthReport.placeholder
+    @State private var hasLoaded = false
+    @State private var toast: String?
+    @State private var errorToast: String?
 
-    // M2 局域网双机直连状态
-    @State private var isLANListening: Bool = LANSyncService.shared.isListening
+    @State private var showSelfHealConfirm = false
+    @State private var showSignIn = false
+
+    // 局域网互传
+    @State private var isLANListening: Bool = false
     @State private var isLANSyncing: Bool = false
+    @FocusState private var lanFieldFocused: Bool
 
-    // M4 自定义社区词包表单
+    // 社区词包（需要读文件，出现时加载）
+    @State private var packCount = 0
+    @State private var subscribedCount = 0
+    @State private var isSyncingPacks = false
+
+    // 自定义词包表单
     @State private var showAddCustomPackSheet = false
     @State private var customPackName = ""
     @State private var customPackCategory = "科技研发"
@@ -22,501 +53,521 @@ struct SustainabilityHubView: View {
     @State private var customPackURL = ""
     @State private var customPackTSV = "llm\t大语言模型\nrag\t检索增强生成"
 
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                if let banner = statusBanner {
-                    feedbackBanner(banner, isError: isErrorBanner)
-                }
+    private var trimmedPeerHost: String {
+        relayConfig.lanPeerHost.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-                ironLawsAndHealthCard
-                pluggableSyncRouterCard
-                lanPeerToPeerSyncCard
-                openCoreSustainabilityTierCard
-                communityEcosystemCard
+    /// 对方地址必须是另一台设备：127.0.0.1 / localhost 指向本机，互传没有意义
+    private var isPeerHostUsable: Bool {
+        let h = trimmedPeerHost.lowercased()
+        guard !h.isEmpty, h != "127.0.0.1", h != "localhost", !h.contains(" ") else { return false }
+        return true
+    }
+
+    private var isPairCodeValid: Bool {
+        relayConfig.pairCode.count == 6 && !relayConfig.pairCode.contains(where: { !$0.isNumber })
+    }
+
+    var body: some View {
+        List {
+            healthSection
+            syncModeSection
+            if relayConfig.syncTransportMode == .lan || isLANListening {
+                lanSection
             }
-            .padding(18)
+            communitySection
+            openSourceSection
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle("可持续发展与多模同步")
+        .listStyle(.insetGrouped)
+        .navigationTitle("同步方式与词库维护")
         .navigationBarTitleDisplayMode(.inline)
+        .lxToast($toast)
+        .lxToast($errorToast, isError: true)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { lanFieldFocused = false }
+            }
+        }
         .onAppear {
-            relayConfig = ClipboardRelayConfig.load()
-            healthReport = EngineHealthAndSustainabilityService.shared.diagnose()
-            isLANListening = LANSyncService.shared.isListening
+            reload()
         }
         .sheet(isPresented: $showAddCustomPackSheet) {
             addCustomCommunityPackSheet
         }
+        .sheet(isPresented: $showSignIn, onDismiss: { reload() }) {
+            AppleStyleSignInSheet()
+        }
+        .confirmationDialog("清理与修复词库？", isPresented: $showSelfHealConfirm, titleVisibility: .visible) {
+            Button("开始清理", role: .destructive) {
+                let outcome = EngineHealthAndSustainabilityService.shared.performSelfHealing()
+                appState.refreshAll()
+                healthReport = EngineHealthAndSustainabilityService.shared.diagnose()
+                toast = "清理完成：删除 \(outcome.removedNoiseWords) 个偶然词、\(outcome.trimmedClipboardItems) 条旧剪贴板记录，健康分 \(outcome.newHealthScore)"
+            }
+        } message: {
+            Text("会删除只用过一次、4 字以上且未置顶的自学习词，并只保留最近 15 条未置顶的剪贴板记录。置顶内容不受影响，删除后无法恢复，建议先备份。")
+        }
     }
 
-    // MARK: - 1. 四条架构铁律 + 引擎健康自愈巡检卡
+    private func reload() {
+        relayConfig = ClipboardRelayConfig.load()
+        healthReport = EngineHealthAndSustainabilityService.shared.diagnose()
+        isLANListening = LANSyncService.shared.isListening
+        packCount = CommunityLexiconService.shared.allAvailablePacks().count
+        subscribedCount = CommunityLexiconService.shared.subscribedPackIDs().count
+        hasLoaded = true
+    }
 
-    private var ironLawsAndHealthCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 14) {
+    // MARK: - 1. 词库健康
+
+    private var healthSection: some View {
+        let score = healthReport.healthScore
+        let tint: Color = score >= 90 ? Color(Design.Palette.success) : (score >= 75 ? Color(Design.Palette.accent) : Color(Design.Palette.warning))
+        return Section {
+            HStack(spacing: 14) {
                 ZStack {
                     Circle()
-                        .stroke(Color(Design.Palette.hairline), lineWidth: 3)
-                        .frame(width: 58, height: 58)
+                        .stroke(Color(Design.Palette.hairline), lineWidth: 5)
+                    Circle()
+                        .trim(from: 0, to: hasLoaded ? CGFloat(score) / 100 : 0)
+                        .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
                     VStack(spacing: 0) {
-                        Text("\(healthReport.healthScore)")
-                            .font(.system(size: 19, weight: .bold, design: .rounded))
+                        Text(hasLoaded ? "\(score)" : "--")
+                            .font(.system(size: 20, weight: .bold, design: .rounded).monospacedDigit())
                             .foregroundStyle(Color(Design.Palette.ink))
                         Text("健康分")
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundStyle(Color(Design.Palette.stone))
                     }
                 }
+                .frame(width: 64, height: 64)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("词库健康分 \(score)")
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text("引擎生命周期与架构铁律巡检")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Text("MIT Open-Core")
-                            .font(.system(size: 10, weight: .semibold))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Color(Design.Palette.surface))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                            .clipShape(Capsule())
-                    }
-                    Text("30 天半衰期词频自动衰减 · App Group 硬件级文件保护 · 零原文字段")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Color(Design.Palette.steel))
-                }
-                Spacer(minLength: 0)
-            }
-
-            // 四条不可动摇的架构铁律徽章矩阵
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                ironLawPill(icon: "airplane.circle.fill", title: "铁律 1 · 键盘零联网", detail: "扩展进程永不发网络请求")
-                ironLawPill(icon: "checkmark.shield.fill", title: "铁律 2 · 离线全功能", detail: "未登录 0 功能阉割")
-                ironLawPill(icon: "key.radiowaves.forward.fill", title: "铁律 3 · 同步零知识", detail: "LXE1 端侧密文封装")
-                ironLawPill(icon: "arrow.triangle.branch", title: "铁律 4 · 双通道物理隔离", detail: "同步与脱敏分析分表分权")
-            }
-
-            Divider()
-
-            // 实时词库与账本健康指标
-            HStack(spacing: 10) {
-                metricBox(label: "个人词条", value: "\(healthReport.userWordCount)")
-                metricBox(label: "置顶词条", value: "\(healthReport.pinnedWordCount)")
-                metricBox(label: "偶然低频词", value: "\(healthReport.lowFreqNoiseCount)")
-                metricBox(label: "同步账本", value: "\(healthReport.syncLedgerRecordCount)")
-            }
-
-            ForEach(healthReport.suggestions, id: \.self) { tip in
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "sparkle")
-                        .font(.system(size: 11, weight: .semibold))
+                    Text(score >= 90 ? "词库状态很好" : (score >= 75 ? "词库状态良好" : "建议清理一下"))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color(Design.Palette.ink))
-                        .padding(.top, 2)
-                    Text(tip)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Color(Design.Palette.slate))
+                    Text("用得越久，偶然打出的词会越积越多，偶尔清理能让常用词排得更准。")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(.vertical, 6)
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                metricBox(label: "自学习词", value: healthReport.userWordCount)
+                metricBox(label: "偶然词", value: healthReport.lowFreqNoiseCount, highlight: healthReport.lowFreqNoiseCount > 15)
+                metricBox(label: "剪贴板", value: healthReport.clipboardItemCount, highlight: healthReport.clipboardItemCount > 35)
+            }
+            .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
 
             Button {
-                let outcome = EngineHealthAndSustainabilityService.shared.performSelfHealing()
-                appState.refreshAll()
-                healthReport = EngineHealthAndSustainabilityService.shared.diagnose()
-                showFeedback(outcome.summaryMessage, isError: false)
+                showSelfHealConfirm = true
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "wand.and.stars.inverse")
-                    Text("一键执行半衰期词频自愈与账本瘦身")
-                }
-                .font(.system(size: 13, weight: .semibold))
-                .frame(maxWidth: .infinity, minHeight: 40)
-                .background(Color(Design.Palette.ink))
-                .foregroundStyle(Color(Design.Palette.canvas))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Label("清理与修复", systemImage: "wand.and.stars")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(LXCapsuleButtonStyle(prominent: healthReport.healthScore < 90, wide: true))
+            .disabled(!hasLoaded)
+            .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
+        } header: {
+            Text("词库健康")
+        } footer: {
+            Text("置顶的词和置顶的剪贴板记录永远不会被清理。")
         }
-        .padding(16)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-        )
     }
 
-    // MARK: - 2. 第一部分：同步层可插拔三实现切换器 (LocalNoop | LAN | E2EE Cloud)
+    private func metricBox(label: String, value: Int, highlight: Bool = false) -> some View {
+        VStack(spacing: 3) {
+            Text(hasLoaded ? value.formatted() : "--")
+                .font(.system(size: 17, weight: .bold, design: .rounded).monospacedDigit())
+                .foregroundStyle(highlight ? Color(Design.Palette.warning) : Color(Design.Palette.ink))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(Color(Design.Palette.stone))
+        }
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.input, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
 
-    private var pluggableSyncRouterCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("同步层可插拔三实现 (架构第一部分)", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Spacer()
-                Text(relayConfig.syncTransportMode.rawValue)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(Color(Design.Palette.stone))
-            }
+    // MARK: - 2. 同步方式
 
+    private var syncModeSection: some View {
+        Section {
             ForEach(SyncTransportMode.allCases) { mode in
-                let selected = (relayConfig.syncTransportMode == mode)
-                Button {
-                    relayConfig.syncTransportMode = mode
-                    relayConfig.save()
-                    healthReport = EngineHealthAndSustainabilityService.shared.diagnose()
-                    showFeedback("已切换同步层实现为：\(mode.title)", isError: false)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: mode.iconName)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(selected ? Color(Design.Palette.canvas) : Color(Design.Palette.ink))
-                            .frame(width: 34, height: 34)
-                            .background(selected ? Color(Design.Palette.ink) : Color(Design.Palette.surface))
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(mode.title)
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .foregroundStyle(Color(Design.Palette.ink))
-                            Text(mode.subtitle)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Color(Design.Palette.steel))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer()
-                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selected ? Color(Design.Palette.ink) : Color(Design.Palette.stone))
-                    }
-                    .padding(12)
-                    .background(selected ? Color(Design.Palette.surface) : Color(Design.Palette.canvas))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(selected ? Color(Design.Palette.ink) : Color(Design.Palette.hairline), lineWidth: selected ? 1.5 : 1)
-                    )
-                }
-                .buttonStyle(.plain)
+                syncModeRow(mode)
             }
-        }
-        .padding(16)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-        )
-    }
-
-    // MARK: - 3. M2 局域网双机同步控制台 (NWListener + 6位配对码 ChaCha20-Poly1305)
-
-    private var lanPeerToPeerSyncCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("M2 局域网同 Wi-Fi 双机互导 (NWListener)", systemImage: "wifi.router.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Spacer()
-                Text(isLANListening ? "监听中 :\(relayConfig.lanPort)" : "待机")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color(Design.Palette.surface))
-                    .foregroundStyle(isLANListening ? Color(Design.Palette.success) : Color(Design.Palette.stone))
-                    .clipShape(Capsule())
-            }
-
-            Text("无需登录任何云端账号：在同 Wi-Fi 下输入相同 6 位配对码，即以 HKDF-SHA256 派生会话密钥并通过 ChaCha20-Poly1305 点对点同步 7 大核心词库与设置。")
-                .font(.system(size: 11.5))
-                .foregroundStyle(Color(Design.Palette.steel))
-
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("对端局域网 IP")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color(Design.Palette.stone))
-                    TextField("192.168.1.x 或 127.0.0.1", text: $relayConfig.lanPeerHost)
-                        .font(.system(size: 13, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(9)
-                        .background(Color(Design.Palette.surface))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("6 位加密配对码")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color(Design.Palette.stone))
-                    TextField("886699", text: $relayConfig.pairCode)
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .padding(9)
-                        .frame(width: 100)
-                        .background(Color(Design.Palette.surface))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    if isLANListening {
-                        LANSyncService.shared.stopListening()
-                        isLANListening = false
-                        showFeedback("已关闭本机局域网同步监听", isError: false)
-                    } else {
-                        do {
-                            LANSyncService.shared.pairCode = relayConfig.pairCode
-                            LANSyncService.shared.port = UInt16(relayConfig.lanPort)
-                            try LANSyncService.shared.startListening()
-                            isLANListening = true
-                            relayConfig.save()
-                            showFeedback("本机已启动 NWListener 监听端口 \(relayConfig.lanPort)，配对码 \(relayConfig.pairCode)", isError: false)
-                        } catch {
-                            showFeedback("启动局域网监听失败：\(error.localizedDescription)", isError: true)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: isLANListening ? "stop.circle.fill" : "antenna.radiowaves.left.and.right")
-                        Text(isLANListening ? "停止本机监听" : "开启本机接收监听")
-                    }
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 38)
-                    .background(Color(Design.Palette.surface))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    isLANSyncing = true
-                    relayConfig.save()
-                    Task {
-                        do {
-                            let report = try await LANSyncService.shared.performPeerSync(
-                                peerHost: relayConfig.lanPeerHost,
-                                peerPort: UInt16(relayConfig.lanPort),
-                                pairCode: relayConfig.pairCode
-                            )
-                            await MainActor.run {
-                                isLANSyncing = false
-                                appState.refreshAll()
-                                showFeedback("局域网加密同步完成：推送 \(report.pushed) 项 · 合并 \(report.applied) 项（ChaCha20-Poly1305 验证通过）", isError: false)
-                            }
-                        } catch {
-                            await MainActor.run {
-                                isLANSyncing = false
-                                showFeedback("局域网同步失败：\(error.localizedDescription)", isError: true)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        if isLANSyncing {
-                            ProgressView().tint(Color(Design.Palette.canvas))
-                        } else {
-                            Image(systemName: "arrow.left.arrow.right.circle.fill")
-                        }
-                        Text("立即双机加密互导")
-                    }
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 38)
-                    .background(Color(Design.Palette.ink))
-                    .foregroundStyle(Color(Design.Palette.canvas))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(isLANSyncing)
-            }
-        }
-        .padding(16)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-        )
-    }
-
-    // MARK: - 4. Open-Core 可持续发展商业分层与自托管自由
-
-    private var openCoreSustainabilityTierCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Open-Core 可持续发展模式", systemImage: "leaf.arrow.triangle.circlepath")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Spacer()
-                Text(relayConfig.planTier.badgeText)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color(Design.Palette.surface))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .clipShape(Capsule())
-            }
-
-            Text("开源承诺不变更：输入引擎、键盘 UI、同步协议以 MIT 永久开源；通过官方托管 E2EE 云服务与 B 端企业显式授权画像 API 实现长期自我造血。")
-                .font(.system(size: 11.5))
-                .foregroundStyle(Color(Design.Palette.steel))
-
-            ForEach(OpenCorePlanTier.allCases) { tier in
-                let isCurrent = (relayConfig.planTier == tier)
-                Button {
-                    relayConfig.planTier = tier
-                    if tier == .free {
-                        relayConfig.syncTransportMode = .localNoop
-                    } else if tier == .selfHosted || tier == .pro || tier == .enterprise {
-                        relayConfig.syncTransportMode = .e2eeCloud
-                    }
-                    relayConfig.save()
-                    showFeedback("已切换当前服务层级为：\(tier.displayName)", isError: false)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(tier.displayName)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Color(Design.Palette.ink))
-                            Spacer()
-                            Text(tier.badgeText)
-                                .font(.system(size: 10, weight: .semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(isCurrent ? Color(Design.Palette.ink) : Color(Design.Palette.surface))
-                                .foregroundStyle(isCurrent ? Color(Design.Palette.canvas) : Color(Design.Palette.ink))
-                                .clipShape(Capsule())
-                        }
-                        Text(tier.summary)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Color(Design.Palette.slate))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(11)
-                    .background(isCurrent ? Color(Design.Palette.surface) : Color(Design.Palette.canvas))
-                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .stroke(isCurrent ? Color(Design.Palette.ink) : Color(Design.Palette.hairline), lineWidth: isCurrent ? 1.5 : 1)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(16)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-        )
-    }
-
-    // MARK: - 5. M4 开源社区共创词库生态
-
-    private var communityEcosystemCard: some View {
-        let packs = CommunityLexiconService.shared.allAvailablePacks()
-        let subscribed = CommunityLexiconService.shared.subscribedPackIDs()
-
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("M4 开源词库社区生态 (\(packs.count) 个词包)", systemImage: "books.vertical.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Spacer()
-                Button {
-                    showAddCustomPackSheet = true
-                } label: {
-                    Label("新增词库源", systemImage: "plus.circle.fill")
-                        .font(.system(size: 12, weight: .semibold))
+            if relayConfig.syncTransportMode == .e2eeCloud && !appState.isCloudAuthenticated {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.exclamationmark")
+                        .foregroundStyle(Color(Design.Palette.warning))
+                    Text("还没有登录，云端同步暂时不会进行")
+                        .font(.footnote)
                         .foregroundStyle(Color(Design.Palette.ink))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 6)
+                    Button("去登录") { showSignIn = true }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true))
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("同步方式")
+        } footer: {
+            Text(appState.cloudConfig.autoSyncEnabled
+                 ? "数据变化后会按这里选择的方式自动同步。"
+                 : "自动同步已关闭，可以在「灵犀账号」里打开。")
+        }
+    }
+
+    private func syncModeRow(_ mode: SyncTransportMode) -> some View {
+        let selected = relayConfig.syncTransportMode == mode
+        return Button {
+            selectMode(mode)
+        } label: {
+            HStack(spacing: 12) {
+                LXIconTile(icon: mode.iconName, tint: selected ? Color(Design.Palette.accent) : Color(Design.Palette.slate))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.appTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    Text(mode.appSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(selected ? Color(Design.Palette.accent) : Color(Design.Palette.hairline))
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func selectMode(_ mode: SyncTransportMode) {
+        guard relayConfig.syncTransportMode != mode else { return }
+        relayConfig.syncTransportMode = mode
+        relayConfig.save()
+        switch mode {
+        case .localNoop:
+            toast = "已改为只在本机，不再自动同步"
+        case .lan:
+            toast = isPeerHostUsable ? "已改为局域网互传" : "已改为局域网互传，请在下方填写另一台设备的地址"
+        case .e2eeCloud:
+            toast = appState.isCloudAuthenticated ? "已改为云端加密同步" : "已改为云端加密同步，登录后开始同步"
+        }
+    }
+
+    // MARK: - 3. 局域网互传
+
+    private var lanSection: some View {
+        Section {
+            HStack(spacing: 10) {
+                Text("对方地址")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .frame(width: 72, alignment: .leading)
+                TextField("如 192.168.1.23", text: $relayConfig.lanPeerHost)
+                    .keyboardType(.numbersAndPunctuation)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($lanFieldFocused)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit { relayConfig.save() }
+            }
+            .frame(minHeight: 36)
+
+            HStack(spacing: 10) {
+                Text("配对码")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .frame(width: 72, alignment: .leading)
+                TextField("6 位数字", text: $relayConfig.pairCode)
+                    .keyboardType(.numberPad)
+                    .focused($lanFieldFocused)
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(isPairCodeValid ? Color(Design.Palette.ink) : Color(Design.Palette.error))
+                    .onChange(of: relayConfig.pairCode) { newValue in
+                        let digits = String(newValue.filter(\.isNumber).prefix(6))
+                        if digits != newValue { relayConfig.pairCode = digits }
+                        if digits.count == 6 { relayConfig.save() }
+                    }
+            }
+            .frame(minHeight: 36)
+
+            HStack(spacing: 10) {
+                Button {
+                    toggleListening()
+                } label: {
+                    Label(isLANListening ? "停止接收" : "允许对方连接", systemImage: isLANListening ? "stop.circle" : "antenna.radiowaves.left.and.right")
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true, tint: isLANListening ? Color(Design.Palette.error) : Color(Design.Palette.accent)))
+                .disabled(!isPairCodeValid)
+
+                Button {
+                    runPeerSync()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isLANSyncing {
+                            ProgressView().controlSize(.small).tint(Color.white)
+                        } else {
+                            Image(systemName: "arrow.left.arrow.right")
+                        }
+                        Text(isLANSyncing ? "互传中…" : "立即互传")
+                    }
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                .disabled(isLANSyncing || !isPeerHostUsable || !isPairCodeValid)
+            }
+            .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
+
+            if isLANListening {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color(Design.Palette.success))
+                        .frame(width: 8, height: 8)
+                    Text("正在等待对方连接（端口 \(relayConfig.lanPort)）")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
                 }
             }
+        } header: {
+            Text("局域网互传")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("一台设备点「允许对方连接」，另一台填好它的地址后点「立即互传」。两台设备要连在同一个 Wi-Fi 上，第一次使用时 iOS 会询问是否允许访问本地网络。")
+                if !trimmedPeerHost.isEmpty && !isPeerHostUsable {
+                    Text("这里要填另一台设备的地址，不能填本机（127.0.0.1）。")
+                        .foregroundStyle(Color(Design.Palette.error))
+                }
+                Text("配对码与「跨屏剪贴板接力」共用，改这里两边都会变。")
+            }
+        }
+    }
 
-            Text("对标 HeliBoard 词典仓与 WowType TSV 规范：支持一键更新已订阅词包、从自建/官方服务端拉取社区词包，或接入任意 Git Raw TSV 词库源。")
-                .font(.system(size: 11.5))
-                .foregroundStyle(Color(Design.Palette.steel))
+    private func toggleListening() {
+        lanFieldFocused = false
+        if isLANListening {
+            LANSyncService.shared.stopListening()
+            isLANListening = false
+            toast = "已停止接收"
+            return
+        }
+        do {
+            LANSyncService.shared.pairCode = relayConfig.pairCode
+            LANSyncService.shared.port = UInt16(clamping: relayConfig.lanPort)
+            try LANSyncService.shared.startListening()
+            isLANListening = true
+            relayConfig.save()
+            toast = "正在等待对方连接，配对码 \(relayConfig.pairCode)"
+        } catch {
+            errorToast = "无法开始接收：\(error.localizedDescription)"
+        }
+    }
+
+    private func runPeerSync() {
+        guard !isLANSyncing else { return }
+        lanFieldFocused = false
+        isLANSyncing = true
+        relayConfig.lanPeerHost = trimmedPeerHost
+        relayConfig.save()
+        let host = relayConfig.lanPeerHost
+        let port = UInt16(clamping: relayConfig.lanPort)
+        let code = relayConfig.pairCode
+        Task {
+            do {
+                let report = try await LANSyncService.shared.performPeerSync(peerHost: host, peerPort: port, pairCode: code)
+                await MainActor.run {
+                    isLANSyncing = false
+                    appState.refreshAll()
+                    toast = "互传完成：发送 \(report.pushed) 项，合并 \(report.applied) 项"
+                }
+            } catch {
+                await MainActor.run {
+                    isLANSyncing = false
+                    errorToast = "互传失败：\(error.localizedDescription)。请确认两台设备在同一 Wi-Fi，且对方已点「允许对方连接」"
+                }
+            }
+        }
+    }
+
+    // MARK: - 4. 社区词包
+
+    private var communitySection: some View {
+        Section {
+            HStack(spacing: 12) {
+                LXIconTile(icon: "books.vertical")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("已订阅 \(subscribedCount) 个 · 共 \(packCount) 个可用")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    Text("专业领域的词包，订阅后键盘里直接能打出来")
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                }
+            }
+            .padding(.vertical, 4)
 
             HStack(spacing: 10) {
                 Button {
                     let count = CommunityLexiconService.shared.updateAllSubscribedPacks()
                     appState.refreshAll()
-                    showFeedback("已全量更新 \(subscribed.count) 个已订阅词库包，共刷新 \(count) 条专业词条", isError: false)
+                    subscribedCount = CommunityLexiconService.shared.subscribedPackIDs().count
+                    toast = subscribedCount == 0 ? "还没有订阅任何词包" : "已更新 \(subscribedCount) 个词包，共 \(count) 个词"
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                        Text("一键更新已订阅 (\(subscribed.count))")
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 36)
-                    .background(Color(Design.Palette.surface))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-                    )
+                    Label("更新已订阅", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                .disabled(subscribedCount == 0)
 
                 Button {
-                    Task {
-                        do {
-                            let remote = try await CommunityLexiconService.shared.SyncRemotePacksFromServer()
-                            await MainActor.run {
-                                showFeedback("已从服务端社区词典仓同步 \(remote.count) 个共享词库包", isError: false)
-                            }
-                        } catch {
-                            await MainActor.run {
-                                showFeedback("当前处于离线或服务端未启动，已使用内置离线社区词典仓 (\(packs.count) 个词包)", isError: false)
-                            }
-                        }
-                    }
+                    syncRemotePacks()
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "icloud.and.arrow.down")
-                        Text("同步云端词典仓")
+                    HStack(spacing: 6) {
+                        if isSyncingPacks {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "icloud.and.arrow.down")
+                        }
+                        Text(isSyncingPacks ? "获取中…" : "获取更多")
                     }
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 36)
-                    .background(Color(Design.Palette.ink))
-                    .foregroundStyle(Color(Design.Palette.canvas))
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                .disabled(isSyncingPacks)
+            }
+            .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
+
+            Button {
+                showAddCustomPackSheet = true
+            } label: {
+                Label("添加自己的词包", systemImage: "plus.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.accent))
+                    .frame(minHeight: 36)
+            }
+        } header: {
+            Text("社区词包")
+        } footer: {
+            Text("在「设置 → 词库与实时地标 → 词库管理」里可以浏览和订阅每一个词包。")
+        }
+    }
+
+    private func syncRemotePacks() {
+        guard !isSyncingPacks else { return }
+        isSyncingPacks = true
+        Task {
+            do {
+                let remote = try await CommunityLexiconService.shared.SyncRemotePacksFromServer()
+                await MainActor.run {
+                    isSyncingPacks = false
+                    packCount = CommunityLexiconService.shared.allAvailablePacks().count
+                    toast = "已获取 \(remote.count) 个云端词包"
+                }
+            } catch {
+                await MainActor.run {
+                    isSyncingPacks = false
+                    // 离线时仍可使用内置词包，属于提示而非错误
+                    toast = "暂时连不上服务器，没有新的词包，可以继续使用内置的 \(packCount) 个"
+                }
             }
         }
-        .padding(16)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Design.Radius.card, style: .continuous)
-                .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-        )
+    }
+
+    // MARK: - 5. 开源承诺（只读）
+
+    private var openSourceSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                promiseRow(icon: "keyboard", text: "键盘本身永不联网，平时打字只在本机运行")
+                promiseRow(icon: "checkmark.seal", text: "不登录也能使用全部打字功能，没有功能阉割")
+                promiseRow(icon: "lock", text: "云同步端到端加密，服务器看不到你的词库")
+                promiseRow(icon: "chevron.left.forwardslash.chevron.right", text: "输入引擎、键盘和同步协议以 MIT 协议永久开源")
+            }
+            .padding(.vertical, 6)
+        } header: {
+            Text("我们的承诺")
+        }
+    }
+
+    private func promiseRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 20)
+                .padding(.top, 1)
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(Color(Design.Palette.charcoal))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - 自定义词包表单
+
+    /// 有效词条行数：跳过空行与 # 注释，要求「编码<Tab>词条」
+    private var validTSVLineCount: Int {
+        customPackTSV
+            .split(whereSeparator: \.isNewline)
+            .filter { line in
+                let s = line.trimmingCharacters(in: .whitespaces)
+                guard !s.isEmpty, !s.hasPrefix("#") else { return false }
+                let parts = s.split(separator: "\t", omittingEmptySubsequences: true)
+                return parts.count >= 2
+            }
+            .count
+    }
+
+    private var canSaveCustomPack: Bool {
+        !customPackName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && validTSVLineCount > 0
     }
 
     private var addCustomCommunityPackSheet: some View {
         NavigationStack {
             Form {
-                Section("词库包元信息") {
-                    TextField("词包名称（如：法律文书高频词包）", text: $customPackName)
-                    TextField("分类（如：法律、金融、编程）", text: $customPackCategory)
-                    TextField("简介描述", text: $customPackDesc)
-                    TextField("Git Raw TSV 地址（可选）", text: $customPackURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Section("基本信息") {
+                    TextField("词包名称，如：法律文书常用词", text: $customPackName)
+                    TextField("分类，如：法律、金融、编程", text: $customPackCategory)
+                    TextField("简介（可选）", text: $customPackDesc)
                 }
-                Section("WowType TSV 词条内容（每行：编码<TAB>词条）") {
+                Section {
                     TextEditor(text: $customPackTSV)
                         .font(.system(size: 13, design: .monospaced))
-                        .frame(minHeight: 150)
+                        .frame(minHeight: 160)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    HStack {
+                        Text("词条")
+                        Spacer()
+                        Text("有效 \(validTSVLineCount) 条")
+                            .monospacedDigit()
+                            .foregroundStyle(validTSVLineCount > 0 ? Color(Design.Palette.stone) : Color(Design.Palette.error))
+                            .textCase(nil)
+                    }
+                } footer: {
+                    Text("每行一条：编码 + Tab + 词条，例如「llm<Tab>大语言模型」。以 # 开头的行会被忽略。")
+                }
+                Section {
+                    TextField("在线词库地址（可选）", text: $customPackURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } footer: {
+                    Text("填写后可以随时从这个地址更新词条。")
                 }
             }
-            .navigationTitle("新增开源 TSV 词库源")
+            .navigationTitle("添加词包")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -524,87 +575,25 @@ struct SustainabilityHubView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存并订阅") {
+                        let name = customPackName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let url = customPackURL.trimmingCharacters(in: .whitespacesAndNewlines)
                         let pack = CommunityLexiconService.shared.addCustomPack(
-                            name: customPackName.isEmpty ? "自定义专题词包" : customPackName,
-                            category: customPackCategory,
-                            description: customPackDesc,
+                            name: name,
+                            category: customPackCategory.trimmingCharacters(in: .whitespacesAndNewlines),
+                            description: customPackDesc.trimmingCharacters(in: .whitespacesAndNewlines),
                             tsv: customPackTSV,
-                            sourceURL: customPackURL.isEmpty ? nil : customPackURL
+                            sourceURL: url.isEmpty ? nil : url
                         )
                         appState.refreshAll()
                         showAddCustomPackSheet = false
-                        showFeedback("已新增并订阅「\(pack.name)」(\(pack.wordCount) 条词条)", isError: false)
+                        packCount = CommunityLexiconService.shared.allAvailablePacks().count
+                        subscribedCount = CommunityLexiconService.shared.subscribedPackIDs().count
+                        toast = "已添加并订阅「\(pack.name)」，共 \(pack.wordCount) 个词"
                     }
+                    .fontWeight(.semibold)
+                    .disabled(!canSaveCustomPack)
                 }
             }
         }
-    }
-
-    // MARK: - 辅助组件
-
-    private func ironLawPill(icon: String, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color(Design.Palette.ink))
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.ink))
-                Text(detail)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Color(Design.Palette.stone))
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(9)
-        .background(Color(Design.Palette.surface))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-    }
-
-    private func metricBox(label: String, value: String) -> some View {
-        VStack(spacing: 3) {
-            Text(value)
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(Design.Palette.ink))
-            Text(label)
-                .font(.system(size: 10.5))
-                .foregroundStyle(Color(Design.Palette.stone))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color(Design.Palette.surface))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private func feedbackBanner(_ text: String, isError: Bool) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isError ? Color(Design.Palette.error) : Color(Design.Palette.success))
-            Text(text)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(Color(Design.Palette.ink))
-            Spacer()
-            Button {
-                statusBanner = nil
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color(Design.Palette.stone))
-            }
-        }
-        .padding(12)
-        .background(Color(Design.Palette.canvas))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isError ? Color(Design.Palette.error) : Color(Design.Palette.hairline), lineWidth: 1)
-        )
-    }
-
-    private func showFeedback(_ message: String, isError: Bool) {
-        statusBanner = message
-        isErrorBanner = isError
     }
 }

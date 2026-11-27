@@ -3,10 +3,58 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// 旗舰「📷 截屏 AI 识图 & 上传后自动删图」工作台：
-/// - 打开即自动抓取剪贴板截屏或相册最新系统截屏（也支持手动选图）；
-/// - 调用多模态 AI 流式识别（高情商看图回复 / 提取文字 / 截屏译中 / 总结重点 / 解答分析 / 自定义提问）；
-/// - 开启「上传后自动删除原截屏」后，发送给 AI 即自动触发系统清理原截屏，结果同步复制回剪贴板，切回聊天顶栏一键上屏！
+/// 线程安全的「只执行一次」标记，用于保护 continuation 不被重复恢复
+private final class ResumeOnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    /// 第一次调用返回 true，之后都返回 false
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
+    }
+}
+
+/// App 内显示用：去掉键盘共用标题里的 emoji，配 SF Symbols 图标（键盘侧仍用原标题）
+private extension ScreenshotVisionPreset {
+    var appPlainTitle: String {
+        switch self {
+        case .smartReply: return "看图回复"
+        case .extractText: return "提取文字"
+        case .translateZh: return "翻译成中文"
+        case .summarize: return "总结重点"
+        case .explainSolve: return "解答分析"
+        }
+    }
+
+    var appSymbol: String {
+        switch self {
+        case .smartReply: return "bubble.left.and.bubble.right"
+        case .extractText: return "text.viewfinder"
+        case .translateZh: return "globe"
+        case .summarize: return "list.bullet.rectangle"
+        case .explainSolve: return "lightbulb"
+        }
+    }
+
+    var appHint: String {
+        switch self {
+        case .smartReply: return "根据聊天截图写一句回复"
+        case .extractText: return "本机识别，无需联网"
+        case .translateZh: return "外文截图翻译成中文"
+        case .summarize: return "提炼要点和待办"
+        case .explainSolve: return "看懂报错、题目或界面"
+        }
+    }
+}
+
+/// 截屏识图工作台（v6）：截屏预览 → 选择识别方式 → 结果（自动复制）→ 原图清理设置。
+/// - 打开时自动读取剪贴板截屏或相册最新截屏，也可手动选图；
+/// - 「提取文字」优先用本机 Vision OCR，其余调用多模态 AI，不支持看图的模型自动回退为「OCR 文字 → 文本模型」；
+/// - 开启「识别后清理原截屏」时：剪贴板截屏直接替换，相册截屏由系统弹窗确认后删除。
 struct ScreenshotVisionView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -18,14 +66,17 @@ struct ScreenshotVisionView: View {
     @State private var imageFromPasteboard: Bool = false
     @State private var sourceBadge: String = "等待截屏"
     @State private var photoPickerItem: PhotosPickerItem?
+    @State private var isLoadingImage = false
 
     @State private var resultText: String = ""
     @State private var isAnalyzing: Bool = false
     @State private var statusBanner: String?
     @State private var statusIsError: Bool = false
-    @State private var deletedOriginalNotice: String?
     @State private var photoAuthStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var streamTask: Task<Void, Never>?
+    @State private var toast: String?
+    @State private var showTips = false
+    @FocusState private var questionFocused: Bool
 
     private let aiClient = AIClient(timeout: 45)
 
@@ -33,22 +84,30 @@ struct ScreenshotVisionView: View {
         photoAuthStatus == .authorized || photoAuthStatus == .limited
     }
 
+    private var trimmedQuestion: String {
+        customQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
-                    autoDeleteToggleCard
-                    screenshotPreviewCard
-                    presetActionCard
+                VStack(spacing: Design.Spacing.md) {
+                    previewCard
+                    presetCard
                     resultCard
-                    quickTipCard
+                    cleanupCard
+                    tipsCard
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .lxReadableWidth()
+                .padding(.horizontal, Design.Spacing.md)
+                .padding(.top, Design.Spacing.xs)
+                .padding(.bottom, Design.Spacing.xxl)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("截屏 AI 识图")
+            .navigationTitle("截屏识图")
             .navigationBarTitleDisplayMode(.inline)
+            .lxToast($toast)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("完成") {
@@ -57,10 +116,12 @@ struct ScreenshotVisionView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("权限") {
+                    Button {
                         appState.showPermissionsCenter = true
+                    } label: {
+                        Image(systemName: hasPhotoReadWrite ? "checkmark.shield" : "exclamationmark.shield")
                     }
-                    .font(.subheadline)
+                    .accessibilityLabel("权限中心")
                 }
             }
             .onAppear {
@@ -71,306 +132,374 @@ struct ScreenshotVisionView: View {
             }
             .onChange(of: photoPickerItem) { newItem in
                 guard let newItem else { return }
+                isLoadingImage = true
                 Task {
-                    if let data = try? await newItem.loadTransferable(type: Data.self),
-                       let img = UIImage(data: data) {
-                        await MainActor.run {
-                            self.previewImage = img
-                            self.currentAssetID = newItem.itemIdentifier
-                            self.imageFromPasteboard = false
-                            self.sourceBadge = "已选相册图片"
-                            self.deletedOriginalNotice = nil
-                            self.statusBanner = nil
+                    let data = try? await newItem.loadTransferable(type: Data.self)
+                    let img = data.flatMap { UIImage(data: $0) }
+                    await MainActor.run {
+                        self.isLoadingImage = false
+                        self.photoPickerItem = nil
+                        guard let img else {
+                            self.toast = "无法读取这张图片，换一张试试"
+                            return
                         }
+                        self.setPreview(img, assetID: newItem.itemIdentifier, fromPasteboard: false, badge: "相册图片")
                     }
                 }
             }
         }
     }
 
-    // MARK: - 1. 自动删图开关卡
+    // MARK: - 1. 截屏预览
 
-    private var autoDeleteToggleCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle(isOn: $appState.settings.autoDeleteUploadedScreenshot) {
-                HStack(spacing: 10) {
-                    Image(systemName: "trash.slash.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(Color(Design.Palette.accent))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("上传 AI 后自动清理原截屏")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color(Design.Palette.ink))
-                        Text("剪贴板截屏（系统「拷贝并删除」/快捷指令）0 弹窗自动清空；相册图仅在主动点识图后询问确认，绝不在日常截屏时骚扰弹窗")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Color(Design.Palette.accent))
-
-            if !hasPhotoReadWrite {
-                Button {
-                    Task { await requestPhotoPermissionAndLoad() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "photo.badge.checkmark")
-                        Text("一键开启相册读写权限（自动抓取并删除最新截屏）")
-                            .font(.caption.bold())
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(Design.Palette.accent))
-            }
-
-            if let deletedOriginalNotice {
+    private var previewCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color(Design.Palette.success))
-                    Text(deletedOriginalNotice)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color(Design.Palette.success))
-                }
-            }
-        }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 2. 截屏预览与来源抓取卡
-
-    private var screenshotPreviewCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label(sourceBadge, systemImage: "camera.viewfinder")
-                    .font(.caption.bold())
-                    .foregroundStyle(Color(Design.Palette.accent))
-                Spacer()
-                Button {
-                    Task { await loadLatestScreenshot(autoRun: false) }
-                } label: {
-                    Label("刷新最新截屏", systemImage: "arrow.clockwise")
-                        .font(.caption.bold())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color(Design.Palette.accent))
-            }
-
-            if let img = previewImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.6)
+                    LXTag(
+                        text: sourceBadge,
+                        icon: previewImage == nil ? "photo" : "checkmark",
+                        tint: previewImage == nil ? Color(Design.Palette.slate) : Color(Design.Palette.accent),
+                        filled: previewImage != nil
                     )
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "photo.on.rectangle.angled")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                    Text("尚未检测到最新截屏")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color(Design.Palette.ink))
-                    Text("在微信/抖音截一张屏再回来，或点下方粘贴/选图")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 28)
-                .background(Color(.tertiarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-
-            HStack(spacing: 8) {
-                PhotosPicker(selection: $photoPickerItem, matching: .images, photoLibrary: .shared()) {
-                    Label("相册选图", systemImage: "photo.stack")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    loadFromPasteboard()
-                } label: {
-                    Label("粘贴截屏", systemImage: "doc.on.clipboard")
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                }
-                .buttonStyle(.bordered)
-
-                if currentAssetID != nil {
-                    Button(role: .destructive) {
-                        Task { await deleteCurrentScreenshotNow() }
+                    if appState.aiConfig.isConfigured {
+                        LXTag(
+                            text: appState.aiConfig.resolvedVisionModel(),
+                            icon: ScreenshotOCRService.modelLikelySupportsVision(
+                                modelID: appState.aiConfig.resolvedVisionModel(),
+                                provider: appState.aiConfig.provider
+                            ) ? "eye" : "text.viewfinder",
+                            tint: Color(Design.Palette.stone)
+                        )
+                    }
+                    Spacer()
+                    Button {
+                        Task { await loadLatestScreenshot(autoRun: false) }
                     } label: {
-                        Label("删原图", systemImage: "trash")
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
+                        Label("最新截屏", systemImage: "arrow.clockwise")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+                    .disabled(isLoadingImage || isAnalyzing)
                 }
-            }
-        }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
 
-    // MARK: - 3. 识图指令与自定义提问卡
-
-    private var presetActionCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(ScreenshotVisionPreset.allCases) { preset in
-                        let active = selectedPreset == preset && customQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        Button(preset.title) {
-                            selectedPreset = preset
-                            customQuestion = ""
-                            if previewImage != nil {
-                                startVisionAnalysis()
-                            }
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 7)
-                        .background(active ? Color(Design.Palette.accent) : Color(.tertiarySystemGroupedBackground))
-                        .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
-                        .clipShape(Capsule())
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                TextField("也可以直接输入想问图片的问题…", text: $customQuestion)
-                    .font(.subheadline)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color(.tertiarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .submitLabel(.send)
-                    .onSubmit { startVisionAnalysis() }
-
-                Button {
-                    if isAnalyzing {
-                        streamTask?.cancel()
-                        isAnalyzing = false
+                Group {
+                    if let img = previewImage {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+                                    .stroke(Color(Design.Palette.hairline), lineWidth: 0.5)
+                            )
+                            .accessibilityLabel("截屏预览")
                     } else {
-                        startVisionAnalysis()
+                        VStack(spacing: 8) {
+                            if isLoadingImage {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(Color(Design.Palette.muted))
+                            }
+                            Text(isLoadingImage ? "正在读取图片…" : "还没有截屏")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            Text(hasPhotoReadWrite
+                                 ? "截一张屏再回来点「最新截屏」，或从相册选、从剪贴板粘贴。"
+                                 : "允许访问照片后可以自动读取最新截屏；也可以从剪贴板粘贴。")
+                                .font(.caption)
+                                .foregroundStyle(Color(Design.Palette.stone))
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                        .padding(.horizontal, 12)
+                        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
                     }
-                } label: {
-                    Text(isAnalyzing ? "停止" : "识图")
-                        .font(.subheadline.bold())
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(isAnalyzing ? .orange : Color(Design.Palette.accent))
-                .disabled(previewImage == nil && !isAnalyzing)
+
+                HStack(spacing: 8) {
+                    PhotosPicker(selection: $photoPickerItem, matching: .images, photoLibrary: .shared()) {
+                        Label("相册选图", systemImage: "photo.stack")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                    .disabled(isAnalyzing)
+
+                    Button {
+                        loadFromPasteboard()
+                    } label: {
+                        Label("粘贴截屏", systemImage: "doc.on.clipboard")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                    .disabled(isAnalyzing)
+                }
+
+                if !hasPhotoReadWrite {
+                    Button {
+                        Task { await requestPhotoPermissionAndLoad() }
+                    } label: {
+                        Label(photoAuthStatus == .denied || photoAuthStatus == .restricted ? "去设置允许访问照片" : "允许访问照片，自动读取截屏", systemImage: "photo.on.rectangle")
+                    }
+                    .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                }
             }
         }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 4. 纯净无 `*` AI 识别结果卡
+    // MARK: - 2. 识别方式
+
+    private var presetCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("想让 AI 做什么")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(ScreenshotVisionPreset.allCases) { preset in
+                        presetTile(preset)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("或者直接问：这张图里的快递几点到？", text: $customQuestion)
+                        .font(.subheadline)
+                        .focused($questionFocused)
+                        .submitLabel(.send)
+                        .onSubmit { startVisionAnalysis() }
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 40)
+                        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.input, style: .continuous))
+
+                    if isAnalyzing {
+                        Button("停止") {
+                            streamTask?.cancel()
+                            isAnalyzing = false
+                            statusIsError = false
+                            statusBanner = "已停止"
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.error)))
+                    } else {
+                        Button("识别") {
+                            questionFocused = false
+                            startVisionAnalysis()
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true))
+                        .disabled(previewImage == nil)
+                    }
+                }
+            }
+        }
+    }
+
+    private func presetTile(_ preset: ScreenshotVisionPreset) -> some View {
+        let active = selectedPreset == preset && trimmedQuestion.isEmpty
+        return Button {
+            selectedPreset = preset
+            customQuestion = ""
+            questionFocused = false
+            if previewImage != nil && !isAnalyzing {
+                startVisionAnalysis()
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: preset.appSymbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(active ? Color.white : Color(Design.Palette.accent))
+                    .frame(width: 30, height: 30)
+                    .background(
+                        active ? Color.white.opacity(0.2) : Color(Design.Palette.accentSoft),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(preset.appPlainTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(active ? Color.white : Color(Design.Palette.ink))
+                        .lineLimit(1)
+                    Text(preset.appHint)
+                        .font(.caption2)
+                        .foregroundStyle(active ? Color.white.opacity(0.85) : Color(Design.Palette.stone))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .background(
+                active ? Color(Design.Palette.accent) : Color(Design.Palette.canvas),
+                in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous)
+                    .stroke(active ? Color.clear : Color(Design.Palette.hairline), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isAnalyzing)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    // MARK: - 3. 结果
 
     private var resultCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("AI 识图结果（纯净纯文本）", systemImage: "sparkles")
-                    .font(.caption.bold())
-                    .foregroundStyle(Color(Design.Palette.accent))
-                Spacer()
-                if isAnalyzing {
-                    ProgressView().scaleEffect(0.75)
+        LXCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    Text("识别结果")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(Design.Palette.ink))
+                    if isAnalyzing {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Spacer()
                 }
-            }
 
-            if let statusBanner {
-                Text(statusBanner)
-                    .font(.caption)
-                    .foregroundStyle(statusIsError ? Color.orange : Color(Design.Palette.success))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if resultText.isEmpty {
-                Text("选择上方「看图回复 / 提取文字 / 截屏译中 / 总结重点」或直接点「识图」，结果将自动净化掉 * 等符号并同步复制到剪贴板。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                Text(resultText)
-                    .font(.body)
-                    .foregroundStyle(Color(Design.Palette.ink))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Color(.tertiarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                HStack(spacing: 10) {
-                    Button {
-                        UIPasteboard.general.string = resultText
-                        _ = ClipboardStore.record(resultText)
-                        statusIsError = false
-                        statusBanner = "✓ 已复制纯净正文！切回聊天 App 点键盘顶栏即可一键发送"
-                    } label: {
-                        Label("复制结果回键盘", systemImage: "doc.on.doc.fill")
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
+                if let statusBanner {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: statusIsError ? "exclamationmark.triangle.fill" : (isAnalyzing ? "hourglass" : "checkmark.circle.fill"))
+                            .font(.caption)
+                            .foregroundStyle(statusIsError ? Color(Design.Palette.warning) : (isAnalyzing ? Color(Design.Palette.stone) : Color(Design.Palette.success)))
+                            .padding(.top, 1)
+                        Text(LXToastText.clean(statusBanner))
+                            .font(.caption)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color(Design.Palette.accent))
+                }
 
-                    Button {
-                        startVisionAnalysis()
-                    } label: {
-                        Label("重新识别", systemImage: "arrow.clockwise")
-                            .font(.caption.bold())
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                if resultText.isEmpty {
+                    Text(previewImage == nil
+                         ? "先在上面准备一张截屏。"
+                         : "选一种识别方式，结果会显示在这里并自动复制。")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(Design.Palette.muted))
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                } else {
+                    Text(resultText)
+                        .font(.body)
+                        .foregroundStyle(Color(Design.Palette.ink))
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .background(Color(Design.Palette.surface), in: RoundedRectangle(cornerRadius: Design.Radius.cardSmall, style: .continuous))
+
+                    if !isAnalyzing {
+                        HStack(spacing: 8) {
+                            Button {
+                                UIPasteboard.general.string = resultText
+                                _ = ClipboardStore.record(resultText)
+                                toast = "已复制，切回聊天 App 点键盘顶栏即可发送"
+                            } label: {
+                                Label("复制结果", systemImage: "doc.on.doc")
+                            }
+                            .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+
+                            Button {
+                                startVisionAnalysis()
+                            } label: {
+                                Label("重新识别", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                        }
                     }
-                    .buttonStyle(.bordered)
                 }
             }
         }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 5. 一键截屏快捷技巧提示卡
+    // MARK: - 4. 原截屏清理
 
-    private var quickTipCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("📷 键盘内极速截屏识图技巧（无需快捷指令 · 零删图弹窗）", systemImage: "camera.viewfinder")
-                .font(.caption.bold())
-                .foregroundStyle(Color(Design.Palette.accent))
-            Text("方案 1（零配置 · 推荐）：打开系统「设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下 → 截屏」。在微信/抖音轻拍手机背面截屏，键盘顶栏自动浮出「📷 刚截的屏 · ✨ 识图」，点一下直接识别且绝不自动弹删除框；\n方案 2（0 弹窗自动清空）：截屏后点左下预览 → 右上「完成 → 拷贝并删除」，切回键盘点「📷读图」，识别完成后自动静默清空剪贴板，相册零残留！")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private var cleanupCard: some View {
+        LXCard {
+            VStack(alignment: .leading, spacing: 10) {
+                LXToggleRow(
+                    "识别后清理原截屏",
+                    subtitle: "剪贴板里的截屏直接替换；相册里的截屏会由系统弹窗确认后删除",
+                    isOn: $appState.settings.autoDeleteUploadedScreenshot
+                )
+
+                if currentAssetID != nil && !imageFromPasteboard {
+                    Divider()
+                    HStack {
+                        Text("这张图来自相册")
+                            .font(.footnote)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                        Spacer()
+                        Button(role: .destructive) {
+                            Task { await deleteCurrentScreenshotNow() }
+                        } label: {
+                            Label("现在删除", systemImage: "trash")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: false, tint: Color(Design.Palette.error)))
+                    }
+                }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    // MARK: - 5. 键盘内快速识图技巧（默认折叠）
+
+    private var tipsCard: some View {
+        LXCard {
+            DisclosureGroup(isExpanded: $showTips) {
+                VStack(alignment: .leading, spacing: 12) {
+                    tipRow(
+                        number: 1,
+                        title: "轻点背面截屏（推荐）",
+                        detail: "系统设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下 → 截屏。之后在聊天里轻拍手机背面截屏，键盘顶栏会出现识图入口。"
+                    )
+                    tipRow(
+                        number: 2,
+                        title: "截屏后不留在相册",
+                        detail: "截屏后点左下角预览 → 右上角「完成」→「拷贝并删除」，再到键盘里识图，相册里不会留下截屏。"
+                    )
+                }
+                .padding(.top, 10)
+            } label: {
+                Label("在键盘里更快地识图", systemImage: "keyboard")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+            }
+            .tint(Color(Design.Palette.stone))
+        }
+    }
+
+    private func tipRow(number: Int, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)")
+                .font(.caption.bold().monospacedDigit())
+                .foregroundStyle(Color(Design.Palette.accent))
+                .frame(width: 22, height: 22)
+                .background(Color(Design.Palette.accentSoft), in: Circle())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color(Design.Palette.ink))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(Color(Design.Palette.stone))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     // MARK: - 逻辑实现
+
+    private func setPreview(_ img: UIImage, assetID: String?, fromPasteboard: Bool, badge: String) {
+        previewImage = img
+        currentAssetID = assetID
+        imageFromPasteboard = fromPasteboard
+        sourceBadge = badge
+        statusBanner = nil
+        resultText = ""
+    }
 
     private func handleOnAppear() {
         photoAuthStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -393,6 +522,12 @@ struct ScreenshotVisionView: View {
     }
 
     private func requestPhotoPermissionAndLoad() async {
+        if photoAuthStatus == .denied || photoAuthStatus == .restricted {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                await MainActor.run { UIApplication.shared.open(url) }
+            }
+            return
+        }
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         await MainActor.run {
             self.photoAuthStatus = status
@@ -401,35 +536,28 @@ struct ScreenshotVisionView: View {
             await loadLatestScreenshot(autoRun: false)
         } else {
             await MainActor.run {
-                self.statusIsError = true
-                self.statusBanner = "请在「系统设置 → 灵犀输入法 → 照片」中允许访问照片，以支持自动抓取与上传后删除截屏。"
+                self.toast = "没有照片权限，可以在系统设置里打开，或改用「粘贴截屏」"
             }
         }
     }
 
     private func loadFromPasteboard() {
+        // hasImages 只读类型信息，不会触发「允许粘贴」提示；确认有图片后再读取
         if UIPasteboard.general.hasImages, let img = UIPasteboard.general.image {
-            previewImage = img
-            currentAssetID = nil
-            imageFromPasteboard = true
-            sourceBadge = "剪贴板截屏"
-            deletedOriginalNotice = nil
-            statusBanner = nil
+            setPreview(img, assetID: nil, fromPasteboard: true, badge: "剪贴板截屏")
         } else {
-            statusIsError = true
-            statusBanner = "剪贴板里当前没有图片，请先截屏或复制一张图片。"
+            toast = "剪贴板里没有图片，先截屏或复制一张图片"
         }
     }
 
     private func loadLatestScreenshot(autoRun: Bool) async {
+        await MainActor.run { self.isLoadingImage = true }
+        defer { Task { @MainActor in self.isLoadingImage = false } }
+
         // 1. 优先检查剪贴板最新图片
         if UIPasteboard.general.hasImages, let img = UIPasteboard.general.image {
             await MainActor.run {
-                self.previewImage = img
-                self.currentAssetID = nil
-                self.imageFromPasteboard = true
-                self.sourceBadge = "剪贴板最新截屏"
-                self.deletedOriginalNotice = nil
+                self.setPreview(img, assetID: nil, fromPasteboard: true, badge: "剪贴板截屏")
             }
             if autoRun {
                 await MainActor.run { self.startVisionAnalysis() }
@@ -455,7 +583,7 @@ struct ScreenshotVisionView: View {
         let fetched = PHAsset.fetchAssets(with: .image, options: options)
         guard let latest = fetched.firstObject else {
             await MainActor.run {
-                self.sourceBadge = "相册暂无截屏"
+                self.sourceBadge = status == .limited ? "只能访问部分照片，未找到截屏" : "相册里没有截屏"
             }
             return
         }
@@ -465,6 +593,8 @@ struct ScreenshotVisionView: View {
             req.deliveryMode = .highQualityFormat
             req.isNetworkAccessAllowed = true
             req.isSynchronous = false
+            // 防止回调被系统多次调用导致 continuation 重复恢复而崩溃
+            let once = ResumeOnceFlag()
             PHImageManager.default().requestImage(
                 for: latest,
                 targetSize: CGSize(width: 1440, height: 1440),
@@ -472,24 +602,23 @@ struct ScreenshotVisionView: View {
                 options: req
             ) { img, info in
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !isDegraded {
-                    cont.resume(returning: img)
-                }
+                guard !isDegraded, once.claim() else { return }
+                cont.resume(returning: img)
             }
         }
 
         if let loadedImage {
             let ageSec = Int(max(0, Date().timeIntervalSince(latest.creationDate ?? Date())))
-            let ageDesc = ageSec < 60 ? "\(ageSec)秒前" : (ageSec < 3600 ? "\(ageSec / 60)分钟前" : "最近")
+            let ageDesc = ageSec < 60 ? "\(ageSec) 秒前" : (ageSec < 3600 ? "\(ageSec / 60) 分钟前" : "较早")
             await MainActor.run {
-                self.previewImage = loadedImage
-                self.currentAssetID = latest.localIdentifier
-                self.imageFromPasteboard = false
-                self.sourceBadge = "相册最新截屏 · \(ageDesc)"
-                self.deletedOriginalNotice = nil
+                self.setPreview(loadedImage, assetID: latest.localIdentifier, fromPasteboard: false, badge: "最新截屏 · \(ageDesc)")
             }
             if autoRun {
                 await MainActor.run { self.startVisionAnalysis() }
+            }
+        } else {
+            await MainActor.run {
+                self.toast = "读取截屏失败，可能还在从 iCloud 下载，稍后再试"
             }
         }
     }
@@ -497,12 +626,11 @@ struct ScreenshotVisionView: View {
     private func startVisionAnalysis() {
         guard let img = previewImage,
               let jpeg = ScreenshotImageHelper.prepareJPEGData(from: img) else {
-            statusIsError = true
-            statusBanner = "请先截取或选择一张图片。"
+            toast = "先截屏或选择一张图片"
             return
         }
         let cfg = appState.aiConfig
-        let custom = customQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let custom = trimmedQuestion
         let isPureExtractText = custom.isEmpty && selectedPreset == .extractText
 
         streamTask?.cancel()
@@ -511,11 +639,12 @@ struct ScreenshotVisionView: View {
         statusIsError = false
         let kb = max(1, jpeg.count / 1024)
         statusBanner = isPureExtractText
-            ? "正在通过 Apple 端侧 Vision 极速提取文字…"
-            : "正在分析截屏（\(kb) KB）· \(cfg.activeModelName)…"
+            ? "正在本机识别文字…"
+            : "正在识别（\(kb) KB · \(cfg.resolvedVisionModel())）…"
 
         let prompt = custom.isEmpty ? selectedPreset.promptText : custom
         let sys = custom.isEmpty ? selectedPreset.systemInstruction : "你是视觉 AI 助手，请结合截屏内容直接给出清晰实用的纯文本回答。"
+        let historyTitle = custom.isEmpty ? "截屏 · \(selectedPreset.appPlainTitle)" : "截屏 · 提问"
         let autoDelete = appState.settings.autoDeleteUploadedScreenshot
         let assetIDToDelete = currentAssetID
         let clearPasteboard = imageFromPasteboard
@@ -524,7 +653,7 @@ struct ScreenshotVisionView: View {
             let ocrText = await ScreenshotOCRService.recognizeText(from: img)
             if Task.isCancelled { return }
 
-            // 1. 「📝 提取文字」优先走本机 Apple Vision OCR（0.25s 秒出，无需联网/视觉模型）
+            // 1. 「提取文字」优先走本机 Apple Vision OCR（无需联网 / 视觉模型）
             if isPureExtractText && !ocrText.isEmpty {
                 let finalClean = AITextSanitizer.clean(ocrText, streaming: false)
                 await MainActor.run {
@@ -532,12 +661,11 @@ struct ScreenshotVisionView: View {
                     self.isAnalyzing = false
                     UIPasteboard.general.string = finalClean
                     _ = ClipboardStore.record(finalClean)
-                    AIRecentHistoryStore.record(title: "📷 提取文字", output: finalClean, prompt: prompt)
+                    AIRecentHistoryStore.record(title: historyTitle, output: finalClean, prompt: prompt)
                     self.statusIsError = false
-                    self.statusBanner = "✓ 本机端侧极速提字完成并已复制！切回聊天 App 点顶栏即可粘贴"
-                    if autoDelete && clearPasteboard {
-                        self.deletedOriginalNotice = "✓ 剪贴板原截屏已替换清理，零弹窗零残留"
-                    }
+                    self.statusBanner = autoDelete && clearPasteboard
+                        ? "本机识别完成，已复制结果（剪贴板里的原截屏已被替换）"
+                        : "本机识别完成，已复制结果"
                 }
                 return
             }
@@ -548,9 +676,9 @@ struct ScreenshotVisionView: View {
                     self.statusIsError = true
                     if !ocrText.isEmpty {
                         self.resultText = ocrText
-                        self.statusBanner = "已先为你本机提取截屏文字；填写 AI Key 后可执行回复/翻译/总结。"
+                        self.statusBanner = "已先在本机提取出文字；填写 AI 密钥后可以回复、翻译和总结"
                     } else {
-                        self.statusBanner = "尚未配置 AI API Key，请先在「AI」页填写 Key。"
+                        self.statusBanner = "还没有填写 AI 密钥，请先到「AI」页填写"
                     }
                 }
                 return
@@ -558,7 +686,7 @@ struct ScreenshotVisionView: View {
 
             var acc = ""
             var lastFlush = CACurrentMediaTime()
-            let supportsNativeVision = ScreenshotOCRService.modelLikelySupportsVision(modelID: cfg.resolvedModel(), provider: cfg.provider)
+            let supportsNativeVision = ScreenshotOCRService.modelLikelySupportsVision(modelID: cfg.resolvedVisionModel(), provider: cfg.provider)
             var needsOCRFallback = !supportsNativeVision
 
             if supportsNativeVision {
@@ -590,7 +718,7 @@ struct ScreenshotVisionView: View {
                         await MainActor.run {
                             self.isAnalyzing = false
                             self.statusIsError = true
-                            self.statusBanner = "识图失败：\(error.localizedDescription)"
+                            self.statusBanner = "识别失败：\(error.localizedDescription)"
                         }
                         return
                     }
@@ -599,20 +727,20 @@ struct ScreenshotVisionView: View {
                 }
             }
 
-            // 2. 纯文本模型（如 DeepSeek）或视觉接口异常时，自动回退「端侧 OCR 文字 → 文本 LLM」
+            // 2. 纯文本模型（如 DeepSeek）或视觉接口异常时，自动回退「本机 OCR 文字 → 文本模型」
             if acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && needsOCRFallback {
                 if ocrText.isEmpty {
                     await MainActor.run {
                         self.isAnalyzing = false
                         self.statusIsError = true
-                        self.statusBanner = "未在图中识别到文字，且当前模型（\(cfg.activeModelName)）不支持直接看纯照片；请切换 Gemini / GPT-4o / Qwen-VL。"
+                        self.statusBanner = "图里没有识别到文字，而当前模型（\(cfg.activeModelName)）不能直接看图；可以换成 Gemini、GPT-4o 或 Qwen-VL"
                     }
                     return
                 }
                 await MainActor.run {
-                    self.statusBanner = "已本机提取截屏文字，正在用 \(cfg.activeModelName) 生成回答…"
+                    self.statusBanner = "已在本机提取文字，正在用 \(cfg.activeModelName) 生成回答…"
                 }
-                let ocrPrompt = "【截屏文字内容（端侧 OCR 识别）】\n\(ocrText)\n\n请根据以上内容完成：\(prompt)"
+                let ocrPrompt = "【截屏文字内容（本机 OCR 识别）】\n\(ocrText)\n\n请根据以上内容完成：\(prompt)"
                 do {
                     for try await event in aiClient.streamEvents(
                         prompt: ocrPrompt,
@@ -640,7 +768,7 @@ struct ScreenshotVisionView: View {
                         self.isAnalyzing = false
                         self.statusIsError = true
                         self.resultText = ocrText
-                        self.statusBanner = "AI 请求失败（\(error.localizedDescription)），已保留端侧提取原文。"
+                        self.statusBanner = "AI 请求失败（\(error.localizedDescription)），先显示本机提取的原文"
                     }
                     return
                 }
@@ -653,25 +781,22 @@ struct ScreenshotVisionView: View {
                 self.isAnalyzing = false
                 if finalClean.isEmpty {
                     self.statusIsError = true
-                    self.statusBanner = "模型未返回有效文本，请重试或切换「📝 提取文字」。"
+                    self.statusBanner = "模型没有返回内容，请重试，或改用「提取文字」"
                 } else {
                     UIPasteboard.general.string = finalClean
                     _ = ClipboardStore.record(finalClean)
-                    AIRecentHistoryStore.record(title: "📷 截屏识图", output: finalClean, prompt: prompt)
+                    AIRecentHistoryStore.record(title: historyTitle, output: finalClean, prompt: prompt)
                     self.statusIsError = false
-                    self.statusBanner = "✓ 识别完成并已自动复制纯净结果！切回聊天 App 点键盘顶栏即可发送"
+                    self.statusBanner = autoDelete && clearPasteboard
+                        ? "识别完成，已复制结果（剪贴板里的原截屏已被替换）"
+                        : "识别完成，已复制结果"
                 }
             }
 
-            // 仅在真正产出结果且用户开启开关时处理清理（剪贴板零弹窗，相册图由用户在本工作台内主动确认）
-            if autoDelete && !finalClean.isEmpty {
-                if clearPasteboard {
-                    await MainActor.run {
-                        self.deletedOriginalNotice = "✓ 剪贴板中的原截屏已替换清理，零弹窗零残留"
-                    }
-                } else if let assetID = assetIDToDelete, !assetID.isEmpty {
-                    await deleteAssetByID(assetID)
-                }
+            // 仅在真正产出结果且用户开启开关时清理相册原图（系统会弹窗确认）
+            if autoDelete && !finalClean.isEmpty && !clearPasteboard,
+               let assetID = assetIDToDelete, !assetID.isEmpty {
+                await deleteAssetByID(assetID)
             }
         }
     }
@@ -681,6 +806,7 @@ struct ScreenshotVisionView: View {
         await deleteAssetByID(assetID)
     }
 
+    /// 删除相册图片：iOS 会弹出系统确认框，用户取消时不会删除
     private func deleteAssetByID(_ assetID: String) async {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
         guard assets.count > 0 else { return }
@@ -692,11 +818,11 @@ struct ScreenshotVisionView: View {
                 if self.currentAssetID == assetID {
                     self.currentAssetID = nil
                 }
-                self.deletedOriginalNotice = "✓ 上传的原截屏已从相册彻底删除，不占空间"
+                self.toast = "原截屏已从相册删除"
             }
         } catch {
             await MainActor.run {
-                self.deletedOriginalNotice = "⚠️ 未删除原截屏（已取消确认或缺少相册权限）"
+                self.toast = "没有删除原截屏（已取消，或缺少照片权限）"
             }
         }
     }

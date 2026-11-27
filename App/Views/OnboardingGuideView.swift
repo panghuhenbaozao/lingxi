@@ -1,102 +1,144 @@
 import SwiftUI
 import UIKit
 
+/// 启用灵犀输入法引导（v6）：3 步，每步实时显示完成状态，主按钮随进度切换；从系统设置返回自动刷新。
 struct OnboardingGuideView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var step1Done: Bool { appState.isKeyboardEnabled }
+    private var step2Done: Bool { appState.isKeyboardFullAccessConfirmed }
+    private var allDone: Bool { step1Done && step2Done }
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    HStack(spacing: 12) {
-                        Image(systemName: appState.isKeyboardEnabled ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
-                            .font(.title2)
-                            .foregroundStyle(appState.isKeyboardEnabled ? Color(Design.Palette.success) : Color.orange)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(appState.isKeyboardEnabled ? "灵犀输入法已在系统启用" : "尚未检测到灵犀键盘启用")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(Color(Design.Palette.ink))
-                            Text(appState.isKeyboardEnabled ? "可以关闭本页，直接回到首页试打体验纯白圆角键盘。" : "按下方 3 步开启后回到本 App，状态会自动变绿。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    VStack(spacing: 12) {
+                        LXIconTile(
+                            icon: allDone ? "checkmark.seal.fill" : "keyboard",
+                            tint: allDone ? Color(Design.Palette.success) : Color(Design.Palette.accent),
+                            size: 60
+                        )
+                        Text(allDone ? "灵犀输入法已可以使用" : "3 步启用灵犀输入法")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(Color(Design.Palette.ink))
+                        Text(allDone
+                             ? "在任意 App 的输入框里切换到灵犀键盘就能开始打字。"
+                             : "大约 30 秒。完成后回到这里，状态会自动更新。")
+                            .font(.footnote)
+                            .foregroundStyle(Color(Design.Palette.stone))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
                 }
 
                 Section {
-                    guideRow(step: "1", title: "前往系统设置", detail: "点击下方「打开系统设置」，进入「灵犀输入法 -> 键盘」。")
-                    guideRow(step: "2", title: "开启灵犀键盘", detail: "打开「灵犀输入法」开关；如果列表里没有，请在 系统设置 -> 通用 -> 键盘 -> 键盘 -> 添加新键盘 中选择「灵犀输入法」。")
-                } header: {
-                    Text("第一步：添加灵犀输入法").font(.headline)
-                }
-
-                Section {
-                    guideRow(step: "3", title: "打开允许完全访问", detail: "用于：主 App 与键盘之间通过 App Group 加密容器共享皮肤/词库/剪贴板预览、系统按键震动音效，以及您主动触发的 AI 辅助功能。")
-                    Text("架构铁律：普通拼音/双拼/五笔打字 100% 在本地 SQLite 引擎离线运行，永不上传任何按键或输入原文；云同步采用端侧 E2EE 零知识加密。")
-                        .font(.footnote)
-                        .foregroundStyle(Color(Design.Palette.slate))
-                        .padding(.top, Design.Spacing.xs)
-                } header: {
-                    Text("第二步：开启「允许完全访问」").font(.headline)
-                }
-
-                Section {
-                    guideRow(step: "4", title: "切换键盘", detail: "在任意输入框长按左下角地球仪 🌐 图标，选择「灵犀输入法」。")
-                } header: {
-                    Text("第三步：切出键盘即可开打").font(.headline)
-                }
-
-                Section {
-                    Button {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Label("打开系统设置", systemImage: "gearshape.fill")
-                                .fontWeight(.semibold)
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color(Design.Palette.accent))
+                    stepRow(
+                        number: 1,
+                        title: "添加键盘",
+                        detail: "点下方按钮进入系统设置，依次点「键盘」→ 打开「灵犀输入法」。",
+                        hint: "找不到？也可以在 设置 → 通用 → 键盘 → 键盘 → 添加新键盘 里选择「灵犀输入法」。",
+                        done: step1Done,
+                        isCurrent: !step1Done
+                    )
+                    stepRow(
+                        number: 2,
+                        title: "允许完全访问",
+                        detail: "在同一页面打开「允许完全访问」，然后切到灵犀键盘一次，这一步就会自动打勾。",
+                        hint: "平时打字完全在本机离线运行，不会上传你输入的内容；只有主动用 AI、翻译、跨屏接力时才联网。",
+                        done: step2Done,
+                        isCurrent: step1Done && !step2Done
+                    )
+                    stepRow(
+                        number: 3,
+                        title: "切换到灵犀键盘",
+                        detail: "在任意输入框长按键盘左下角的地球图标，选择「灵犀输入法」。",
+                        hint: nil,
+                        done: allDone,
+                        isCurrent: allDone
+                    )
                 }
             }
             .listStyle(.insetGrouped)
+            .safeAreaInset(edge: .bottom) {
+                Group {
+                    if allDone {
+                        Button {
+                            appState.requestedTab = 0
+                            dismiss()
+                        } label: {
+                            Label("去首页试打", systemImage: "keyboard")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                    } else {
+                        Button {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            Label("打开系统设置", systemImage: "gearshape.fill")
+                        }
+                        .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.regularMaterial)
+            }
             .navigationTitle("启用灵犀输入法")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
                 }
+            }
+            .onAppear { appState.refreshAll() }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { appState.refreshAll() }
             }
         }
     }
 
-    private func guideRow(step: String, title: String, detail: String) -> some View {
+    private func stepRow(number: Int, title: String, detail: String, hint: String?, done: Bool, isCurrent: Bool) -> some View {
         HStack(alignment: .top, spacing: 14) {
-            Text(step)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color(Design.Palette.ink))
-                .frame(width: 26, height: 26)
-                .background(Color(Design.Palette.surface))
-                .clipShape(Circle())
-                .overlay(
-                    Circle()
-                        .stroke(Color(Design.Palette.hairline), lineWidth: 1)
-                )
+            ZStack {
+                Circle()
+                    .fill(done ? Color(Design.Palette.success) : (isCurrent ? Color(Design.Palette.accent) : Color(Design.Palette.surface)))
+                    .frame(width: 28, height: 28)
+                if done {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.white)
+                } else {
+                    Text("\(number)")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(isCurrent ? Color.white : Color(Design.Palette.stone))
+                }
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color(Design.Palette.ink))
                 Text(detail)
-                    .font(.subheadline)
-                    .foregroundStyle(Color(Design.Palette.slate))
+                    .font(.footnote)
+                    .foregroundStyle(Color(Design.Palette.charcoal))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let hint, !done {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(.vertical, 6)
+        .opacity(done && !isCurrent ? 0.7 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("第 \(number) 步，\(title)，\(done ? "已完成" : "未完成")。\(detail)")
     }
 }

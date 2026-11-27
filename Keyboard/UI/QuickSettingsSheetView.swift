@@ -176,6 +176,50 @@ final class QuickSettingsSheetView: UIView {
         ])
         stackView.addArrangedSubview(schemeScroll)
 
+        // 1.5 场景键盘布局包（标准 / 仓式效率 / 程序员极客 / 写作创作者 / 商务办公，键盘内 1 键秒切）
+        let packLabel = UILabel()
+        packLabel.text = "场景布局包（含划动命令 / 数字行 / 盘古空格）"
+        packLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        packLabel.textColor = theme.keyHintText
+        stackView.addArrangedSubview(packLabel)
+
+        let packScroll = LingxiScrollView()
+        packScroll.showsHorizontalScrollIndicator = false
+        packScroll.translatesAutoresizingMaskIntoConstraints = false
+        packScroll.heightAnchor.constraint(equalToConstant: 34).isActive = true
+
+        let packRow = UIStackView()
+        packRow.axis = .horizontal
+        packRow.spacing = 6
+        for pack in CustomKeyboardLayoutPack.builtInPacks {
+            let active = (pack.id == settings.activeLayoutPackID)
+            let btn = ActionClosureButton(type: .system)
+            btn.setTitle(pack.name, for: .normal)
+            btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
+            btn.backgroundColor = active ? theme.accentFill : theme.keyFill
+            btn.setTitleColor(active ? theme.accentText : theme.keyText, for: .normal)
+            btn.layer.cornerRadius = 8
+            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+            btn.actionHandler = { [weak self] in
+                guard let self else { return }
+                pack.apply(to: &self.settings)
+                self.settings.save()
+                self.onSettingsChanged?(self.settings)
+                self.rebuild()
+            }
+            packRow.addArrangedSubview(btn)
+        }
+        packRow.translatesAutoresizingMaskIntoConstraints = false
+        packScroll.addSubview(packRow)
+        NSLayoutConstraint.activate([
+            packRow.topAnchor.constraint(equalTo: packScroll.topAnchor),
+            packRow.bottomAnchor.constraint(equalTo: packScroll.bottomAnchor),
+            packRow.leadingAnchor.constraint(equalTo: packScroll.leadingAnchor),
+            packRow.trailingAnchor.constraint(equalTo: packScroll.trailingAnchor),
+            packRow.heightAnchor.constraint(equalTo: packScroll.heightAnchor),
+        ])
+        stackView.addArrangedSubview(packScroll)
+
         // 2. 单手模式
         stackView.addArrangedSubview(makeSegmentedRow(
             label: "单手模式",
@@ -262,6 +306,50 @@ final class QuickSettingsSheetView: UIView {
         ])
         stackView.addArrangedSubview(skinScroll)
 
+        // 4.8 隐身无痕模式一键隐私开关（对标 HeliBoard / FlorisBoard：暂停词库学习、剪贴板记录、统计与 AI 历史）
+        let incognitoBtn = ActionClosureButton(type: .system)
+        incognitoBtn.setTitle(
+            settings.incognitoModeEnabled ? "🕶 无痕模式已开启（点此退出 · 零记录）" : "🕶 开启隐身无痕模式（暂停词库/剪贴板/统计）",
+            for: .normal
+        )
+        incognitoBtn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        incognitoBtn.titleLabel?.lineBreakMode = .byTruncatingTail
+        incognitoBtn.backgroundColor = settings.incognitoModeEnabled
+            ? UIColor.systemOrange.withAlphaComponent(0.22)
+            : theme.specialKeyFill
+        incognitoBtn.setTitleColor(settings.incognitoModeEnabled ? UIColor.systemOrange : theme.keyText, for: .normal)
+        incognitoBtn.layer.cornerRadius = 9
+        incognitoBtn.contentEdgeInsets = UIEdgeInsets(top: 7, left: 10, bottom: 7, right: 10)
+        incognitoBtn.actionHandler = { [weak self] in
+            guard let self else { return }
+            self.settings.incognitoModeEnabled.toggle()
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+            self.rebuild()
+        }
+        stackView.addArrangedSubview(incognitoBtn)
+
+        // 4.6 长辈 / 护眼大字关怀一键模式 + 选词轻声播报
+        let careRow = UIStackView()
+        careRow.axis = .horizontal
+        careRow.distribution = .fillEqually
+        careRow.spacing = 6
+        careRow.addArrangedSubview(makeToggleChip("👴 大字关怀", on: settings.elderCareModeEnabled, theme: theme) { [weak self] in
+            guard let self else { return }
+            self.settings.setElderCareMode(!self.settings.elderCareModeEnabled)
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+            self.rebuild()
+        })
+        careRow.addArrangedSubview(makeToggleChip("🔊 选词播报", on: settings.speakSelectedCandidateEnabled, theme: theme) { [weak self] in
+            guard let self else { return }
+            self.settings.speakSelectedCandidateEnabled.toggle()
+            self.settings.save()
+            self.onSettingsChanged?(self.settings)
+            self.rebuild()
+        })
+        stackView.addArrangedSubview(careRow)
+
         // 5. 高频开关（精简为 2 排 6 个常用开关 + 1 排快捷能力，更多细节统一收口至主 App「设置」）
         let row1 = UIStackView()
         row1.axis = .horizontal
@@ -282,7 +370,11 @@ final class QuickSettingsSheetView: UIView {
             self.onSettingsChanged?(self.settings)
             self.rebuild()
         })
-        row1.addArrangedSubview(makeToggleChip(settings.traditionalChineseEnabled ? "繁体" : "简体", on: settings.traditionalChineseEnabled, theme: theme) { [weak self] in
+        row1.addArrangedSubview(makeToggleChip(
+            settings.traditionalChineseEnabled ? "繁体·\(settings.traditionalVariant.shortBadge)" : "简体",
+            on: settings.traditionalChineseEnabled,
+            theme: theme
+        ) { [weak self] in
             guard let self else { return }
             self.settings.traditionalChineseEnabled.toggle()
             self.settings.save()
@@ -290,6 +382,27 @@ final class QuickSettingsSheetView: UIView {
             self.rebuild()
         })
         stackView.addArrangedSubview(row1)
+
+        if settings.traditionalChineseEnabled {
+            stackView.addArrangedSubview(makeSegmentedRow(
+                label: "繁体标准",
+                options: TraditionalChineseVariant.allCases.map(\.shortBadge).enumerated().map { idx, _ in
+                    switch TraditionalChineseVariant.allCases[idx] {
+                    case .standard: return "标准繁"
+                    case .taiwanPhrase: return "台湾正体"
+                    case .hongKong: return "香港繁"
+                    }
+                },
+                selectedIndex: TraditionalChineseVariant.allCases.firstIndex(of: settings.traditionalVariant) ?? 1,
+                theme: theme
+            ) { [weak self] idx in
+                guard let self else { return }
+                self.settings.traditionalVariant = TraditionalChineseVariant.allCases[idx]
+                self.settings.save()
+                self.onSettingsChanged?(self.settings)
+                self.rebuild()
+            })
+        }
 
         let row2 = UIStackView()
         row2.axis = .horizontal

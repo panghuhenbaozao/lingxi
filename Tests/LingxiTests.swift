@@ -1,3 +1,5 @@
+import CryptoKit
+import UIKit
 import XCTest
 
 final class LingxiTests: XCTestCase {
@@ -1150,6 +1152,59 @@ final class LingxiTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ThemeCustomization.self, from: legacyJSON)
         XCTAssertEqual(decoded.lightThemeID, "sakura_mist")
         XCTAssertEqual(decoded.appearanceMode, .alwaysLight)
+    }
+
+    func testConcealedPasteboardItemCarriesMarkerAndPlainText() {
+        // 纯逻辑测试：不读写系统剪贴板（CI 为无宿主单元测试，系统剪贴板不可依赖）
+        let item = ConcealedPasteboard.makeItem("91310000MA1FL0000X")
+        XCTAssertEqual(item[ConcealedPasteboard.plainTextType] as? String, "91310000MA1FL0000X", "保险箱复制后仍应能正常粘贴文本")
+        XCTAssertNotNil(item[ConcealedPasteboard.concealedType], "保险箱复制必须带 Concealed 标记")
+        XCTAssertTrue(ConcealedPasteboard.isConcealed(types: Array(item.keys)))
+        XCTAssertFalse(ConcealedPasteboard.isConcealed(types: ["public.utf8-plain-text"]), "普通文本不应被识别为保险箱内容")
+        XCTAssertFalse(ConcealedPasteboard.isConcealed(types: []))
+    }
+
+    func testToastTextStripsLegacyPrefixesAndClassifiesTone() {
+        XCTAssertEqual(LXToastText.clean("✓ 已复制"), "已复制")
+        XCTAssertEqual(LXToastText.clean("⚠️ 网络超时"), "网络超时")
+        XCTAssertEqual(LXToastText.clean("  已保存  "), "已保存")
+        XCTAssertEqual(LXToastText.tone(of: "✓ 已复制"), .success)
+        XCTAssertEqual(LXToastText.tone(of: "拉取失败：401"), .error)
+        XCTAssertEqual(LXToastText.tone(of: "⚠️ 注意"), .error)
+        XCTAssertEqual(LXToastText.tone(of: "剪贴板是空的"), .info)
+        XCTAssertEqual(LXToastText.tone(of: "所选技能已存在"), .info)
+    }
+
+    func testRelayPairCodeIsNeverTheLegacySharedDefault() {
+        // 旧版所有人共用 886699，会互相收到剪贴板内容：新配置必须是随机码，旧码与空码需要迁移
+        XCTAssertTrue(ClipboardRelayConfig.needsPrivatePairCode(ClipboardRelayConfig.legacySharedPairCode))
+        XCTAssertTrue(ClipboardRelayConfig.needsPrivatePairCode("  "))
+        XCTAssertFalse(ClipboardRelayConfig.needsPrivatePairCode("204817"))
+        let fresh = ClipboardRelayConfig()
+        XCTAssertNotEqual(fresh.pairCode, ClipboardRelayConfig.legacySharedPairCode)
+        XCTAssertEqual(fresh.pairCode.count, 6)
+        XCTAssertTrue(fresh.pairCode.allSatisfy(\.isNumber))
+    }
+
+    func testLexiconTSVParserPreviewMatchesImportRules() {
+        // 手机上不方便输入 Tab：逗号 / 全角逗号 / 等号都应转换为 Tab
+        XCTAssertEqual(LexiconTSVParser.normalize("mail,me@example.com"), "mail\tme@example.com")
+        XCTAssertEqual(LexiconTSVParser.normalize("zjtd，字节跳动"), "zjtd\t字节跳动")
+        XCTAssertEqual(LexiconTSVParser.normalize("ling xi=灵犀"), "ling xi\t灵犀")
+        // 内容里的逗号不应被拆开：编码部分不是纯字母时保持原样
+        XCTAssertEqual(LexiconTSVParser.normalize("你好,世界"), "你好,世界")
+
+        let custom = "# 注释\nmail,me@example.com\nzjtd\t字节跳动\n123\t数字编码无效\n\n只有一列"
+        XCTAssertEqual(LexiconTSVParser.validCustomCount(custom), 2)
+
+        let user = "ling xi,灵犀\nshu'ru'fa\t输入法\t5\t1\na b c d e f g h i\t太长\n灵犀"
+        XCTAssertEqual(LexiconTSVParser.validUserCount(user), 2)
+
+        XCTAssertTrue(LexiconTSVParser.isValidCode("mail"))
+        XCTAssertTrue(LexiconTSVParser.isValidCode("zi jie"))
+        XCTAssertFalse(LexiconTSVParser.isValidCode("邮件"))
+        XCTAssertFalse(LexiconTSVParser.isValidCode("m@il"))
+        XCTAssertFalse(LexiconTSVParser.isValidCode("   "))
     }
 
     func testClipboardPendingBannerLifecycleAndAccountConfigDecode() throws {
@@ -2445,5 +2500,1180 @@ final class LingxiTests: XCTestCase {
         }
         let yiLongSingles = engine.query(raw: "yiqiqukankanba", settings: settings).candidates.filter { $0.word.count == 1 }
         XCTAssertGreaterThanOrEqual(yiLongSingles.count, 80, "长句输入下首音节展开单字池应完整保留 80+ 单字")
+    }
+
+    func testV59SecurityHardeningAndAIV4Upgrades() throws {
+        // 1. 隐私剪贴板防泄漏策略（纯函数，不触碰 UIPasteboard.general）
+        XCTAssertFalse(
+            ConcealedPasteboard.shouldAllowPassiveRead(types: [ConcealedPasteboard.concealedType], text: "普通内容"),
+            "带 ConcealedType 标记的剪贴板绝不得被被动读取"
+        )
+        XCTAssertFalse(
+            ConcealedPasteboard.shouldAllowPassiveRead(types: ["public.utf8-plain-text"], text: "LXBRIDGE1:abc123"),
+            "侧载桥接令牌绝不得被被动读入键盘历史或发给 AI"
+        )
+        XCTAssertFalse(
+            ConcealedPasteboard.shouldAllowPassiveRead(types: ["public.utf8-plain-text"], text: "身份证 11010519900307281X"),
+            "含敏感证件号文本应被被动读取拦截"
+        )
+        XCTAssertTrue(
+            ConcealedPasteboard.shouldAllowPassiveRead(types: ["public.utf8-plain-text"], text: "明天下午三点会议室见"),
+            "普通聊天文本应允许读取"
+        )
+
+        // 2. 本地保险箱 AES-256-GCM 静态加密（LXV1）+ 篡改拦截 + 旧明文迁移兼容
+        let vaultKey = SymmetricKey(size: .bits256)
+        let wrongKey = SymmetricKey(size: .bits256)
+        let sampleItems = [
+            SecureVaultItem(title: "开票税号", category: "开票", value: "91310000MA1FL8888X"),
+            SecureVaultItem(title: "公司地址", category: "地址", value: "上海市浦东新区张江路 88 号"),
+        ]
+        let sealedVault = try SecureSnippetVault.sealItems(sampleItems, key: vaultKey)
+        XCTAssertTrue(sealedVault.starts(with: Data("LXV1".utf8)), "加密保险箱应带 LXV1 魔数头")
+        XCTAssertFalse(String(decoding: sealedVault, as: UTF8.self).contains("91310000MA1FL8888X"), "密文落盘不得泄露明文税号")
+        let reopened = try SecureSnippetVault.openItems(sealedVault, key: vaultKey)
+        XCTAssertEqual(reopened, sampleItems)
+        XCTAssertThrowsError(try SecureSnippetVault.openItems(sealedVault, key: wrongKey), "错误密钥必须解密失败")
+        var tampered = sealedVault
+        tampered[tampered.count - 1] ^= 0xFF
+        XCTAssertThrowsError(try SecureSnippetVault.openItems(tampered, key: vaultKey), "密文被篡改后必须认证失败")
+        let legacyPlain = try JSONEncoder().encode(sampleItems)
+        let migrated = try SecureSnippetVault.openItems(legacyPlain, key: vaultKey)
+        XCTAssertEqual(migrated, sampleItems, "旧版明文保险箱 JSON 应无缝兼容解码")
+
+        // 3. 零知识 E2EE 端侧 PBKDF2 主密钥派生
+        let zk1 = try XCTUnwrap(CloudCredentialStore.deriveClientMasterSecret(password: "Passw0rd!2026", salt: "salt-a", rounds: 5_000))
+        let zk2 = try XCTUnwrap(CloudCredentialStore.deriveClientMasterSecret(password: "Passw0rd!2026", salt: "salt-a", rounds: 5_000))
+        let zkDiffPwd = try XCTUnwrap(CloudCredentialStore.deriveClientMasterSecret(password: "OtherPass!2026", salt: "salt-a", rounds: 5_000))
+        let zkDiffSalt = try XCTUnwrap(CloudCredentialStore.deriveClientMasterSecret(password: "Passw0rd!2026", salt: "salt-b", rounds: 5_000))
+        XCTAssertEqual(zk1.count, 32)
+        XCTAssertEqual(zk1, zk2)
+        XCTAssertNotEqual(zk1, zkDiffPwd)
+        XCTAssertNotEqual(zk1, zkDiffSalt)
+
+        // 4. AIConfig v4：多渠道档案不覆盖 + 四路模型路由 + 键盘技能排布 + 技能包 JSON 往返
+        var cfg = AIConfig()
+        XCTAssertEqual(cfg.geminiModel, GeminiModelOption.flash25.rawValue)
+        cfg.provider = .openAICompatible
+        cfg.openAIBaseURL = "https://api.deepseek.com/v1"
+        cfg.openAIModel = "deepseek-chat"
+        cfg.fastModel = "deepseek-chat"
+        cfg.deepModel = "deepseek-reasoner"
+        cfg.visionModel = "gpt-4o"
+        cfg.sttModel = "whisper-large-v3"
+        cfg.customHeaders = ["HTTP-Referer": "https://lingxi.ime"]
+        cfg.saveCurrentAsProfile(name: "DeepSeek 主力", createNew: true)
+
+        cfg.openAIBaseURL = "https://openrouter.ai/api/v1"
+        cfg.openAIModel = "google/gemini-2.5-flash"
+        cfg.visionModel = "google/gemini-2.5-flash"
+        cfg.customHeaders = ["X-Title": "Lingxi"]
+        cfg.saveCurrentAsProfile(name: "OpenRouter 备用", createNew: true)
+        XCTAssertEqual(cfg.profiles.count, 2, "createNew: true 必须新增档案而非覆盖原档案")
+        XCTAssertEqual(cfg.profiles[0].visionModel, "gpt-4o")
+        XCTAssertEqual(cfg.profiles[0].customHeaders["HTTP-Referer"], "https://lingxi.ime")
+
+        let applied = cfg.applying(profile: cfg.profiles[0])
+        XCTAssertEqual(applied.openAIModel, "deepseek-chat")
+        XCTAssertEqual(applied.resolvedVisionModel(), "gpt-4o")
+        XCTAssertEqual(applied.resolvedSTTModel(baseURL: "https://api.openai.com/v1"), "whisper-large-v3")
+
+        var autoSTTCfg = AIConfig()
+        autoSTTCfg.provider = .openAICompatible
+        XCTAssertEqual(autoSTTCfg.resolvedSTTModel(baseURL: "https://api.siliconflow.cn/v1"), "FunAudioLLM/SenseVoiceSmall")
+        XCTAssertEqual(autoSTTCfg.resolvedSTTModel(baseURL: "https://api.groq.com/openai/v1"), "whisper-large-v3-turbo")
+        XCTAssertEqual(autoSTTCfg.resolvedSTTModel(baseURL: "https://api.openai.com/v1"), "whisper-1")
+
+        XCTAssertEqual(cfg.resolvedKeyboardBuiltinActions.count, 8, "默认键盘内置技能应包含 8 项核心推荐能力")
+        cfg.enabledBuiltinActions = [AIPresetAction.eqReply.rawValue, AIPresetAction.strategist.rawValue]
+        XCTAssertEqual(cfg.resolvedKeyboardBuiltinActions, [.eqReply, .strategist])
+
+        let p1 = CustomAIPromptTemplate(title: "催进度", instruction: "礼貌催促", isPinned: true)
+        let p2 = CustomAIPromptTemplate(title: "写周报", instruction: "整理本周工作", isPinned: false)
+        cfg.customPrompts = [p1, p2]
+        cfg.keyboardShowAllCustomPrompts = true
+        XCTAssertEqual(cfg.resolvedKeyboardCustomPrompts.map(\.title), ["催进度", "写周报"])
+        cfg.keyboardShowAllCustomPrompts = false
+        XCTAssertEqual(cfg.resolvedKeyboardCustomPrompts.map(\.title), ["催进度"])
+
+        let exportedJSON = try XCTUnwrap(cfg.exportCustomPromptsJSON())
+        let reimported = try XCTUnwrap(AIConfig.decodeCustomPromptsJSON(exportedJSON))
+        XCTAssertEqual(reimported.map(\.title), ["催进度", "写周报"])
+
+        // 5. 场景绑定知识卡过滤 + System Prompt 动态变量渲染
+        let bossCard = PersonalContextCard(title: "汇报口径", content: "先说结论", sceneTag: "职场", boundScene: .bossClient, isEnabled: true)
+        let friendCard = PersonalContextCard(title: "生活偏好", content: "轻松幽默", sceneTag: "生活", boundScene: .friendPartner, isEnabled: true)
+        let globalCard = PersonalContextCard(title: "全局名片", content: "灵犀产品", sceneTag: "通用", boundScene: nil, isEnabled: true)
+        cfg.contextCards = [bossCard, friendCard, globalCard]
+        cfg.activeScenePersona = .bossClient
+        let bossSystem = AIClient.mergeSystem(base: "日期 {{日期}}：请帮我改写。", config: cfg)
+        XCTAssertFalse(bossSystem.contains("{{日期}}"), "System Prompt 内动态变量必须实时渲染")
+        XCTAssertTrue(bossSystem.contains("[汇报口径]"), "老板场景应注入绑定的汇报口径知识卡")
+        XCTAssertTrue(bossSystem.contains("[全局名片]"), "全局知识卡在所有场景均应生效")
+        XCTAssertFalse(bossSystem.contains("[生活偏好]"), "绑定朋友场景的知识卡不应串入老板场景")
+
+        // 6. OpenAI 推理模型适配 + 多轮 payload + 真实 Token 解析
+        XCTAssertTrue(AIClient.isOpenAIReasoningModel("o3-mini"))
+        XCTAssertTrue(AIClient.isOpenAIReasoningModel("openai/gpt-5-mini"))
+        XCTAssertFalse(AIClient.isOpenAIReasoningModel("deepseek-chat"))
+
+        let o3Payload = AIClient.buildOpenAIChatPayload(
+            prompt: "",
+            turns: [
+                AIChatTurn(role: "user", content: "第一句"),
+                AIChatTurn(role: "assistant", content: "好的"),
+                AIChatTurn(role: "user", content: "再精简"),
+            ],
+            systemInstruction: "系统规则",
+            model: "o3-mini",
+            extraBody: ["reasoning_effort": "medium"],
+            config: cfg
+        )
+        XCTAssertNotNil(o3Payload["max_completion_tokens"])
+        XCTAssertNil(o3Payload["max_tokens"])
+        XCTAssertNil(o3Payload["temperature"], "OpenAI 推理模型不得发送 temperature")
+        let o3Msgs = try XCTUnwrap(o3Payload["messages"] as? [[String: Any]])
+        XCTAssertEqual(o3Msgs.first?["role"] as? String, "developer")
+        XCTAssertEqual(o3Msgs.count, 4)
+
+        let stdPayload = AIClient.buildOpenAIChatPayload(
+            prompt: "你好",
+            systemInstruction: "系统规则",
+            model: "deepseek-chat",
+            extraBody: [:],
+            config: cfg
+        )
+        XCTAssertNotNil(stdPayload["max_tokens"])
+        XCTAssertNotNil(stdPayload["temperature"])
+        XCTAssertNotNil(stdPayload["stream_options"])
+
+        let oaiUsage = AIClient.parseOpenAIUsage(from: [
+            "usage": [
+                "prompt_tokens": 120,
+                "completion_tokens": 80,
+                "completion_tokens_details": ["reasoning_tokens": 30],
+            ]
+        ])
+        XCTAssertEqual(oaiUsage, AITokenUsage(promptTokens: 120, completionTokens: 80, reasoningTokens: 30))
+        let gemUsage = AIClient.parseGeminiUsage(from: [
+            "usageMetadata": [
+                "promptTokenCount": 200,
+                "candidatesTokenCount": 90,
+                "thoughtsTokenCount": 40,
+            ]
+        ])
+        XCTAssertEqual(gemUsage, AITokenUsage(promptTokens: 200, completionTokens: 90, reasoningTokens: 40))
+
+        // 7. AI 一键帮写技能解析 + 账本 Token 字段向后兼容
+        let authored = AIAutoInsightService.parseGeneratedPromptTemplate(
+            "```json\n{\"title\":\"客户跟进邮件\",\"category\":\"职场商务\",\"icon\":\"invalid.icon\",\"instruction\":\"把要点整理成礼貌跟进邮件\",\"useDeepModel\":true}\n```",
+            fallbackGoal: "跟进邮件"
+        )
+        XCTAssertEqual(authored.title, "客户跟进邮件")
+        XCTAssertEqual(authored.icon, "sparkles", "非法图标名必须自动回退为安全默认图标")
+        XCTAssertTrue(authored.useDeepModel)
+        XCTAssertTrue(authored.isAIGenerated)
+
+        let legacyLedger = try JSONDecoder().decode(
+            AIUsageLedgerEntry.self,
+            from: Data("{\"id\":\"l1\",\"timestamp\":1730000000,\"provider\":\"gemini\",\"model\":\"gemini-2.5-flash\",\"feature\":\"polish\",\"thinkingMode\":\"auto\",\"ttftMs\":300,\"totalMs\":900,\"inputChars\":10,\"outputChars\":20,\"thoughtChars\":0}".utf8)
+        )
+        XCTAssertEqual(legacyLedger.totalReportedTokens, 0)
+        let richLedger = AIUsageLedgerEntry(
+            provider: "openai",
+            model: "o3-mini",
+            feature: "workbench_chat",
+            thinkingMode: "medium",
+            ttftMs: 420,
+            totalMs: 1200,
+            inputChars: 30,
+            outputChars: 60,
+            thoughtChars: 20,
+            promptTokens: 100,
+            completionTokens: 50,
+            reasoningTokens: 25
+        )
+        XCTAssertEqual(richLedger.totalReportedTokens, 150)
+    }
+
+    func testV60FlagshipAIPrivacyDiffCostPipelinesAndRelayCrypto() throws {
+        // 1. 端侧 AI 隐私脱敏护盾：6 大内置敏感类型 + 自定义隐私词 + 精确还原 + 跨分片流式还原
+        let rawSecretMsg = "张伟手机 13812345678（备用 13812345678），邮箱 wei@lingxi.im，身份证 11010519900307281X，Key sk-abcdef1234567890abcd，内网 192.168.1.25。"
+        let shielded = AIPrivacyShield.sanitize(rawSecretMsg, customTerms: ["张伟"])
+        XCTAssertTrue(shielded.hasRedactions)
+        XCTAssertFalse(shielded.sanitizedText.contains("张伟"))
+        XCTAssertFalse(shielded.sanitizedText.contains("13812345678"))
+        XCTAssertFalse(shielded.sanitizedText.contains("wei@lingxi.im"))
+        XCTAssertFalse(shielded.sanitizedText.contains("11010519900307281X"))
+        XCTAssertFalse(shielded.sanitizedText.contains("sk-abcdef1234567890abcd"))
+        XCTAssertFalse(shielded.sanitizedText.contains("192.168.1.25"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[PRIV_1]"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[PHONE_1]"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[EMAIL_1]"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[ID_1]"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[SECRET_1]"))
+        XCTAssertTrue(shielded.sanitizedText.contains("[IP_1]"))
+        XCTAssertEqual(AIPrivacyShield.restore(shielded.sanitizedText, mapping: shielded.mapping), rawSecretMsg)
+
+        // 跨分片流式还原状态机：占位符在任意位置被切断也不得闪烁泄露
+        var restorer = AIPrivacyShield.StreamingRestoreBuffer(mapping: shielded.mapping)
+        let chunks = ["收到，已联系 [PR", "IV_1]（电话 [PH", "ONE_1]", "），谢谢！"]
+        var streamedOut = ""
+        for ch in chunks {
+            streamedOut += restorer.push(ch)
+        }
+        streamedOut += restorer.finish()
+        XCTAssertEqual(streamedOut, "收到，已联系 张伟（电话 13812345678），谢谢！")
+
+        // 2. 纯 Swift LCS 逐字红绿 Diff 引擎
+        let sameDiff = AITextDiffEngine.diff(original: "今天天气不错", revised: "今天天气不错")
+        XCTAssertEqual(sameDiff.deletedChars, 0)
+        XCTAssertEqual(sameDiff.insertedChars, 0)
+        XCTAssertEqual(sameDiff.unchangedChars, 6)
+
+        let editDiff = AITextDiffEngine.diff(original: "我今天太忙了发不了", revised: "今天较忙明早发送")
+        XCTAssertGreaterThan(editDiff.deletedChars, 0)
+        XCTAssertGreaterThan(editDiff.insertedChars, 0)
+        XCTAssertGreaterThan(editDiff.changeRatio, 0.2)
+        // 验证 Diff 片段重拼后严格还原原文与新文
+        let reconstructedOld = editDiff.segments.filter { $0.kind != .inserted }.map(\.text).joined()
+        let reconstructedNew = editDiff.segments.filter { $0.kind != .deleted }.map(\.text).joined()
+        XCTAssertEqual(reconstructedOld, "我今天太忙了发不了")
+        XCTAssertEqual(reconstructedNew, "今天较忙明早发送")
+
+        // 3. 主流模型成本估算器（本地 Ollama 免费、云端按 Token 估算）
+        let ollamaEntry = AIUsageLedgerEntry(
+            provider: "openAICompatible", model: "qwen2.5:7b", feature: "polish",
+            thinkingMode: "off", ttftMs: 120, totalMs: 400, inputChars: 100, outputChars: 100, thoughtChars: 0,
+            promptTokens: 1000, completionTokens: 1000
+        )
+        XCTAssertEqual(AICostEstimator.estimateUSD(for: ollamaEntry), 0.0, accuracy: 1e-9)
+
+        let gemEntry = AIUsageLedgerEntry(
+            provider: "gemini", model: "gemini-2.5-flash", feature: "workbench_chat",
+            thinkingMode: "low", ttftMs: 320, totalMs: 900, inputChars: 500, outputChars: 500, thoughtChars: 0,
+            promptTokens: 1_000_000, completionTokens: 1_000_000
+        )
+        XCTAssertEqual(AICostEstimator.estimateUSD(for: gemEntry), 2.80, accuracy: 0.01)
+        XCTAssertTrue(AICostEstimator.formatCNY(2.80).hasPrefix("¥"))
+
+        // 4. 多步 AI 链式流水线编译为键盘技能 + 多话题对话导出 Markdown + 自定义 @ai 前缀识别
+        let pipe = try XCTUnwrap(AIPromptPipeline.defaultPipelines.first)
+        let compiled = pipe.compiledAsCustomPrompt()
+        XCTAssertEqual(compiled.category, "链式流水线")
+        XCTAssertTrue(compiled.isPinned)
+        XCTAssertTrue(compiled.instruction.contains("第1步"))
+        XCTAssertTrue(compiled.instruction.contains("第2步"))
+
+        let thread = AIWorkbenchThread(
+            title: "周报润色",
+            turns: [
+                AIChatTurn(role: "user", content: "帮我润色周报"),
+                AIChatTurn(role: "assistant", content: "本周核心产出如下。", model: "gemini-2.5-flash"),
+            ]
+        )
+        let md = thread.exportMarkdown()
+        XCTAssertTrue(md.contains("# 周报润色"))
+        XCTAssertTrue(md.contains("本周核心产出如下。"))
+
+        let customMatch = InlineAICommandDetector.detect(in: "前面聊了半天 !ai 帮我委婉拒绝加班", customPrefix: "!ai")
+        XCTAssertEqual(customMatch?.command, "帮我委婉拒绝加班")
+        XCTAssertEqual(customMatch?.triggerPrefix, "!ai")
+
+        // 5. 跨屏剪贴板端到端加密信封（LXRL1: AES-256-GCM 往返 + 错码拒解 + 明文直通兼容）
+        let sealedRelay = try ClipboardRelayCrypto.seal("跨屏验证码 654321", pairCode: "294817")
+        XCTAssertTrue(sealedRelay.hasPrefix(ClipboardRelayCrypto.prefix))
+        XCTAssertFalse(sealedRelay.contains("654321"))
+        XCTAssertEqual(ClipboardRelayCrypto.open(sealedRelay, pairCode: "294817"), "跨屏验证码 654321")
+        XCTAssertNotEqual(ClipboardRelayCrypto.open(sealedRelay, pairCode: "999999"), "跨屏验证码 654321")
+        XCTAssertEqual(ClipboardRelayCrypto.open("网页端明文消息", pairCode: "294817"), "网页端明文消息")
+    }
+
+    func testV61AnthropicProtocolFailoverRAGAndBrainBundle() throws {
+        // 1. Anthropic Claude 原生协议：模型解析、Messages 连续同角色合并、Extended Thinking 与温度互斥、Token 解析、视觉支持
+        let anthropicModelsJSON = Data("""
+        {
+          "data": [
+            {"id": "claude-sonnet-4-20250514", "display_name": "Claude Sonnet 4"},
+            {"id": "claude-3-5-haiku-20241022", "display_name": "Claude 3.5 Haiku"}
+          ]
+        }
+        """.utf8)
+        let parsedClaudeModels = AIClient.parseAnthropicModelsPayload(anthropicModelsJSON)
+        XCTAssertEqual(parsedClaudeModels.count, 2)
+        XCTAssertEqual(parsedClaudeModels.first?.provider, .anthropic)
+        XCTAssertEqual(parsedClaudeModels.first?.id, "claude-sonnet-4-20250514")
+        XCTAssertTrue(ScreenshotOCRService.modelLikelySupportsVision(modelID: "claude-sonnet-4-20250514", provider: .anthropic))
+
+        var claudeCfg = AIConfig()
+        claudeCfg.provider = .anthropic
+        claudeCfg.anthropicAPIKey = "sk-ant-secret-key-9999"
+        claudeCfg.setActiveModel("claude-sonnet-4-20250514")
+        claudeCfg.maxOutputTokens = 1024
+        claudeCfg.temperature = 0.7
+
+        let thinkingPayload = AIClient.buildAnthropicMessagesPayload(
+            prompt: "",
+            turns: [
+                AIChatTurn(role: "user", content: "第一句背景"),
+                AIChatTurn(role: "user", content: "补充细节"),
+                AIChatTurn(role: "assistant", content: "收到"),
+                AIChatTurn(role: "user", content: "请润色"),
+            ],
+            systemInstruction: "系统规则",
+            model: "claude-sonnet-4-20250514",
+            thinkingMode: .medium,
+            includeThinking: true,
+            config: claudeCfg
+        )
+        let mergedMsgs = try XCTUnwrap(thinkingPayload["messages"] as? [[String: Any]])
+        XCTAssertEqual(mergedMsgs.count, 3, "连续同角色 user 消息必须自动合并，遵守 Anthropic 交替角色协议")
+        XCTAssertTrue((mergedMsgs.first?["content"] as? String)?.contains("第一句背景\n\n补充细节") == true)
+        let thinkingObj = try XCTUnwrap(thinkingPayload["thinking"] as? [String: Any])
+        XCTAssertEqual(thinkingObj["type"] as? String, "enabled")
+        XCTAssertEqual(thinkingObj["budget_tokens"] as? Int, 4096)
+        XCTAssertGreaterThan((thinkingPayload["max_tokens"] as? Int) ?? 0, 4096, "启用 Extended Thinking 时 max_tokens 必须大于 budget_tokens")
+        XCTAssertNil(thinkingPayload["temperature"], "Anthropic Extended Thinking 与自定义 temperature 互斥")
+
+        let plainClaudePayload = AIClient.buildAnthropicMessagesPayload(
+            prompt: "你好",
+            systemInstruction: "系统规则",
+            model: "claude-sonnet-4-20250514",
+            thinkingMode: .off,
+            includeThinking: false,
+            config: claudeCfg
+        )
+        XCTAssertNil(plainClaudePayload["thinking"])
+        XCTAssertNotNil(plainClaudePayload["temperature"])
+
+        let startUsage = AIClient.parseAnthropicUsage(from: ["message": ["usage": ["input_tokens": 320, "output_tokens": 12]]])
+        XCTAssertEqual(startUsage, AITokenUsage(promptTokens: 320, completionTokens: 12, reasoningTokens: nil))
+        let deltaUsage = AIClient.parseAnthropicUsage(from: ["usage": ["output_tokens": 180]])
+        XCTAssertEqual(deltaUsage, AITokenUsage(promptTokens: nil, completionTokens: 180, reasoningTokens: nil))
+
+        // 2. 自动容灾切换判定与备用渠道解析
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(429, "rate limit")))
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(503, "overloaded")))
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(402, "insufficient balance")))
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: URLError(.timedOut)))
+        XCTAssertFalse(AIClient.shouldTriggerFailover(for: AIClientError.httpError(400, "bad request")))
+        XCTAssertFalse(AIClient.shouldTriggerFailover(for: AIClientError.httpError(401, "unauthorized")))
+        XCTAssertFalse(AIClient.shouldTriggerFailover(for: CancellationError()))
+
+        claudeCfg.saveCurrentAsProfile(name: "Claude 主力", createNew: true)
+        var backupCfg = claudeCfg
+        backupCfg.provider = .gemini
+        backupCfg.geminiAPIKey = "AIza-backup-key-8888"
+        backupCfg.geminiModel = "gemini-2.5-flash"
+        backupCfg.saveCurrentAsProfile(name: "Gemini 备用", createNew: true)
+        let geminiProfileID = try XCTUnwrap(backupCfg.profiles.first(where: { $0.name == "Gemini 备用" })?.id)
+        let claudeProfile = try XCTUnwrap(backupCfg.profiles.first(where: { $0.name == "Claude 主力" }))
+        backupCfg.activateProfile(claudeProfile)
+        backupCfg.failoverProfileID = geminiProfileID
+        let resolvedBackup = try XCTUnwrap(backupCfg.resolvedFailoverConfig())
+        XCTAssertEqual(resolvedBackup.profileName, "Gemini 备用")
+        XCTAssertEqual(resolvedBackup.config.provider, .gemini)
+        XCTAssertEqual(resolvedBackup.config.activeAPIKey, "AIza-backup-key-8888")
+
+        // 3. 端侧 RAG-Lite Top-K 知识检索 + Markdown 智能切片导入
+        let cards: [PersonalContextCard] = [
+            PersonalContextCard(title: "美食推荐", content: "喜欢粤菜和火锅", sceneTag: "生活", boundScene: nil, isEnabled: true),
+            PersonalContextCard(title: "发版验收清单", content: "Swift iOS 打包前检查 XcodeGen 与签名证书", sceneTag: "研发", boundScene: nil, isEnabled: true),
+            PersonalContextCard(title: "老板汇报模板", content: "先给结论再拆风险与排期", sceneTag: "职场", boundScene: .bossClient, isEnabled: true),
+            PersonalContextCard(title: "旅游攻略", content: "京都岚山秋日红叶路线", sceneTag: "旅行", boundScene: nil, isEnabled: true),
+            PersonalContextCard(title: "健身计划", content: "每周三次核心力量训练", sceneTag: "运动", boundScene: nil, isEnabled: true),
+        ]
+        let ranked = PersonalContextCard.selectRelevantCards(
+            from: cards,
+            query: "帮我检查 Swift 打包和 XcodeGen 签名",
+            scene: .bossClient,
+            limit: 2
+        )
+        XCTAssertEqual(ranked.count, 2)
+        let rankedTitles = Set(ranked.map(\.card.title))
+        XCTAssertTrue(rankedTitles.contains("老板汇报模板"), "精确匹配当前场景的知识卡应优先召回")
+        XCTAssertTrue(rankedTitles.contains("发版验收清单"), "关键词高度命中的研发知识卡应进入 Top-2")
+        XCTAssertFalse(rankedTitles.contains("旅游攻略"))
+
+        let ragSystem = AIClient.mergeSystem(base: "助手", userPrompt: "帮我检查 Swift XcodeGen 签名", config: {
+            var c = claudeCfg
+            c.activeScenePersona = .bossClient
+            c.contextCards = cards
+            return c
+        }())
+        XCTAssertTrue(ragSystem.contains("[发版验收清单]"))
+        XCTAssertTrue(ragSystem.contains("[老板汇报模板]"))
+
+        let sampleMarkdown = """
+        # 产品定位
+        灵犀输入法是一款原生 iOS 高效输入法与 AI 写作助手。
+
+        # 安全原则
+        所有 API Key 均仅保存在用户设备本机，导出配置包绝不包含任何密钥。
+        """
+        let chunks = PersonalContextCard.chunkDocument(title: "灵犀手册", text: sampleMarkdown, sceneTag: "产品文档")
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks[0].title, "产品定位")
+        XCTAssertEqual(chunks[1].title, "安全原则")
+
+        // 4. 无密钥 AI 智脑配置包导出与增量合入（严防 API Key 泄漏）
+        backupCfg.customPersonaPrompt = "保持克制简洁"
+        backupCfg.styleDNA.personalCatchphrases = ["收到啦～"]
+        backupCfg.privacyCustomTerms = ["机密代号X"]
+        backupCfg.contextCards = chunks
+        backupCfg.customPrompts = [CustomAIPromptTemplate(title: "周报提炼", instruction: "提炼核心成果", isPinned: true)]
+
+        let bundleData = try XCTUnwrap(backupCfg.exportBrainBundleJSON())
+        let bundleText = String(data: bundleData, encoding: .utf8) ?? ""
+        XCTAssertFalse(bundleText.contains("sk-ant-secret-key-9999"), "无密钥智脑包绝不可泄露 Claude API Key")
+        XCTAssertFalse(bundleText.contains("AIza-backup-key-8888"), "无密钥智脑包绝不可泄露 Gemini API Key")
+        XCTAssertTrue(bundleText.contains("LINGXI-AI-BRAIN-BUNDLE"))
+
+        var targetCfg = AIConfig()
+        targetCfg.geminiAPIKey = "LOCAL-OWN-KEY-DO-NOT-TOUCH"
+        targetCfg.customPrompts = []
+        targetCfg.contextCards = []
+        targetCfg.aiPipelines = []
+        let importStats = try XCTUnwrap(targetCfg.importBrainBundleJSON(bundleData))
+        XCTAssertEqual(importStats.prompts, 1)
+        XCTAssertEqual(importStats.cards, 2)
+        XCTAssertEqual(targetCfg.geminiAPIKey, "LOCAL-OWN-KEY-DO-NOT-TOUCH", "导入智脑包绝不可覆盖本地已有 API Key")
+        XCTAssertTrue(targetCfg.privacyCustomTerms.contains("机密代号X"))
+        XCTAssertEqual(targetCfg.customPersonaPrompt, "保持克制简洁")
+    }
+
+    func testV62PerformanceFailoverBackupBudgetAndVModeTools() throws {
+        // 1. 侧载桥接口令必须保留已绑定的容灾备用渠道（且清空其 fetchedModels 保持口令精简）
+        let prevAI = AIConfig.load()
+        defer { _ = prevAI.save() }
+
+        var src = AIConfig()
+        src.provider = .anthropic
+        src.anthropicAPIKey = "sk-ant-main-111"
+        src.anthropicModel = "claude-sonnet-4-20250514"
+        src.saveCurrentAsProfile(name: "主 Claude", createNew: true)
+
+        let backupProf = AIProviderProfile(
+            name: "备用 Gemini",
+            provider: .gemini,
+            baseURL: AIConfig.defaultGeminiBaseURL,
+            apiKey: "AIza-failover-222",
+            model: "gemini-2.5-flash",
+            fetchedModels: [AIModelInfo(id: "gemini-2.5-flash", displayName: "Flash", supportsThinking: true, contextLength: 1_000_000, provider: .gemini)]
+        )
+        src.profiles.append(backupProf)
+        src.failoverProfileID = backupProf.id
+        _ = src.save()
+
+        let token = try XCTUnwrap(SideloadConfigBridge.exportLocalConfigHandoffTokenFromMainApp())
+        // 清空本地档案再导入，模拟隔离沙盒键盘端首次接收口令
+        var wiped = AIConfig()
+        wiped.profiles = []
+        wiped.failoverProfileID = nil
+        _ = wiped.save()
+
+        XCTAssertTrue(SideloadConfigBridge.importPairingToken(token))
+        let imported = AIConfig.load()
+        let failover = try XCTUnwrap(imported.resolvedFailoverConfig(), "侧载桥接导入后必须完整保留容灾备用渠道")
+        XCTAssertEqual(failover.profileName, "备用 Gemini")
+        XCTAssertEqual(failover.config.provider, .gemini)
+        XCTAssertEqual(failover.config.activeAPIKey, "AIza-failover-222")
+        XCTAssertTrue(imported.profiles.first(where: { $0.id == backupProf.id })?.fetchedModels.isEmpty == true, "桥接口令内的备用档案应剔除冗余模型缓存")
+
+        // 2. 加密备份白名单包含全部 v5/v6 核心 AI 资产文件 + 排除本地保险箱
+        let backupSet = Set(LingxiBackup.jsonFileNames)
+        XCTAssertTrue(backupSet.contains("lingxi_style_dna.json"))
+        XCTAssertTrue(backupSet.contains("lingxi_ai_workbench_threads.json"))
+        XCTAssertTrue(backupSet.contains("lingxi_ai_recent_history.json"))
+        XCTAssertTrue(backupSet.contains("lingxi_ai_usage_ledger.json"))
+        XCTAssertTrue(backupSet.contains("lingxi_touch_calibration.json"))
+        XCTAssertFalse(backupSet.contains("lingxi_local_secure_vault.json"), "设备级 Keychain 加密保险箱不应裸字节跨设备拷贝")
+
+        // 3. AI 成本精准分层（Claude Haiku vs Sonnet vs Opus）与自然月预算统计
+        let haikuRate = AICostEstimator.pricing(forModel: "claude-3-5-haiku-20241022", provider: "anthropic")
+        let sonnetRate = AICostEstimator.pricing(forModel: "claude-sonnet-4-20250514", provider: "anthropic")
+        let opusRate = AICostEstimator.pricing(forModel: "claude-opus-4-20250514", provider: "anthropic")
+        XCTAssertLessThan(haikuRate.inputPerMillionUSD, sonnetRate.inputPerMillionUSD)
+        XCTAssertLessThan(sonnetRate.inputPerMillionUSD, opusRate.inputPerMillionUSD)
+
+        let fixedNow = Date(timeIntervalSince1970: 1_795_700_000) // 2026-11-26
+        let lastMonth = Date(timeIntervalSince1970: 1_795_700_000 - 40 * 86400)
+        let eThisMonth = AIUsageLedgerEntry(
+            timestamp: Int(fixedNow.timeIntervalSince1970),
+            provider: "anthropic", model: "claude-sonnet-4-20250514", feature: "kb_three_variants",
+            thinkingMode: "off", ttftMs: 400, totalMs: 1200, inputChars: 100, outputChars: 100, thoughtChars: 0,
+            promptTokens: 1_000_000, completionTokens: 0
+        )
+        let eLastMonth = AIUsageLedgerEntry(
+            timestamp: Int(lastMonth.timeIntervalSince1970),
+            provider: "anthropic", model: "claude-opus-4-20250514", feature: "workbench_chat",
+            thinkingMode: "off", ttftMs: 400, totalMs: 1200, inputChars: 100, outputChars: 100, thoughtChars: 0,
+            promptTokens: 1_000_000, completionTokens: 0
+        )
+        XCTAssertEqual(AICostEstimator.currentMonthEstimatedUSD(for: [eThisMonth, eLastMonth], now: fixedNow), 3.0, accuracy: 0.01)
+
+        // 4. 零延迟离线 v 模式工具 v2：相对日期 / 单位换算 / 时间戳与 UUID
+        let refCal = Calendar(identifier: .gregorian)
+        let refDate = try XCTUnwrap(refCal.date(from: DateComponents(year: 2026, month: 11, day: 27, hour: 9, minute: 30)))
+        let plus3 = VModeToolEngine.candidates(forBody: "+3d", now: refDate)
+        XCTAssertTrue(plus3.contains("2026-11-30"), "v+3d 应准确推算 3 天后的日期")
+        XCTAssertTrue(plus3.first?.contains("2026年11月30日") == true)
+
+        let minus7 = VModeToolEngine.candidates(forBody: "-7d", now: refDate)
+        XCTAssertTrue(minus7.contains("2026-11-20"))
+
+        let tomorrow = VModeToolEngine.candidates(forBody: "mingtian", now: refDate)
+        XCTAssertTrue(tomorrow.contains("2026-11-28"))
+
+        let cmConv = VModeToolEngine.candidates(forBody: "180cm", now: refDate)
+        XCTAssertTrue(cmConv.contains("1.8 米"))
+        XCTAssertTrue(cmConv.contains("5'11\""))
+
+        let kgConv = VModeToolEngine.candidates(forBody: "65kg", now: refDate)
+        XCTAssertTrue(kgConv.contains("130 斤"))
+
+        let tempC = VModeToolEngine.candidates(forBody: "38c", now: refDate)
+        XCTAssertTrue(tempC.contains("100.4 °F"))
+        let tempNeg = VModeToolEngine.candidates(forBody: "-40c", now: refDate)
+        XCTAssertTrue(tempNeg.contains("-40 °F"))
+
+        let gbConv = VModeToolEngine.candidates(forBody: "1.5gb", now: refDate)
+        XCTAssertTrue(gbConv.contains("1536 MB"))
+
+        let tsOut = VModeToolEngine.candidates(forBody: "ts", now: refDate)
+        XCTAssertEqual(tsOut.first, "\(Int(refDate.timeIntervalSince1970))")
+        let uuidOut = VModeToolEngine.candidates(forBody: "uuid", now: refDate)
+        XCTAssertEqual(uuidOut.count, 2)
+        XCTAssertNotNil(UUID(uuidString: uuidOut[0]))
+
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("v+3d", scheme: .quanpin))
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("v180cm", scheme: .quanpin))
+        XCTAssertTrue(SmartCandidateHelper.isVToolQuery("V180cm", scheme: .xiaohe))
+        XCTAssertFalse(SmartCandidateHelper.isVToolQuery("v180cm", scheme: .xiaohe), "双拼下小写 v 为声母，严禁抢占为工具模式")
+
+        // 5. InlineAICommandDetector 纯内存检测：无磁盘 I/O，显式支持自定义前缀
+        XCTAssertNil(InlineAICommandDetector.detect(in: "你好", customPrefix: "@ai"))
+        let customHit = try XCTUnwrap(InlineAICommandDetector.detect(in: "测试前缀 #ai 帮我润色这句话", customPrefix: "#ai"))
+        XCTAssertEqual(customHit.command, "帮我润色这句话")
+        XCTAssertEqual(customHit.triggerPrefix, "#ai")
+    }
+
+    func testV63SwipeCommandsSlashMacrosOfflineLinter() throws {
+        // 1. 仓输入法级按键划动命令引擎：解析、大小写容错、普通符号直通、键帽微型角标与预设
+        XCTAssertEqual(KeyboardSwipeCommand.parse("#firstChar"), .firstChar)
+        XCTAssertEqual(KeyboardSwipeCommand.parse("#LASTCHAR"), .lastChar)
+        XCTAssertEqual(KeyboardSwipeCommand.parse("#ai3v"), .aiThreeVariants)
+        XCTAssertNil(KeyboardSwipeCommand.parse("@"))
+        XCTAssertNil(KeyboardSwipeCommand.parse("()"))
+        XCTAssertEqual(KeyboardSwipeCommand.keycapBadge(for: "#paste"), "贴")
+        XCTAssertEqual(KeyboardSwipeCommand.keycapBadge(for: "#firstChar"), "首")
+        XCTAssertEqual(KeyboardSwipeCommand.keycapBadge(for: "@"), "@")
+        for cmd in KeyboardSwipeCommand.allCases {
+            XCTAssertLessThanOrEqual(cmd.keycapBadge.count, 2, "键帽角标不得超过 2 字符：\(cmd.rawValue)")
+            XCTAssertEqual(KeyboardSwipeCommand.parse(cmd.rawValue), cmd)
+        }
+        XCTAssertEqual(KeyboardSwipeCommand.hamsterEfficiencyUpPreset["j"], "#firstChar")
+        XCTAssertEqual(KeyboardSwipeCommand.hamsterEfficiencyDownPreset["v"], "#paste")
+
+        // 2. 全栈斜杠 AI 宏指令引擎：前缀带参、尾缀作用于前文、/3v、自定义技能与流水线、URL 防误触
+        let enPrefix = try XCTUnwrap(InlineAICommandDetector.detect(in: "/en 明天下午三点开会", customPrefix: "@ai"))
+        XCTAssertEqual(enPrefix.command, "明天下午三点开会")
+        XCTAssertEqual(enPrefix.triggerPrefix, "/en")
+        XCTAssertEqual(enPrefix.actionTitle, "⚡ 译为英文")
+        XCTAssertNotNil(enPrefix.systemInstruction)
+
+        let fixSuffix = try XCTUnwrap(InlineAICommandDetector.detect(in: "这个方案我明天发给你看看 /fix", customPrefix: "@ai"))
+        XCTAssertEqual(fixSuffix.command, "这个方案我明天发给你看看")
+        XCTAssertEqual(fixSuffix.triggerPrefix, "/fix")
+        XCTAssertEqual(fixSuffix.fullMatchCount, "这个方案我明天发给你看看 /fix".count)
+
+        let threeV = try XCTUnwrap(InlineAICommandDetector.detect(in: "周末临时加班能不能调休 /3v", customPrefix: "@ai"))
+        XCTAssertTrue(threeV.isThreeVariants)
+        XCTAssertEqual(threeV.command, "周末临时加班能不能调休")
+
+        // URL 路径里的 /en 或 /fix 绝不可误触发斜杠宏
+        XCTAssertNil(InlineAICommandDetector.detect(in: "请访问 https://example.com/en", customPrefix: "@ai"))
+        XCTAssertNil(InlineAICommandDetector.detect(in: "路径 docs/guide/fix", customPrefix: "@ai"))
+
+        // 动态匹配用户自定义技能与多步链式流水线
+        let customTpl = CustomAIPromptTemplate(title: "周报", instruction: "整理为要点式周报", isPinned: true, useDeepModel: true)
+        let customMacro = try XCTUnwrap(InlineAICommandDetector.detect(
+            in: "/周报 完成了登录模块和支付联调",
+            customPrefix: "@ai",
+            customPrompts: [customTpl]
+        ))
+        XCTAssertEqual(customMacro.command, "完成了登录模块和支付联调")
+        XCTAssertEqual(customMacro.actionTitle, "⚡ 技能：周报")
+        XCTAssertTrue(customMacro.preferDeep)
+
+        let pipe = AIPromptPipeline(
+            title: "精修发群",
+            summary: "脱敏再润色",
+            steps: [
+                AIPromptPipelineStep(name: "提炼", instruction: "提炼重点"),
+                AIPromptPipelineStep(name: "润色", instruction: "改为自然口语"),
+            ]
+        )
+        let pipeMacro = try XCTUnwrap(InlineAICommandDetector.detect(
+            in: "今天联调遇到个小问题已经修好了 /精修发群",
+            customPrefix: "@ai",
+            pipelines: [pipe]
+        ))
+        XCTAssertEqual(pipeMacro.actionTitle, "⚡ 流水线：精修发群")
+        XCTAssertEqual(pipeMacro.command, "今天联调遇到个小问题已经修好了")
+
+        // 3. 100% 离线中文文案与 AI 腔实时质检仪
+        let cleanReport = OfflineTextLinter.analyze("今天下午 3 点我们一起开会同步进度，辛苦啦。")
+        XCTAssertEqual(cleanReport.score, 100)
+        XCTAssertTrue(cleanReport.findings.isEmpty)
+        XCTAssertFalse(cleanReport.hasAutoFixChanges)
+
+        let dirtyText = "各位好,我们在iPhone16上完成了的的闭环赋能!联系方式13812345678"
+        let dirtyReport = OfflineTextLinter.analyze(dirtyText, bannedCliches: ["赋能", "闭环"], privacyCustomTerms: [])
+        XCTAssertLessThan(dirtyReport.score, 75)
+        XCTAssertTrue(dirtyReport.findings.contains(where: { $0.category == .privacy }))
+        XCTAssertTrue(dirtyReport.findings.contains(where: { $0.category == .typoDuplicate }))
+        XCTAssertTrue(dirtyReport.findings.contains(where: { $0.category == .aiCliche }))
+        XCTAssertTrue(dirtyReport.findings.contains(where: { $0.category == .typography }))
+        XCTAssertEqual(dirtyReport.privacyHitCount, 1)
+        XCTAssertFalse(dirtyReport.privacyRedactedText.contains("13812345678"))
+        XCTAssertTrue(dirtyReport.hasAutoFixChanges)
+        XCTAssertFalse(dirtyReport.autoFixedText.contains("的的"))
+        XCTAssertTrue(dirtyReport.autoFixedText.contains("各位好，我们在 iPhone16 上完成了的闭环赋能！"))
+    }
+
+    func testV64OpenCCContextRerankerLayoutPacksAndLintFix() throws {
+        // 1. OpenCC 级两岸三地简繁词级双向转换引擎
+        let techSample = "软件、内存、鼠标、服务器、默认、打印"
+        let twTech = ChineseScriptConverter.toTraditional(techSample, variant: .taiwanPhrase)
+        XCTAssertTrue(twTech.contains("軟體"))
+        XCTAssertTrue(twTech.contains("記憶體"))
+        XCTAssertTrue(twTech.contains("滑鼠"))
+        XCTAssertTrue(twTech.contains("伺服器"))
+        XCTAssertTrue(twTech.contains("預設"))
+        XCTAssertTrue(twTech.contains("列印"))
+
+        let hkTech = ChineseScriptConverter.toTraditional("软件、出租车、公交车", variant: .hongKong)
+        XCTAssertTrue(hkTech.contains("軟件"))
+        XCTAssertTrue(hkTech.contains("的士"))
+        XCTAssertTrue(hkTech.contains("巴士"))
+
+        let stdDisambig = ChineseScriptConverter.toTraditional("皇后以后头发干净干活面条方面一只只有台风舞台里面公里", variant: .standard)
+        XCTAssertTrue(stdDisambig.contains("皇后以後"))
+        XCTAssertTrue(stdDisambig.contains("頭髮"))
+        XCTAssertTrue(stdDisambig.contains("乾淨幹活"))
+        XCTAssertTrue(stdDisambig.contains("麵條方面"))
+        XCTAssertTrue(stdDisambig.contains("一隻只有"))
+        XCTAssertTrue(stdDisambig.contains("颱風舞台"))
+        XCTAssertTrue(stdDisambig.contains("裡面公里"))
+
+        let backToSimp = ChineseScriptConverter.toSimplified("這款軟體在伺服器記憶體與滑鼠列印上做了最佳化", normalizeRegionalTerms: true)
+        XCTAssertTrue(backToSimp.contains("软件"))
+        XCTAssertTrue(backToSimp.contains("服务器"))
+        XCTAssertTrue(backToSimp.contains("内存"))
+        XCTAssertTrue(backToSimp.contains("鼠标"))
+        XCTAssertTrue(backToSimp.contains("打印"))
+        XCTAssertTrue(backToSimp.contains("优化"))
+
+        // 2. 端侧零延迟语境同音消歧重排引擎（数字量词 / 星期序数 / 动宾搭配 + 联动 PinyinEngine 实测）
+        let after3 = ContextualReranker.bonusMap(forContextBeforeCursor: "明天下午3")
+        XCTAssertGreaterThan(after3["点"] ?? 0, 4.0)
+        let afterYear = ContextualReranker.bonusMap(forContextBeforeCursor: "2026")
+        XCTAssertGreaterThan(afterYear["年"] ?? 0, 5.0)
+        let afterDrink = ContextualReranker.bonusMap(forContextBeforeCursor: "多喝")
+        XCTAssertGreaterThan(afterDrink["水"] ?? 0, 4.5)
+        let afterWeek = ContextualReranker.bonusMap(forContextBeforeCursor: "星期")
+        XCTAssertGreaterThan(afterWeek["一"] ?? 0, 4.5)
+
+        if let dbURL = findTestDBURL() {
+            let engine = PinyinEngine(databaseURL: dbURL)
+            var s = LingxiSettings()
+            s.userLearningEnabled = false
+            s.bigramPredictionEnabled = true
+
+            let r3Dian = engine.query(raw: "dian", settings: s, contextBeforeCursor: "下午3")
+            XCTAssertEqual(r3Dian.candidates.first?.word, "点", "数字 3 后输入 dian 应精准首选「点」")
+
+            let rYear = engine.query(raw: "nian", settings: s, contextBeforeCursor: "2026")
+            XCTAssertEqual(rYear.candidates.first?.word, "年", "年份 2026 后输入 nian 应精准首选「年」")
+
+            let rDrink = engine.query(raw: "shui", settings: s, contextBeforeCursor: "我要喝")
+            XCTAssertEqual(rDrink.candidates.first?.word, "水", "「喝」后输入 shui 应精准首选「水」而非「睡」")
+
+            let rSleep = engine.query(raw: "shui", settings: s, contextBeforeCursor: "准备去")
+            XCTAssertEqual(rSleep.candidates.first?.word, "睡", "「去」后输入 shui 应精准首选「睡」")
+        }
+
+        // 3. 声明式可分享自定义键盘布局包（5 套内置 + 应用至设置 + JSON 导出/导入往返 + 畸形拦截）
+        XCTAssertEqual(CustomKeyboardLayoutPack.builtInPacks.count, 5)
+        let devPack = try XCTUnwrap(CustomKeyboardLayoutPack.find(id: "developer"))
+        var testSettings = LingxiSettings()
+        devPack.apply(to: &testSettings)
+        XCTAssertEqual(testSettings.activeLayoutPackID, "developer")
+        XCTAssertTrue(testSettings.showNumberRow)
+        XCTAssertEqual(testSettings.punctuationStyle, .halfwidth)
+        XCTAssertTrue(testSettings.panguSpaceLetters)
+        XCTAssertEqual(testSettings.customSwipeDownMap["c"], KeyboardSwipeCommand.lintFix.rawValue)
+
+        let exportedPack = CustomKeyboardLayoutPack.fromCurrentSettings(testSettings, name: "测试极客包")
+        let packJSON = try XCTUnwrap(exportedPack.exportJSON())
+        let redecoded = try XCTUnwrap(CustomKeyboardLayoutPack.decodeJSON(packJSON))
+        XCTAssertEqual(redecoded.name, "测试极客包")
+        XCTAssertEqual(redecoded.swipeDownMap["k"], "->")
+        XCTAssertTrue(redecoded.showNumberRow)
+        XCTAssertNil(CustomKeyboardLayoutPack.decodeJSON(Data("{\"format\":\"INVALID\",\"name\":\"x\"}".utf8)))
+
+        // 4. 离线排版体检划动命令 #lintFix
+        XCTAssertEqual(KeyboardSwipeCommand.parse("#lintFix"), .lintFix)
+        XCTAssertEqual(KeyboardSwipeCommand.keycapBadge(for: "#lintFix"), "检")
+    }
+
+    func testV65PairedBracketsLayoutPackStripAndEditPad() throws {
+        // 1. 统一成对括号引擎（12 组配对、单开补全、预配对自动光标置中、闭括号越过、空对连删）
+        XCTAssertEqual(PairedBracketHelper.expandedPair(for: "{"), "{}")
+        XCTAssertEqual(PairedBracketHelper.expandedPair(for: "("), "()")
+        XCTAssertEqual(PairedBracketHelper.expandedPair(for: "["), "[]")
+        XCTAssertEqual(PairedBracketHelper.expandedPair(for: "『"), "『』")
+        XCTAssertEqual(PairedBracketHelper.expandedPair(for: "〈"), "〈〉")
+        XCTAssertNil(PairedBracketHelper.expandedPair(for: ")"))
+
+        XCTAssertTrue(PairedBracketHelper.shouldSkipCloser("}", nextChar: "}"))
+        XCTAssertTrue(PairedBracketHelper.shouldSkipCloser("』", nextChar: "』"))
+        XCTAssertTrue(PairedBracketHelper.shouldSkipCloser(">", nextChar: ">"))
+        XCTAssertFalse(PairedBracketHelper.shouldSkipCloser("}", nextChar: ")"))
+        XCTAssertFalse(PairedBracketHelper.shouldSkipCloser("a", nextChar: "a"))
+
+        for prePaired in ["()", "[]", "{}", "<>", "（）", "「」", "『』", "【】", "《》", "〈〉", "“”", "‘’"] {
+            XCTAssertTrue(PairedBracketHelper.shouldAutoPlaceCursorInside(prePaired), "预配对符号 \(prePaired) 应自动将光标置入中央")
+        }
+        XCTAssertFalse(PairedBracketHelper.shouldAutoPlaceCursorInside("->"))
+
+        XCTAssertTrue(PairedBracketHelper.isMatchingPair(left: "{", right: "}"))
+        XCTAssertTrue(PairedBracketHelper.isMatchingPair(left: "<", right: ">"))
+        XCTAssertTrue(PairedBracketHelper.isMatchingPair(left: "『", right: "』"))
+        XCTAssertTrue(PairedBracketHelper.isMatchingPair(left: "〈", right: "〉"))
+        XCTAssertFalse(PairedBracketHelper.isMatchingPair(left: "{", right: "]"))
+
+        // 2. 全部 5 套布局包均携带非空专属快捷符号/命令条，并兼容 #命令 解析
+        for pack in CustomKeyboardLayoutPack.builtInPacks {
+            XCTAssertFalse(pack.quickStripTokens.isEmpty, "布局包 \(pack.id) 的 quickStripTokens 不应为空")
+            for token in pack.quickStripTokens where token.hasPrefix("#") {
+                XCTAssertNotNil(KeyboardSwipeCommand.parse(token), "布局包 \(pack.id) 中的命令 \(token) 应合法")
+            }
+        }
+
+        // 3. 专业编辑台零联网文本工坊核心链路（离线排版 + 隐私脱敏 + 繁简双向互转）
+        let rawLine = "各位好,我们在iPhone16上完成了的的联调!手机号13812345678"
+        let linted = OfflineTextLinter.autoFix(rawLine)
+        XCTAssertFalse(linted.contains("的的"))
+        XCTAssertTrue(linted.contains("各位好，我们在 iPhone16 上完成了的联调！"))
+        let redacted = AIPrivacyShield.sanitize(linted, customTerms: []).sanitizedText
+        XCTAssertFalse(redacted.contains("13812345678"))
+        XCTAssertTrue(redacted.contains("[PHONE_1]"))
+
+        let simpLine = "这款软件在服务器内存上做了优化"
+        let twLine = ChineseScriptConverter.toTraditional(simpLine, variant: .taiwanPhrase)
+        XCTAssertNotEqual(twLine, simpLine)
+        XCTAssertTrue(twLine.contains("軟體"))
+        XCTAssertEqual(ChineseScriptConverter.toTraditional(twLine, variant: .taiwanPhrase), twLine)
+        let roundtripSimp = ChineseScriptConverter.toSimplified(twLine, normalizeRegionalTerms: true)
+        XCTAssertEqual(roundtripSimp, simpLine)
+    }
+
+    func testV66OfflineSlashMacrosSessionPoolingAndRelayGuard() throws {
+        // 1. 0ms 离线斜杠宏（/lint /mask /trad）前缀带参与尾缀双模式检测 + URL 边界隔离
+        let lintSuffix = try XCTUnwrap(InlineAICommandDetector.detect(in: "我们在iPhone16上完成了的的联调! /lint"))
+        XCTAssertEqual(lintSuffix.triggerPrefix, "/lint")
+        XCTAssertEqual(lintSuffix.offlineMacro, .lintFix)
+        XCTAssertEqual(lintSuffix.command, "我们在iPhone16上完成了的的联调!")
+        XCTAssertEqual(OfflineTextLinter.autoFix(lintSuffix.command), "我们在 iPhone16 上完成了的联调！")
+
+        let maskPrefix = try XCTUnwrap(InlineAICommandDetector.detect(in: "/mask 我的手机13812345678请查收"))
+        XCTAssertEqual(maskPrefix.triggerPrefix, "/mask")
+        XCTAssertEqual(maskPrefix.offlineMacro, .privacyMask)
+        XCTAssertTrue(AIPrivacyShield.sanitize(maskPrefix.command).sanitizedText.contains("[PHONE_1]"))
+
+        let tradSuffix = try XCTUnwrap(InlineAICommandDetector.detect(in: "这款软件默认支持内存优化 /trad"))
+        XCTAssertEqual(tradSuffix.triggerPrefix, "/trad")
+        XCTAssertEqual(tradSuffix.offlineMacro, .toggleTraditional)
+        XCTAssertTrue(ChineseScriptConverter.toTraditional(tradSuffix.command, variant: .taiwanPhrase).contains("軟體"))
+
+        XCTAssertNil(InlineAICommandDetector.detect(in: "https://example.com/lint"))
+        XCTAssertNil(InlineAICommandDetector.detect(in: "https://example.com/mask"))
+
+        // 2. AIClient 连接池实例化稳定性（多次高频构造不产生独立 URLSession 泄漏且保持配置有效）
+        let c1 = AIClient(timeout: 15)
+        let c2 = AIClient(timeout: 45)
+        XCTAssertTrue(c1 !== c2)
+
+        // 3. 跨屏接力密文前缀拦截与敏感内容防写入校验
+        let sealed = try ClipboardRelayCrypto.seal("验证码 668899", pairCode: "123456")
+        XCTAssertTrue(sealed.hasPrefix(ClipboardRelayCrypto.prefix))
+        let wrongOpen = ClipboardRelayCrypto.open(sealed, pairCode: "654321")
+        XCTAssertTrue(wrongOpen.hasPrefix(ClipboardRelayCrypto.prefix), "错码解不开时保留密文前缀以便客户端拦截不污染剪贴板")
+        let rightOpen = ClipboardRelayCrypto.open(sealed, pairCode: "123456")
+        XCTAssertEqual(rightOpen, "验证码 668899")
+        XCTAssertFalse(rightOpen.hasPrefix(ClipboardRelayCrypto.prefix))
+    }
+
+    func testV67EmbeddedStreamErrorParsingAndPinyinThreadSafety() throws {
+        // 1. 第三方中转站 HTTP 200 嵌入式 JSON 错误提取与 Auto-Failover 触发校验
+        let rateLimitObj: [String: Any] = ["error": ["message": "Rate limit exceeded on upstream", "type": "rate_limit_error"]]
+        let parsedRL = try XCTUnwrap(AIClient.extractEmbeddedStreamError(from: rateLimitObj))
+        XCTAssertEqual(parsedRL.code, 429)
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(parsedRL.code, parsedRL.message)))
+
+        let quotaObj: [String: Any] = ["error": ["message": "该渠道余额不足，请充值", "type": "new_api_error"]]
+        let parsedQuota = try XCTUnwrap(AIClient.extractEmbeddedStreamError(from: quotaObj))
+        XCTAssertEqual(parsedQuota.code, 402)
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(parsedQuota.code, parsedQuota.message)))
+
+        let authObj: [String: Any] = ["error": ["code": 401, "message": "Invalid API key"]]
+        let parsedAuth = try XCTUnwrap(AIClient.extractEmbeddedStreamError(from: authObj))
+        XCTAssertEqual(parsedAuth.code, 401)
+        XCTAssertFalse(AIClient.shouldTriggerFailover(for: AIClientError.httpError(parsedAuth.code, parsedAuth.message)))
+
+        let geminiErrObj: [String: Any] = ["error": ["code": 503, "message": "The model is overloaded", "status": "UNAVAILABLE"]]
+        let parsedGem = try XCTUnwrap(AIClient.extractEmbeddedStreamError(from: geminiErrObj))
+        XCTAssertEqual(parsedGem.code, 503)
+        XCTAssertTrue(AIClient.shouldTriggerFailover(for: AIClientError.httpError(parsedGem.code, parsedGem.message)))
+
+        XCTAssertNil(AIClient.extractEmbeddedStreamError(from: ["choices": []]))
+
+        // 2. PinyinEngine SQLite FULLMUTEX + NSRecursiveLock 多线程并发查询与内存回收稳定性压力测试
+        if let dbURL = findTestDBURL() {
+            let engine = PinyinEngine(databaseURL: dbURL)
+            var s = LingxiSettings()
+            s.userLearningEnabled = false
+            let samples = ["nihao", "zhongguo", "shurufa", "weixin", "rengongzhineng", "jintian"]
+            let lock = NSLock()
+            var okCount = 0
+            DispatchQueue.concurrentPerform(iterations: 24) { idx in
+                if idx == 12 {
+                    engine.releaseMemory()
+                } else {
+                    let q = samples[idx % samples.count]
+                    let res = engine.query(raw: q, settings: s)
+                    if !(res.candidates.first?.word ?? "").isEmpty {
+                        lock.lock()
+                        okCount += 1
+                        lock.unlock()
+                    }
+                }
+            }
+            XCTAssertEqual(okCount, 23, "并发查询与内存回收交替执行应 100% 稳定无崩溃")
+        }
+    }
+
+    func testV68PromptVariablesAndVoiceTranscriptCleaner() throws {
+        // 1. Raycast 级动态变量提示词引擎（枚举胶囊、默认值、自由变量、内置上下文令牌去重与渲染）
+        let tpl = "对象：{{对象|老板,客户,同事}}；语气：{{语气|专业得体,温柔委婉}}；字数：{{字数=80}}；城市：{{当前城市}}；日期：{{当前日期}}；要点：{{核心要点}}；再次引用：{{对象|老板,客户}}"
+        let vars = PromptVariableEngine.extractVariables(from: tpl)
+        XCTAssertEqual(vars.map(\.name), ["对象", "语气", "字数", "核心要点"])
+        XCTAssertTrue(vars[0].isChoice)
+        XCTAssertEqual(vars[0].options, ["老板", "客户", "同事"])
+        XCTAssertEqual(vars[2].defaultValue, "80")
+        XCTAssertFalse(vars[2].isChoice)
+        XCTAssertTrue(PromptVariableEngine.hasInteractiveVariables(in: tpl))
+        XCTAssertFalse(PromptVariableEngine.hasInteractiveVariables(in: "纯文本 {{当前日期}} {{剪贴板}}"))
+
+        let rendered = PromptVariableEngine.render(
+            template: tpl,
+            values: ["对象": "客户", "核心要点": "延后两天交付"],
+            clipboardText: "剪贴板测试",
+            sceneTitle: "领导与客户",
+            cityName: "上海"
+        )
+        XCTAssertTrue(rendered.contains("对象：客户"))
+        XCTAssertTrue(rendered.contains("语气：专业得体"))
+        XCTAssertTrue(rendered.contains("字数：80"))
+        XCTAssertTrue(rendered.contains("城市：上海"))
+        XCTAssertTrue(rendered.contains("要点：延后两天交付"))
+        XCTAssertTrue(rendered.contains("再次引用：客户"))
+        XCTAssertFalse(rendered.contains("{{"))
+
+        XCTAssertEqual(PromptVariableEngine.featuredTemplates.count, 8)
+        for ft in PromptVariableEngine.featuredTemplates {
+            XCTAssertTrue(PromptVariableEngine.hasInteractiveVariables(in: ft.userPromptTemplate), "模板 \(ft.id) 应含交互变量")
+        }
+
+        // 2. 0ms 端侧口述智能清洗引擎（口误回撤、语境安全去口水词、结巴叠词合并、盘古排版）
+        let r1 = VoiceTranscriptCleaner.clean("嗯，那个，明天下午三点哦不对四点开会，预算五万说错了八万!")
+        XCTAssertGreaterThanOrEqual(r1.selfCorrectionsCount, 2)
+        XCTAssertGreaterThanOrEqual(r1.removedFillersCount, 1)
+        XCTAssertFalse(r1.cleaned.contains("三点"))
+        XCTAssertTrue(r1.cleaned.contains("明天下午四点开会"))
+        XCTAssertFalse(r1.cleaned.contains("五万"))
+        XCTAssertTrue(r1.cleaned.contains("预算八万！"))
+
+        let r2 = VoiceTranscriptCleaner.clean("我我我觉得就是就是这样，哈哈哈，那个项目在iPhone16上运行很稳")
+        XCTAssertGreaterThanOrEqual(r2.stuttersCollapsedCount, 2)
+        XCTAssertTrue(r2.cleaned.contains("我觉得就是这样"))
+        XCTAssertTrue(r2.cleaned.contains("哈哈哈"), "笑声叠词不应被误删")
+        XCTAssertTrue(r2.cleaned.contains("那个项目"), "实义指示代词「那个项目」不应被口水词规则误删")
+        XCTAssertTrue(r2.cleaned.contains("在 iPhone16 上"))
+
+        let r3 = VoiceTranscriptCleaner.clean("um, let us meet at 3pm wait no 4pm")
+        XCTAssertGreaterThanOrEqual(r3.selfCorrectionsCount, 1)
+        XCTAssertGreaterThanOrEqual(r3.removedFillersCount, 1)
+        XCTAssertFalse(r3.cleaned.lowercased().hasPrefix("um"))
+        XCTAssertFalse(r3.cleaned.contains("3pm"))
+        XCTAssertTrue(r3.cleaned.contains("4pm"))
+    }
+
+    func testV69MarkdownBlockParserAndIncognitoMode() throws {
+        // 1. 纯 Swift 结构化 Markdown & 围栏代码块解析（含流式未闭合代码块、标题、列表、引用、分割线）
+        let md = """
+        ## 方案结论
+        > 优先采用端云 E2EE 零知识架构。
+
+        - 零第三方依赖
+        - 支持离线排版
+
+        1. 第一步：派生密钥
+        2、第二步：本地加密
+
+        ```swift
+        let key = SyncCrypto.deriveSyncKey(from: secret)
+        print(key)
+        ```
+
+        ---
+        普通收尾段落。
+        """
+        let blocks = MarkdownBlockParser.parse(md)
+        XCTAssertTrue(blocks.contains(.heading(level: 2, text: "方案结论")))
+        XCTAssertTrue(blocks.contains(.quote(text: "优先采用端云 E2EE 零知识架构。")))
+        XCTAssertTrue(blocks.contains(.bullet(text: "零第三方依赖")))
+        XCTAssertTrue(blocks.contains(.numbered(prefix: "1.", text: "第一步：派生密钥")))
+        XCTAssertTrue(blocks.contains(.numbered(prefix: "2、", text: "第二步：本地加密")))
+        XCTAssertTrue(blocks.contains(.divider))
+        XCTAssertTrue(blocks.contains(.paragraph(text: "普通收尾段落。")))
+        let codeBlock = blocks.first {
+            if case .codeBlock = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(codeBlock, .codeBlock(language: "swift", code: "let key = SyncCrypto.deriveSyncKey(from: secret)\nprint(key)", isClosed: true))
+
+        // 流式未闭合代码块绝不崩溃且标记 isClosed == false
+        let streamingMD = "看下面代码：\n```python\nprint('hi')"
+        let streamBlocks = MarkdownBlockParser.parse(streamingMD)
+        XCTAssertEqual(streamBlocks.last, .codeBlock(language: "python", code: "print('hi')", isClosed: false))
+
+        // 2. 系统级隐身无痕模式（Codable 往返、旧 JSON 向后兼容默认值 false、#incognito 划动命令）
+        var s = LingxiSettings()
+        XCTAssertFalse(s.incognitoModeEnabled)
+        s.incognitoModeEnabled = true
+        let encoded = try JSONEncoder().encode(s)
+        let decoded = try JSONDecoder().decode(LingxiSettings.self, from: encoded)
+        XCTAssertTrue(decoded.incognitoModeEnabled)
+
+        let legacyDecoded = try JSONDecoder().decode(LingxiSettings.self, from: Data("{}".utf8))
+        XCTAssertFalse(legacyDecoded.incognitoModeEnabled)
+
+        XCTAssertEqual(KeyboardSwipeCommand.parse("#incognito"), .toggleIncognito)
+        XCTAssertEqual(KeyboardSwipeCommand.keycapBadge(for: "#incognito"), "隐")
+    }
+
+    func testV70CommunicationGuardSmartInfoParserAndVModeV3() throws {
+        // 1. 情绪防冲动温度计（0ms 离线识别与礼貌减压零误报）
+        let calm = CommunicationGuardEngine.analyzeEmotion("不好意思麻烦帮我看一下周报，谢谢！")
+        XCTAssertEqual(calm.level, .calm)
+        XCTAssertFalse(calm.shouldWarnInKeyboard)
+
+        let heated = CommunicationGuardEngine.analyzeEmotion("我都说了几遍了？！你到底听不懂人话吗？？？真服了你！")
+        XCTAssertTrue(heated.level >= .heated)
+        XCTAssertTrue(heated.shouldWarnInKeyboard)
+        XCTAssertFalse(heated.matchedTriggers.isEmpty)
+        XCTAssertFalse(heated.quickCalmSuggestions.isEmpty)
+
+        // 2. 防诈与交易避坑雷达（9 类高频套路命中 + 正常会议通知零误报）
+        let normalMeeting = CommunicationGuardEngine.analyzeScam("明天下午3点腾讯会议讨论架构评审，请准时参加")
+        XCTAssertEqual(normalMeeting.level, .safe)
+        XCTAssertFalse(normalMeeting.isRisky)
+
+        let highScam = CommunicationGuardEngine.analyzeScam(
+            "您的微信百万保障今日到期将自动扣费，请立即打开腾讯会议开启屏幕共享，并把短信验证码发我办理关闭。"
+        )
+        XCTAssertEqual(highScam.level, .highRisk)
+        XCTAssertTrue(highScam.isRisky)
+        XCTAssertGreaterThanOrEqual(highScam.hits.count, 3)
+
+        let cautionScam = CommunicationGuardEngine.analyzeScam("房子很抢手，请先交押金500元锁定房源")
+        XCTAssertEqual(cautionScam.level, .caution)
+        XCTAssertTrue(cautionScam.isRisky)
+
+        // 3. 万能收件地址 / 企业开票抬头 / 会议日程分字段拆解
+        let addr = SmartInfoParser.parse("张三 138-1234-5678 山东省临沂市兰山区北京路88号科技大厦1201室")
+        XCTAssertEqual(addr?.kind, .shippingAddress)
+        XCTAssertEqual(addr?.fields.first(where: { $0.id == "name" })?.value, "张三")
+        XCTAssertEqual(addr?.fields.first(where: { $0.id == "phone" })?.value, "13812345678")
+        XCTAssertTrue(addr?.fields.first(where: { $0.id == "address" })?.value.contains("山东省临沂市") == true)
+
+        let invoice = SmartInfoParser.parse(
+            "抬头：灵犀智能科技有限公司\n税号：91371300MA3ABCD12X\n开户行：招商银行北京望京支行\n账号：110928374610901"
+        )
+        XCTAssertEqual(invoice?.kind, .corporateInvoice)
+        XCTAssertEqual(invoice?.fields.first(where: { $0.id == "company" })?.value, "灵犀智能科技有限公司")
+        XCTAssertEqual(invoice?.fields.first(where: { $0.id == "taxId" })?.value, "91371300MA3ABCD12X")
+        XCTAssertEqual(invoice?.fields.first(where: { $0.id == "bankName" })?.value, "招商银行北京望京支行")
+        XCTAssertEqual(invoice?.fields.first(where: { $0.id == "bankAccount" })?.value, "110928374610901")
+
+        let meeting = SmartInfoParser.parse("明天下午14:30 腾讯会议号：888-123-456 入会密码：6688")
+        XCTAssertEqual(meeting?.kind, .meetingSchedule)
+        XCTAssertEqual(meeting?.fields.first(where: { $0.id == "meetingId" })?.value, "888-123-456")
+        XCTAssertEqual(meeting?.fields.first(where: { $0.id == "passcode" })?.value, "6688")
+
+        XCTAssertNil(SmartInfoParser.parse("今晚吃啥"))
+
+        // 4. VModeToolEngine v3 全民生活速算（AA 分摊 / 折扣立省 / BMI / 日期倒计时）
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("aa368/4"))
+        let aa = VModeToolEngine.candidates(forBody: "aa368/4")
+        XCTAssertTrue(aa.first?.contains("92") == true)
+        XCTAssertTrue(aa.first?.contains("4人") == true)
+
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("299z85"))
+        let disc = VModeToolEngine.candidates(forBody: "299z85")
+        XCTAssertTrue(disc.first?.contains("254.15") == true)
+        XCTAssertTrue(disc.first?.contains("44.85") == true)
+
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("bmi175/68"))
+        let bmi = VModeToolEngine.candidates(forBody: "bmi175/68")
+        XCTAssertTrue(bmi.first?.contains("22.2") == true)
+        XCTAssertTrue(bmi.first?.contains("正常标准") == true)
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let baseDate = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 27, hour: 12)))
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("2026-12-07"))
+        let countdown = VModeToolEngine.candidates(forBody: "2026-12-07", now: baseDate)
+        XCTAssertEqual(countdown.first, "距 2026-12-07 还有 10 天")
+
+        // 5. AIClient.mergeSystem 富文本 Markdown 通道与聊天纯文本通道精准分流
+        let cfg = AIConfig()
+        let plainSys = AIClient.mergeSystem(base: "你是助手", userPrompt: "你好", config: cfg, allowMarkdown: false)
+        XCTAssertTrue(plainSys.contains(AITextSanitizer.plainTextOutputRule))
+        XCTAssertFalse(plainSys.contains(AITextSanitizer.richMarkdownOutputRule))
+
+        let richSys = AIClient.mergeSystem(base: "你是助手", userPrompt: "写段Swift代码", config: cfg, allowMarkdown: true)
+        XCTAssertTrue(richSys.contains(AITextSanitizer.richMarkdownOutputRule))
+        XCTAssertFalse(richSys.contains(AITextSanitizer.plainTextOutputRule))
+
+        // 6. 扩容后 EmojiCatalog 高频中文词推荐命中
+        XCTAssertFalse(EmojiCatalog.recommendForTopCandidate("辛苦了").isEmpty)
+        XCTAssertFalse(EmojiCatalog.recommendForTopCandidate("暴富").isEmpty)
+        XCTAssertFalse(EmojiCatalog.recommendForTopCandidate("火锅").isEmpty)
+        XCTAssertFalse(EmojiCatalog.recommendForTopCandidate("绝绝子").isEmpty)
+    }
+
+    func testV71MassMarketFlagshipFeatures() throws {
+        // 1. 分享链接去追踪与账号防暴露净链器（B 站 / 小红书 / 淘宝口令）
+        let bili = LinkPrivacyCleaner.clean(
+            "【超神技巧】https://www.bilibili.com/video/BV1xx411c7mD/?spm_id_from=333.1007&vd_source=secretuid123&p=2 复制打开哔哩哔哩"
+        )
+        XCTAssertTrue(bili.hasChanges)
+        XCTAssertTrue(bili.hasIdentityLeakRisk)
+        XCTAssertTrue(bili.removedIdentityLeakParams.contains("vd_source"))
+        XCTAssertTrue(bili.strippedShareNoise)
+        XCTAssertEqual(bili.extractedCleanURL, "https://www.bilibili.com/video/BV1xx411c7mD/?p=2")
+
+        let xhs = LinkPrivacyCleaner.clean(
+            "https://www.xiaohongshu.com/discovery/item/66abc123?xsec_token=keepMe&appuid=leak999&xhsshare=CopyLink"
+        )
+        XCTAssertTrue(xhs.hasIdentityLeakRisk)
+        XCTAssertTrue(xhs.extractedCleanURL?.contains("xsec_token=keepMe") == true)
+        XCTAssertFalse(xhs.extractedCleanURL?.contains("appuid") == true)
+
+        // 2. 草稿防丢黑匣子（隐私边界 + 12 分钟续写原地更新 + 24 小时过期）
+        let longDraft = "今天开会同步了三件事，第一是下周上线前把回归用例跑完，第二是整理客户报价单。"
+        XCTAssertTrue(DraftRecoveryStore.shouldCapture(longDraft, isSecureField: false, isIncognito: false, enabled: true))
+        XCTAssertFalse(DraftRecoveryStore.shouldCapture(longDraft, isSecureField: true, isIncognito: false, enabled: true))
+        XCTAssertFalse(DraftRecoveryStore.shouldCapture(longDraft, isSecureField: false, isIncognito: true, enabled: true))
+        XCTAssertFalse(DraftRecoveryStore.shouldCapture("好的收到", isSecureField: false, isIncognito: false, enabled: true))
+
+        let t0 = Date(timeIntervalSince1970: 1_760_000_000)
+        let m1 = DraftRecoveryStore.merge(draft: longDraft, into: [], now: t0)
+        XCTAssertEqual(m1.count, 1)
+        let extendedDraft = longDraft + "第三是周四晚上一起复盘。"
+        let m2 = DraftRecoveryStore.merge(draft: extendedDraft, into: m1, now: t0.addingTimeInterval(120))
+        XCTAssertEqual(m2.count, 1)
+        XCTAssertEqual(m2[0].text, extendedDraft)
+        let expired = DraftRecoveryStore.prune(m2, now: t0.addingTimeInterval(25 * 3600))
+        XCTAssertTrue(expired.isEmpty)
+
+        // 3. 个人速填名片夹智能建卡 + v 模式秒调（vdz / vkp / vshuihao）
+        let card = try XCTUnwrap(PersonalFillCardStore.buildCardFromRawText(
+            "抬头：灵犀科技有限公司\n税号：91371300MA3ABCD12X\n开户行：招商银行望京支行\n账号：110928374610901"
+        ))
+        XCTAssertEqual(card.kind, .invoice)
+        let kpCandidates = PersonalFillCardStore.vModeCandidates(forBody: "shuihao", cards: [card])
+        XCTAssertEqual(kpCandidates.first, "91371300MA3ABCD12X")
+
+        // 4. 发帖防限流 / 广告法违禁词 0ms 检测与一键合规平替
+        let post = "这款面霜全网第一、100%有效还能根治敏感肌，想要直接加微信私聊转账！"
+        let report = OfflineTextLinter.analyze(post)
+        XCTAssertGreaterThanOrEqual(report.platformRiskCount, 4)
+        XCTAssertTrue(report.hasPlatformRisks)
+        XCTAssertFalse(report.platformSafeText.contains("全网第一"))
+        XCTAssertFalse(report.platformSafeText.contains("加微信"))
+        XCTAssertTrue(report.platformSafeText.contains("口碑前列"))
+        XCTAssertTrue(report.platformSafeText.contains("站内私信"))
+
+        // 5. 离线高情商话术口袋覆盖全 6 类场景
+        XCTAssertGreaterThanOrEqual(SocialScriptBank.all.count, 50)
+        for cat in SocialScriptCategory.allCases {
+            XCTAssertFalse(SocialScriptBank.filter(category: cat).isEmpty)
+        }
+        XCTAssertFalse(SocialScriptBank.filter(query: "借钱").isEmpty)
+
+        // 6. 选区原地包裹与大小写轮换
+        XCTAssertEqual(SelectionTextTransform.wrapBookTitle.apply(to: "灵犀输入法"), "《灵犀输入法》")
+        XCTAssertEqual(SelectionTextTransform.wrapBookTitle.apply(to: "《灵犀输入法》"), "灵犀输入法")
+        XCTAssertEqual(SelectionTextTransform.cycleCase.apply(to: "hello world"), "Hello World")
+        XCTAssertEqual(SelectionTextTransform.cycleCase.apply(to: "Hello World"), "HELLO WORLD")
+        XCTAssertEqual(SelectionTextTransform.cycleCase.apply(to: "HELLO WORLD"), "hello world")
+
+        // 7. VModeToolEngine v4（房贷月供 / 月薪换时薪 / 多币种速估 / 随机强密码）
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("dk100/30/3.5"))
+        let loan = VModeToolEngine.candidates(forBody: "dk100/30/3.5")
+        XCTAssertTrue(loan.first?.contains("4490.45") == true)
+
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("sx15000"))
+        let salary = VModeToolEngine.candidates(forBody: "sx15000")
+        XCTAssertTrue(salary.first?.contains("86.2") == true)
+
+        XCTAssertTrue(VModeToolEngine.isRecognizedQuery("100usd"))
+        let fx = VModeToolEngine.candidates(forBody: "100usd")
+        XCTAssertTrue(fx.first?.contains("725") == true)
+
+        XCTAssertTrue(VModeToolEngine.isPasswordQuery("pw16"))
+        let pwds = VModeToolEngine.candidates(forBody: "pw16")
+        XCTAssertEqual(pwds.first?.count, 16)
+
+        // 8. 验证码 15 分钟阅后即焚（保留置顶与非验证码，清理超时未置顶验证码）
+        let oldOTP = ClipboardItem(text: "您的验证码为 482910", createdAt: t0.addingTimeInterval(-1200), isPinned: false)
+        let pinnedOTP = ClipboardItem(text: "您的验证码为 998877", createdAt: t0.addingTimeInterval(-1200), isPinned: true)
+        let normalNote = ClipboardItem(text: "周四下午项目复盘", createdAt: t0.addingTimeInterval(-3600), isPinned: false)
+        let afterPrune = ClipboardStore.pruneExpiredOTPs([oldOTP, pinnedOTP, normalNote], enabled: true, now: t0)
+        XCTAssertEqual(afterPrune.count, 2)
+        XCTAssertFalse(afterPrune.contains(where: { $0.id == oldOTP.id }))
+
+        // 9. 长辈大字关怀模式一键切换与原配置无损快照还原 + /cleanurl /checkpost 斜杠宏
+        var settings = LingxiSettings()
+        settings.candidateFontSize = 16.5
+        settings.candidateBarHeight = 50
+        settings.setElderCareMode(true)
+        XCTAssertTrue(settings.elderCareModeEnabled)
+        XCTAssertEqual(settings.candidateFontSize, 22)
+        XCTAssertEqual(settings.candidateBarHeight, 60)
+        settings.setElderCareMode(false)
+        XCTAssertFalse(settings.elderCareModeEnabled)
+        XCTAssertEqual(settings.candidateFontSize, 16.5)
+        XCTAssertEqual(settings.candidateBarHeight, 50)
+
+        let cleanCmd = InlineAICommandDetector.detect(in: "https://www.bilibili.com/video/BV1xx/?vd_source=123 /cleanurl")
+        XCTAssertEqual(cleanCmd?.offlineMacro, .cleanURL)
+        let postCmd = InlineAICommandDetector.detect(in: "这款面霜全网第一加微信 /checkpost")
+        XCTAssertEqual(postCmd?.offlineMacro, .platformSafe)
     }
 }
