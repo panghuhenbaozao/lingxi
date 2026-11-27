@@ -179,6 +179,13 @@ def main() -> int:
             if '#"' in raw_line and r"\u{" in raw_line:
                 print(f"ERROR: Invalid ICU regex escape \\u{{...}} inside raw Swift string in {rel}:{raw_ln} (use \\uXXXX)", file=sys.stderr)
                 return 1
+        code_only = _strip_comments_and_strings(text)
+        if "NavigationStack(path:" in code_only and "NavigationLink {" in code_only:
+            print(f"ERROR: Mixed NavigationStack(path:) with legacy NavigationLink {{ }} in {rel} (crashes on iOS 16-18)", file=sys.stderr)
+            return 1
+        if rel.endswith("AISettingsView.swift") and "LazyVGrid(" in code_only:
+            print(f"ERROR: Found LazyVGrid inside List in {rel} (causes UICollectionViewListCell self-sizing crash)", file=sys.stderr)
+            return 1
         for m in re.finditer(r"\.onChange\s*\(\s*of:[^\n]+\)\s*\{([^\n]*)", text):
             rest = m.group(1).strip()
             if " in" not in rest:
@@ -233,6 +240,7 @@ def main() -> int:
         "CommunicationGuardEngine", "SmartInfoParser",
         "LinkPrivacyCleaner", "DraftRecoveryStore", "PersonalFillCardStore",
         "SocialScriptBank", "SelectionTextTransform",
+        "AICognitiveMemoryDB", "AIAutopilotController", "AIAutopilotMode",
     ]
 
     for p in swift_files:

@@ -3679,4 +3679,120 @@ final class LingxiTests: XCTestCase {
         let postCmd = InlineAICommandDetector.detect(in: "这款面霜全网第一加微信 /checkpost")
         XCTAssertEqual(postCmd?.offlineMacro, .platformSafe)
     }
+
+    func testV72AICognitiveMemoryDBAndAutopilot() throws {
+        // 1. 独立临时 SQLite 认知学习数据库初始化、写入行为观察、模糊音统计、词汇共鸣、长期记忆 CRUD 与防敏感过滤
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi_cog_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let dbURL = tmpDir.appendingPathComponent("ai_cognitive_memory.sqlite")
+        let db = AICognitiveMemoryDB(url: dbURL)
+
+        let nightDate = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 27, hour: 23, minute: 15)))
+        for _ in 0..<4 {
+            db.recordTypingObservation(TypingObservationSample(
+                charsCommitted: 24,
+                wordsCommitted: 10,
+                backspaceCount: 4,
+                typoFixHits: 2,
+                englishMixWords: 3,
+                digitMixCount: 2,
+                emojiPickCount: 1,
+                bracketPairCount: 1,
+                longDraftCount: 1,
+                fuzzyConfusionKey: "in_ing"
+            ), now: nightDate)
+        }
+        db.recordVocabLearning(word: "接口联调", pinyin: "jie'kou'lian'tiao")
+        db.recordVocabLearning(word: "接口联调", pinyin: "jie'kou'lian'tiao")
+        db.recordVocabLearning(word: "13812345678", pinyin: "") // 敏感手机号必须被拦截
+        db.recordAIInteraction(featureTag: "polish", scene: "bossClient", outcome: "copied")
+
+        let stats = db.loadStats()
+        XCTAssertEqual(stats.totalObservations, 4)
+        XCTAssertEqual(stats.totalCharsObserved, 96)
+        XCTAssertEqual(stats.fuzzyConfusionCounts["in_ing"], 4)
+        XCTAssertEqual(stats.vocabCount, 1, "敏感手机号不得写入词汇学习库")
+        XCTAssertEqual(stats.interactionCount, 1)
+        XCTAssertGreaterThan(stats.nightSessionRatio, 0.9)
+
+        let topVocab = db.fetchTopVocab(limit: 10)
+        XCTAssertEqual(topVocab.first?.word, "接口联调")
+        XCTAssertEqual(topVocab.first?.domain, "研发技术")
+        XCTAssertEqual(topVocab.first?.learnCount, 2)
+
+        // 2. AI 全权托管本地引擎：自动开启核心功能 + 中英混输盘古空格 + 模糊音 in/ing + 写入透明审计日志与记忆
+        var settings = LingxiSettings()
+        XCTAssertEqual(settings.aiAutopilotMode, .fullAutopilot, "默认应启用 AI 全权自动托管")
+        settings.typoCorrectionEnabled = false
+        settings.panguSpaceLetters = false
+        settings.panguSpaceDigits = false
+        settings.draftRecoveryEnabled = false
+        settings.fuzzy.inIng = false
+        settings.incognitoModeEnabled = false
+
+        let outcome = AIAutopilotController.evaluateAndApplyLocal(
+            settings: &settings,
+            db: db,
+            habitProfile: UserTypingHabitProfile(),
+            topUserWords: ["发版回归", "需求评审"]
+        )
+        XCTAssertGreaterThanOrEqual(outcome.appliedCount, 5)
+        XCTAssertTrue(settings.typoCorrectionEnabled)
+        XCTAssertTrue(settings.panguSpaceLetters)
+        XCTAssertTrue(settings.panguSpaceDigits)
+        XCTAssertTrue(settings.draftRecoveryEnabled)
+        XCTAssertTrue(settings.fuzzy.inIng, "in/ing 混淆 >= 3 次后 AI 必须自动开启模糊音 in↔ing")
+        XCTAssertFalse(settings.incognitoModeEnabled, "AI 严禁触碰隐私红线开关")
+
+        // 3. 决策审计日志与 1 键撤回
+        let decisions = db.fetchDecisions(limit: 30)
+        let inIngDecision = try XCTUnwrap(decisions.first(where: { $0.settingKey == "fuzzy.inIng" }))
+        XCTAssertEqual(inIngDecision.oldValue, "关")
+        XCTAssertEqual(inIngDecision.newValue, "开")
+        XCTAssertFalse(inIngDecision.reverted)
+        XCTAssertTrue(AIAutopilotController.revertDecision(inIngDecision, in: &settings, db: db))
+        XCTAssertFalse(settings.fuzzy.inIng, "撤回后必须精确恢复原开关值")
+        XCTAssertTrue(db.fetchDecisions(limit: 30).first(where: { $0.id == inIngDecision.id })?.reverted == true)
+
+        // 4. 大模型 JSON 深度托管解析（仅白名单生效，拒绝越权隐私键）+ Prompt 记忆注入 + JSON 导出与清空
+        let llmJSON = """
+        ```json
+        {
+          "persona_digest": "偏爱中英混输的研发工程师，注重简洁直给的职场表达。",
+          "summary": "已为你开启英文句首大写并沉淀 2 条专属记忆。",
+          "memories": [
+            {"category": "表达习惯", "key": "llm_direct", "content": "汇报沟通习惯先给结论再列要点", "confidence": 0.92}
+          ],
+          "setting_changes": [
+            {"key": "autoCapitalizeEnglish", "value": false, "reason": "代码与技术缩写场景不强制首字母大写"},
+            {"key": "incognitoModeEnabled", "value": true, "reason": "非法越权键应被严格忽略"}
+          ]
+        }
+        ```
+        """
+        settings.autoCapitalizeEnglish = true
+        let llmOutcome = AIAutopilotController.applyParsedLLMJSON(llmJSON, settings: &settings, db: db)
+        XCTAssertTrue(llmOutcome.usedLLM)
+        XCTAssertFalse(settings.autoCapitalizeEnglish, "白名单内合法决策应自动生效")
+        XCTAssertFalse(settings.incognitoModeEnabled, "非白名单隐私键必须被忽略")
+
+        let promptBlock = db.promptContextBlock(limit: 10)
+        XCTAssertTrue(promptBlock.contains("偏爱中英混输的研发工程师"))
+        XCTAssertTrue(promptBlock.contains("汇报沟通习惯先给结论再列要点"))
+
+        let mems = db.fetchMemories(limit: 20)
+        let directMem = try XCTUnwrap(mems.first(where: { $0.memoryKey == "llm_direct" }))
+        db.togglePinMemory(id: directMem.id)
+        XCTAssertTrue(db.fetchMemories(limit: 20).first(where: { $0.id == directMem.id })?.isPinned == true)
+        XCTAssertNotNil(db.exportJSONSummary())
+
+        // 5. LingxiSettings.aiAutopilotMode 旧版 JSON 向后兼容解码
+        let legacyDecoded = try JSONDecoder().decode(LingxiSettings.self, from: Data("{\"keySoundEnabled\":false}".utf8))
+        XCTAssertEqual(legacyDecoded.aiAutopilotMode, .fullAutopilot)
+
+        db.clearAllData()
+        XCTAssertEqual(db.loadStats().memoryCount, 0)
+        XCTAssertEqual(db.loadStats().totalObservations, 0)
+    }
 }

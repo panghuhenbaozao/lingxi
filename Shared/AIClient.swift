@@ -1058,6 +1058,10 @@ final class AIClient {
         if !habitSuffix.isEmpty {
             result += "\n\(habitSuffix)"
         }
+        let cognitiveBlock = AICognitiveMemoryDB.shared.promptContextBlock(limit: 8)
+        if !cognitiveBlock.isEmpty {
+            result += "\n【灵犀 AI 本地 SQLite 长期认知记忆库（懂你档案）】\n\(cognitiveBlock)"
+        }
         if LingxiSettings.load().aiGeoContextEnabled {
             let geoSuffix = GeoLocationContext.load().aiTimeLocationPromptSuffix()
             if !geoSuffix.isEmpty {

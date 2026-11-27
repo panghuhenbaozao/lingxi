@@ -483,16 +483,22 @@ struct ClipboardPhrasesView: View {
 
     private var formatSection: some View {
         Section {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                formatButton("链接去追踪", icon: "link.badge.plus") {
-                    let r = LinkPrivacyCleaner.clean($0)
-                    return r.extractedCleanURL ?? r.cleanedText
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    formatButton("链接去追踪", icon: "link.badge.plus") {
+                        let r = LinkPrivacyCleaner.clean($0)
+                        return r.extractedCleanURL ?? r.cleanedText
+                    }
+                    formatButton("发帖防限流", icon: "megaphone.fill") { OfflineTextLinter.autoReplacePlatformRisks($0) }
                 }
-                formatButton("发帖防限流", icon: "megaphone.fill") { OfflineTextLinter.autoReplacePlatformRisks($0) }
-                formatButton("盘古空格", icon: "textformat.abc") { TextFormatterToolbox.addPanguSpaces($0) }
-                formatButton("去多余空行", icon: "text.justify") { TextFormatterToolbox.collapseBlankLines($0) }
-                formatButton("数字编号", icon: "list.number") { TextFormatterToolbox.toNumberedList($0) }
-                formatButton("圆点列表", icon: "list.bullet") { TextFormatterToolbox.toBulletList($0) }
+                HStack(spacing: 8) {
+                    formatButton("盘古空格", icon: "textformat.abc") { TextFormatterToolbox.addPanguSpaces($0) }
+                    formatButton("去多余空行", icon: "text.justify") { TextFormatterToolbox.collapseBlankLines($0) }
+                }
+                HStack(spacing: 8) {
+                    formatButton("数字编号", icon: "list.number") { TextFormatterToolbox.toNumberedList($0) }
+                    formatButton("圆点列表", icon: "list.bullet") { TextFormatterToolbox.toBulletList($0) }
+                }
             }
             .padding(.vertical, 6)
         } header: {

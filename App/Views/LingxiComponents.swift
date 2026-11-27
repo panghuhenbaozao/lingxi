@@ -259,32 +259,42 @@ struct LXFlowLayout: Layout {
         var widest: CGFloat = 0
         for subview in subviews {
             var size = subview.sizeThatFits(.unspecified)
-            size.width = min(size.width, maxWidth)
-            if x > 0 && x + size.width > maxWidth {
+            if !size.width.isFinite || size.width < 0 { size.width = 0 }
+            if !size.height.isFinite || size.height < 0 { size.height = 0 }
+            if maxWidth.isFinite {
+                size.width = min(size.width, maxWidth)
+            }
+            if maxWidth.isFinite && x > 0 && x + size.width > maxWidth {
                 y += lineHeight + lineSpacing
                 x = 0
                 lineHeight = 0
             }
             x += size.width + spacing
             lineHeight = max(lineHeight, size.height)
-            widest = max(widest, x - spacing)
+            let candidateW = max(0, x - spacing)
+            if candidateW.isFinite {
+                widest = max(widest, candidateW)
+            }
         }
-        // 宽度未指定或为无穷大时（如放进横向滚动容器）回退为内容实际宽度，避免布局异常
         let resolvedWidth: CGFloat
-        if let w = proposal.width, w.isFinite {
+        if let w = proposal.width, w.isFinite, w >= 0 {
             resolvedWidth = w
         } else {
-            resolvedWidth = widest
+            resolvedWidth = widest.isFinite ? widest : 0
         }
-        return CGSize(width: resolvedWidth, height: y + lineHeight)
+        let resolvedHeight = (y + lineHeight).isFinite ? max(0, y + lineHeight) : 0
+        return CGSize(width: resolvedWidth, height: resolvedHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard bounds.width.isFinite, bounds.width > 0 else { return }
         var x = bounds.minX
         var y = bounds.minY
         var lineHeight: CGFloat = 0
         for subview in subviews {
             var size = subview.sizeThatFits(.unspecified)
+            if !size.width.isFinite || size.width < 0 { size.width = 0 }
+            if !size.height.isFinite || size.height < 0 { size.height = 0 }
             size.width = min(size.width, bounds.width)
             if x > bounds.minX && x + size.width > bounds.maxX {
                 y += lineHeight + lineSpacing

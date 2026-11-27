@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 /// ⑤ 10 家服务商快切 ⑥ 引擎连接与四路路由/档案/Headers ⑦ 常用 AI 偏好
 struct AISettingsView: View {
     private enum StudioDestination: Hashable {
+        case autopilotHub
         case toneAndDiff
         case writingStudio
         case translationStudio
@@ -15,10 +16,32 @@ struct AISettingsView: View {
         case offlineLinter
         case multiModelCouncil
         case parameterizedRunner
+        case promptsWorkshop
+        case styleAndContext
+        case privacyShield
+        case autoInsight
+        case historyAndUsage
+    }
+
+    private enum ActiveSheet: Identifiable {
+        case modelPicker(AIModelAssignTarget)
+        case workbench(tab: Int, draft: String?)
+        case benchmark
+        case profileManager
+        case customHeaders
+
+        var id: String {
+            switch self {
+            case .modelPicker(let t): return "modelPicker_\(t.title)"
+            case .workbench(let tab, _): return "workbench_\(tab)"
+            case .benchmark: return "benchmark"
+            case .profileManager: return "profileManager"
+            case .customHeaders: return "customHeaders"
+            }
+        }
     }
 
     @EnvironmentObject private var appState: AppState
-    @State private var navPath = NavigationPath()
 
     @State private var revealKey = false
     @State private var isTesting = false
@@ -36,18 +59,12 @@ struct AISettingsView: View {
     @State private var isRunningQuickAI = false
     @State private var quickTask: Task<Void, Never>?
 
-    // 弹窗状态
-    @State private var showModelPicker = false
-    @State private var modelAssignTarget: AIModelAssignTarget = .primary
-    @State private var showWorkbenchSheet = false
-    @State private var workbenchInitialTab: Int = 0
-    @State private var workbenchInitialPrompt: String? = nil
-    @State private var showBenchmarkSheet = false
+    // 单一集中式弹窗与导航状态（杜绝 iOS 16–18 多 .sheet / NavigationStack(path:) 混用导致的闪退）
+    @State private var activeSheet: ActiveSheet?
+    @State private var pushedDestination: StudioDestination?
     @State private var showSaveProfileAlert = false
     @State private var saveProfileAsNew = true
     @State private var newProfileName = ""
-    @State private var showProfileManager = false
-    @State private var showHeadersSheet = false
     @State private var brainExportDoc: PromptsJSONDocument?
     @State private var showBrainExporter = false
     @State private var showBrainImporter = false
@@ -117,9 +134,10 @@ struct AISettingsView: View {
     private static let inlineQuickActions: [AIPresetAction] = [.polish, .eqReply, .translateEn, .summarize]
 
     var body: some View {
-        NavigationStack(path: $navPath) {
+        NavigationStack {
             List {
                 heroStatusSection
+                autopilotHeroSection
                 inlineQuickAISection
                 creativeToolsMatrixSection
                 evolutionAndSafetySection
@@ -130,36 +148,27 @@ struct AISettingsView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle("AI 智脑")
-            .navigationDestination(for: StudioDestination.self) { dest in
-                switch dest {
-                case .toneAndDiff:
-                    AIToneAndDiffStudioView { draft in openWorkbench(tab: 0, draft: draft) }
-                case .writingStudio:
-                    AIWritingStudioView { draft in openWorkbench(tab: 0, draft: draft) }
-                case .translationStudio:
-                    AITranslationStudioView()
-                case .pipelineStudio:
-                    AIPipelineStudioView { draft in openWorkbench(tab: 0, draft: draft) }
-                case .offlineLinter:
-                    AIOfflineLinterView { draft in openWorkbench(tab: 0, draft: draft) }
-                case .multiModelCouncil:
-                    AIMultiModelCouncilView { draft in openWorkbench(tab: 0, draft: draft) }
-                case .parameterizedRunner:
-                    AIParameterizedRunnerView { draft in openWorkbench(tab: 0, draft: draft) }
-                }
+            .navigationDestination(
+                isPresented: Binding(
+                    get: { pushedDestination != nil },
+                    set: { if !$0 { pushedDestination = nil } }
+                )
+            ) {
+                destinationView(for: pushedDestination)
             }
             .onAppear {
                 cachedHistoryCount = AIRecentHistoryStore.load().count
                 cachedThreadCount = AIWorkbenchThreadsStore.load().count
+                appState.refreshCognitiveStats()
             }
             .onDisappear {
                 quickTask?.cancel()
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 12) {
                         Button {
-                            showBenchmarkSheet = true
+                            activeSheet = .benchmark
                         } label: {
                             Image(systemName: "speedometer")
                                 .font(.subheadline.weight(.semibold))
@@ -194,85 +203,157 @@ struct AISettingsView: View {
                     newProfileName = ""
                 }
             }
-            .sheet(isPresented: $showModelPicker) {
-                AIModelPickerSheet(
-                    title: modelAssignTarget.title,
-                    models: hasFreshModelsForCurrentSource ? appState.aiConfig.fetchedModels : [],
-                    currentModel: currentModelFor(target: modelAssignTarget),
-                    provider: appState.aiConfig.provider,
-                    isFetching: appState.isFetchingAIModels,
-                    fetchError: modelFetchError,
-                    onRefresh: { await triggerFetchModels(openSheetOnSuccess: false) },
-                    onSelect: { chosenID in
-                        assignModel(chosenID, to: modelAssignTarget)
-                        showToast("已选定 \(chosenID)")
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .modelPicker(let target):
+                    AIModelPickerSheet(
+                        title: target.title,
+                        models: hasFreshModelsForCurrentSource ? appState.aiConfig.fetchedModels : [],
+                        currentModel: currentModelFor(target: target),
+                        provider: appState.aiConfig.provider,
+                        isFetching: appState.isFetchingAIModels,
+                        fetchError: modelFetchError,
+                        onRefresh: { await triggerFetchModels(openSheetOnSuccess: false, target: target) },
+                        onSelect: { chosenID in
+                            assignModel(chosenID, to: target)
+                            showToast("已选定 \(chosenID)")
+                        }
+                    )
+                case .workbench(let tab, let draft):
+                    AIWorkbenchSheet(initialTab: tab, initialDraft: draft)
+                        .environmentObject(appState)
+                case .benchmark:
+                    AIRouteBenchmarkSheet()
+                        .environmentObject(appState)
+                case .profileManager:
+                    AIProfileManagerSheet { msg in
+                        showToast(msg)
                     }
-                )
-            }
-            .sheet(isPresented: $showWorkbenchSheet) {
-                AIWorkbenchSheet(
-                    initialTab: workbenchInitialTab,
-                    initialDraft: workbenchInitialPrompt
-                )
-                .environmentObject(appState)
-            }
-            .sheet(isPresented: $showBenchmarkSheet) {
-                AIRouteBenchmarkSheet()
                     .environmentObject(appState)
-            }
-            .sheet(isPresented: $showProfileManager) {
-                AIProfileManagerSheet { msg in
-                    showToast(msg)
-                }
-                .environmentObject(appState)
-            }
-            .sheet(isPresented: $showHeadersSheet) {
-                AICustomHeadersSheet { msg in
-                    showToast(msg)
-                }
-                .environmentObject(appState)
-            }
-            .fileExporter(
-                isPresented: $showBrainExporter,
-                document: brainExportDoc,
-                contentType: .json,
-                defaultFilename: "lingxi-ai-brain-nokey"
-            ) { result in
-                switch result {
-                case .success:
-                    showToast("已导出无密钥 AI 智脑配置包（不含任何 API Key）")
-                case .failure(let err):
-                    let ns = err as NSError
-                    if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
-                        showToast("导出失败：\(err.localizedDescription)", isError: true)
+                case .customHeaders:
+                    AICustomHeadersSheet { msg in
+                        showToast(msg)
                     }
-                }
-            }
-            .fileImporter(isPresented: $showBrainImporter, allowedContentTypes: [.json]) { result in
-                switch result {
-                case .success(let url):
-                    let granted = url.startAccessingSecurityScopedResource()
-                    defer { if granted { url.stopAccessingSecurityScopedResource() } }
-                    guard let data = try? Data(contentsOf: url),
-                          let stats = appState.aiConfig.importBrainBundleJSON(data) else {
-                        showToast("文件不是有效的灵犀 AI 智脑配置包", isError: true)
-                        return
-                    }
-                    showToast("已安全合入：\(stats.prompts) 技能 · \(stats.cards) 知识卡 · \(stats.pipelines) 流水线")
-                case .failure(let err):
-                    let ns = err as NSError
-                    if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
-                        showToast("读取失败：\(err.localizedDescription)", isError: true)
-                    }
+                    .environmentObject(appState)
                 }
             }
         }
     }
 
+    @ViewBuilder
+    private func destinationView(for dest: StudioDestination?) -> some View {
+        switch dest {
+        case .autopilotHub:
+            AIAutopilotHubView()
+        case .toneAndDiff:
+            AIToneAndDiffStudioView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .writingStudio:
+            AIWritingStudioView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .translationStudio:
+            AITranslationStudioView()
+        case .pipelineStudio:
+            AIPipelineStudioView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .offlineLinter:
+            AIOfflineLinterView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .multiModelCouncil:
+            AIMultiModelCouncilView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .parameterizedRunner:
+            AIParameterizedRunnerView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .promptsWorkshop:
+            AIPromptsWorkshopView()
+        case .styleAndContext:
+            AIStyleAndContextView()
+        case .privacyShield:
+            AIPrivacyShieldView()
+        case .autoInsight:
+            AIAutoInsightView()
+        case .historyAndUsage:
+            AIHistoryAndUsageView { draft in openWorkbench(tab: 0, draft: draft) }
+        case .none:
+            EmptyView()
+        }
+    }
+
     private func openWorkbench(tab: Int = 0, draft: String? = nil) {
-        workbenchInitialTab = tab
-        workbenchInitialPrompt = draft
-        showWorkbenchSheet = true
+        activeSheet = .workbench(tab: tab, draft: draft)
+    }
+
+    // MARK: - 1.5 AI 全权托管与本地学习数据库主入口卡
+
+    private var autopilotHeroSection: some View {
+        let mode = appState.settings.aiAutopilotMode
+        let stats = appState.cognitiveStats
+        return Section {
+            Button {
+                pushedDestination = .autopilotHub
+            } label: {
+                HStack(spacing: 12) {
+                    LXIconTile(
+                        icon: "brain.head.profile",
+                        tint: mode == .fullAutopilot ? Color(Design.Palette.accent) : Color(Design.Palette.stone),
+                        size: 38
+                    )
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("AI 全权托管与学习数据库")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(Color(Design.Palette.ink))
+                            LXTag(
+                                text: mode.shortBadge,
+                                tint: mode == .fullAutopilot ? Color(Design.Palette.success) : Color(Design.Palette.accent),
+                                filled: mode == .fullAutopilot
+                            )
+                        }
+                        Text(
+                            stats.personaDigest.isEmpty
+                                ? "专属 SQLite 学习库 · \(stats.totalObservations) 次习惯观察 · \(stats.memoryCount) 条记忆 · \(stats.activeDecisionCount) 项已自动开启"
+                                : stats.personaDigest
+                        )
+                        .font(.caption)
+                        .foregroundStyle(Color(Design.Palette.stone))
+                        .lineLimit(2)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 8) {
+                Button {
+                    Task {
+                        let res = await appState.runDeepAIAutopilot()
+                        showToast(res.summary)
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        if appState.isRunningAutopilot {
+                            ProgressView().controlSize(.mini).tint(Color.white)
+                            Text("AI 正在分析数据库…")
+                        } else {
+                            Image(systemName: "sparkles")
+                            Text("立即 AI 托管调优")
+                        }
+                    }
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: true, wide: true))
+                .disabled(appState.isRunningAutopilot || mode == .off)
+
+                Button {
+                    pushedDestination = .autopilotHub
+                } label: {
+                    Label("SQLite 库", systemImage: "externaldrive.fill")
+                }
+                .buttonStyle(LXCapsuleButtonStyle(prominent: false))
+            }
+            .padding(.vertical, 2)
+        } header: {
+            Text("越打越懂你的专属 AI 管家")
+        }
     }
 
     // MARK: - 1. 顶部状态与全路由主操作卡
@@ -345,7 +426,7 @@ struct AISettingsView: View {
                         runConnectivityTest()
                     }
                     heroActionButton("全路由体检", icon: "speedometer", primary: false) {
-                        showBenchmarkSheet = true
+                        activeSheet = .benchmark
                     }
                     heroActionButton("多模态工作台", icon: "bubble.left.and.text.bubble.right.fill", primary: true) {
                         openWorkbench(tab: 0)
@@ -418,8 +499,7 @@ struct AISettingsView: View {
         Section {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    TextField("贴一句聊天消息或草稿，就地润色 / 回复 / 翻译…", text: $quickInput, axis: .vertical)
-                        .lineLimit(1...4)
+                    TextField("贴一句聊天消息或草稿，就地润色 / 回复 / 翻译…", text: $quickInput)
                         .font(.subheadline)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
@@ -559,6 +639,13 @@ struct AISettingsView: View {
                             HStack(spacing: 8) {
                                 Button {
                                     UIPasteboard.general.string = quickOutput
+                                    if !appState.settings.incognitoModeEnabled {
+                                        AICognitiveMemoryDB.shared.recordAIInteraction(
+                                            featureTag: quickResultLabel.isEmpty ? quickAction.rawValue : quickResultLabel,
+                                            scene: appState.aiConfig.activeScenePersona.rawValue,
+                                            outcome: "copied"
+                                        )
+                                    }
                                     showToast("已复制成品")
                                 } label: {
                                     Label("复制", systemImage: "doc.on.doc")
@@ -592,7 +679,7 @@ struct AISettingsView: View {
                 Text("闪电即用指令台")
                 Spacer()
                 Button {
-                    navPath.append(StudioDestination.parameterizedRunner)
+                    pushedDestination = .parameterizedRunner
                 } label: {
                     Label("{{变量}} 模板", systemImage: "slider.horizontal.3")
                         .font(.caption.weight(.semibold))
@@ -668,133 +755,140 @@ struct AISettingsView: View {
         }
     }
 
-    // MARK: - 3. 8 大旗舰 AI 创作工具矩阵
+    // MARK: - 3. 10 大旗舰 AI 创作工具矩阵（纯静态 2 列 VStack+HStack，杜绝 List 内 LazyVGrid 自适应崩溃）
 
     private var creativeToolsMatrixSection: some View {
         Section {
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
-                spacing: 10
-            ) {
-                Button {
-                    openWorkbench(tab: 0)
-                } label: {
-                    studioGridCard(
-                        icon: "bubble.left.and.text.bubble.right.fill",
-                        title: "多模态工作台",
-                        subtitle: "多话题 · 贴图追问 · 朗读",
-                        badge: cachedThreadCount > 0 ? "\(cachedThreadCount) 话题" : "对话"
-                    )
-                }
-                .buttonStyle(.plain)
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    Button {
+                        openWorkbench(tab: 0)
+                    } label: {
+                        studioGridCard(
+                            icon: "bubble.left.and.text.bubble.right.fill",
+                            title: "多模态工作台",
+                            subtitle: "多话题 · 贴图追问 · 朗读",
+                            badge: cachedThreadCount > 0 ? "\(cachedThreadCount) 话题" : "对话"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.toneAndDiff)
-                } label: {
-                    studioGridCard(
-                        icon: "square.stack.3d.up.fill",
-                        title: "三版语气 & Diff",
-                        subtitle: "并发 3 版 · 红绿逐字对比",
-                        badge: "热门"
-                    )
+                    Button {
+                        pushedDestination = .toneAndDiff
+                    } label: {
+                        studioGridCard(
+                            icon: "square.stack.3d.up.fill",
+                            title: "三版语气 & Diff",
+                            subtitle: "并发 3 版 · 红绿逐字对比",
+                            badge: "热门"
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.writingStudio)
-                } label: {
-                    studioGridCard(
-                        icon: "doc.richtext.fill",
-                        title: "模板写作 & 拆解",
-                        subtitle: "12 套场景表单 · 长文摘要",
-                        badge: "12 模板"
-                    )
-                }
-                .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    Button {
+                        pushedDestination = .writingStudio
+                    } label: {
+                        studioGridCard(
+                            icon: "doc.richtext.fill",
+                            title: "模板写作 & 拆解",
+                            subtitle: "12 套场景表单 · 长文摘要",
+                            badge: "12 模板"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.translationStudio)
-                } label: {
-                    studioGridCard(
-                        icon: "globe",
-                        title: "8 语专业翻译台",
-                        subtitle: "双向回译校验 · 语音朗读",
-                        badge: "8 语种"
-                    )
+                    Button {
+                        pushedDestination = .translationStudio
+                    } label: {
+                        studioGridCard(
+                            icon: "globe",
+                            title: "8 语专业翻译台",
+                            subtitle: "双向回译校验 · 语音朗读",
+                            badge: "8 语种"
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.pipelineStudio)
-                } label: {
-                    studioGridCard(
-                        icon: "arrow.triangle.branch",
-                        title: "AI 链式流水线",
-                        subtitle: "多步串联 · 装进键盘",
-                        badge: "\(appState.aiConfig.aiPipelines.count) 条"
-                    )
-                }
-                .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    Button {
+                        pushedDestination = .pipelineStudio
+                    } label: {
+                        studioGridCard(
+                            icon: "arrow.triangle.branch",
+                            title: "AI 链式流水线",
+                            subtitle: "多步串联 · 装进键盘",
+                            badge: "\(appState.aiConfig.aiPipelines.count) 条"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    appState.showScreenshotVision = true
-                } label: {
-                    studioGridCard(
-                        icon: "viewfinder.rectangular",
-                        title: "截屏 AI 识图",
-                        subtitle: "看图回复 · 提字 · 译中",
-                        badge: appState.aiConfig.visionModel.isEmpty ? "多模态" : "独立视觉"
-                    )
+                    Button {
+                        appState.showScreenshotVision = true
+                    } label: {
+                        studioGridCard(
+                            icon: "viewfinder.rectangular",
+                            title: "截屏 AI 识图",
+                            subtitle: "看图回复 · 提字 · 译中",
+                            badge: appState.aiConfig.visionModel.isEmpty ? "多模态" : "独立视觉"
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
-                Button {
-                    appState.showVoiceTranslator = true
-                } label: {
-                    studioGridCard(
-                        icon: "mic.fill",
-                        title: "实时语音同传",
-                        subtitle: "中⇄英/日 · 口述整编",
-                        badge: "实时"
-                    )
-                }
-                .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    Button {
+                        appState.showVoiceTranslator = true
+                    } label: {
+                        studioGridCard(
+                            icon: "mic.fill",
+                            title: "实时语音同传",
+                            subtitle: "中⇄英/日 · 口述整编",
+                            badge: "实时"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    openWorkbench(tab: 1)
-                } label: {
-                    studioGridCard(
-                        icon: "shield.lefthalf.filled",
-                        title: "博弈军师 & PK",
-                        subtitle: "潜台词 3 策略 · 跨渠道盲测",
-                        badge: "进阶"
-                    )
+                    Button {
+                        openWorkbench(tab: 1)
+                    } label: {
+                        studioGridCard(
+                            icon: "shield.lefthalf.filled",
+                            title: "博弈军师 & PK",
+                            subtitle: "潜台词 3 策略 · 跨渠道盲测",
+                            badge: "进阶"
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.offlineLinter)
-                } label: {
-                    studioGridCard(
-                        icon: "text.badge.checkmark",
-                        title: "发前冷静室与质检",
-                        subtitle: "情绪降火 · 防诈雷达 · 去 AI 腔 · 排版",
-                        badge: "0 Token"
-                    )
-                }
-                .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    Button {
+                        pushedDestination = .offlineLinter
+                    } label: {
+                        studioGridCard(
+                            icon: "text.badge.checkmark",
+                            title: "发前冷静室与质检",
+                            subtitle: "情绪降火 · 防诈雷达 · 去 AI 腔 · 排版",
+                            badge: "0 Token"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    navPath.append(StudioDestination.multiModelCouncil)
-                } label: {
-                    studioGridCard(
-                        icon: "person.3.fill",
-                        title: "多模型圆桌会诊",
-                        subtitle: "2-4 席并发 · 主席融合终版",
-                        badge: "MoA"
-                    )
+                    Button {
+                        pushedDestination = .multiModelCouncil
+                    } label: {
+                        studioGridCard(
+                            icon: "person.3.fill",
+                            title: "多模型圆桌会诊",
+                            subtitle: "2-4 席并发 · 主席融合终版",
+                            badge: "MoA"
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             .listRowBackground(Color.clear)
@@ -837,8 +931,8 @@ struct AISettingsView: View {
         let estCost = AICostEstimator.formatCNY(AICostEstimator.totalEstimatedUSD(for: appState.aiUsageLedger))
 
         return Section("专属进化、隐私护盾与账本") {
-            NavigationLink {
-                AIPromptsWorkshopView()
+            Button {
+                pushedDestination = .promptsWorkshop
             } label: {
                 moduleRow(
                     icon: "wand.and.stars",
@@ -847,9 +941,10 @@ struct AISettingsView: View {
                     badge: "\(keyboardBuiltinCount)+\(appState.aiConfig.customPrompts.count)"
                 )
             }
+            .buttonStyle(.plain)
 
-            NavigationLink {
-                AIStyleAndContextView()
+            Button {
+                pushedDestination = .styleAndContext
             } label: {
                 moduleRow(
                     icon: "waveform.path.ecg",
@@ -858,9 +953,10 @@ struct AISettingsView: View {
                     badge: "\(dnaStatus) · \(appState.aiConfig.contextCards.count) 卡"
                 )
             }
+            .buttonStyle(.plain)
 
-            NavigationLink {
-                AIPrivacyShieldView()
+            Button {
+                pushedDestination = .privacyShield
             } label: {
                 moduleRow(
                     icon: "checkmark.shield.fill",
@@ -869,9 +965,10 @@ struct AISettingsView: View {
                     badge: appState.aiConfig.privacyShieldEnabled ? "运行中" : "未开启"
                 )
             }
+            .buttonStyle(.plain)
 
-            NavigationLink {
-                AIAutoInsightView()
+            Button {
+                pushedDestination = .autoInsight
             } label: {
                 moduleRow(
                     icon: "brain.head.profile",
@@ -880,11 +977,10 @@ struct AISettingsView: View {
                     badge: appState.aiInsightReport?.personaTitle ?? "未生成"
                 )
             }
+            .buttonStyle(.plain)
 
-            NavigationLink {
-                AIHistoryAndUsageView { draft in
-                    openWorkbench(tab: 0, draft: draft)
-                }
+            Button {
+                pushedDestination = .historyAndUsage
             } label: {
                 moduleRow(
                     icon: "chart.bar.xaxis",
@@ -893,6 +989,7 @@ struct AISettingsView: View {
                     badge: appState.aiUsageLedger.isEmpty ? "0 次" : "\(appState.aiUsageLedger.count) 次 · \(estCost)"
                 )
             }
+            .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
@@ -920,6 +1017,24 @@ struct AISettingsView: View {
                     Label("导出智脑包 (无Key)", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                .background(
+                    Color.clear.fileExporter(
+                        isPresented: $showBrainExporter,
+                        document: brainExportDoc,
+                        contentType: .json,
+                        defaultFilename: "lingxi-ai-brain-nokey"
+                    ) { result in
+                        switch result {
+                        case .success:
+                            showToast("已导出无密钥 AI 智脑配置包（不含任何 API Key）")
+                        case .failure(let err):
+                            let ns = err as NSError
+                            if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
+                                showToast("导出失败：\(err.localizedDescription)", isError: true)
+                            }
+                        }
+                    }
+                )
 
                 Button {
                     showBrainImporter = true
@@ -927,6 +1042,26 @@ struct AISettingsView: View {
                     Label("导入智脑包", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(LXCapsuleButtonStyle(prominent: false, wide: true))
+                .background(
+                    Color.clear.fileImporter(isPresented: $showBrainImporter, allowedContentTypes: [.json]) { result in
+                        switch result {
+                        case .success(let url):
+                            let granted = url.startAccessingSecurityScopedResource()
+                            defer { if granted { url.stopAccessingSecurityScopedResource() } }
+                            guard let data = try? Data(contentsOf: url),
+                                  let stats = appState.aiConfig.importBrainBundleJSON(data) else {
+                                showToast("文件不是有效的灵犀 AI 智脑配置包", isError: true)
+                                return
+                            }
+                            showToast("已安全合入：\(stats.prompts) 技能 · \(stats.cards) 知识卡 · \(stats.pipelines) 流水线")
+                        case .failure(let err):
+                            let ns = err as NSError
+                            if !(ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) {
+                                showToast("读取失败：\(err.localizedDescription)", isError: true)
+                            }
+                        }
+                    }
+                )
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
         }
@@ -1081,7 +1216,7 @@ struct AISettingsView: View {
                 secondaryModelField(title: "语音转写模型 (STT)", placeholder: "可选（留空自动匹配 whisper-1 / SenseVoice）", text: $appState.aiConfig.sttModel, target: nil)
 
                 Button {
-                    showHeadersSheet = true
+                    activeSheet = .customHeaders
                 } label: {
                     HStack {
                         Label("自定义 HTTP Headers", systemImage: "lock.shield")
@@ -1181,7 +1316,7 @@ struct AISettingsView: View {
 
                 if !appState.aiConfig.profiles.isEmpty {
                     Button("管理") {
-                        showProfileManager = true
+                        activeSheet = .profileManager
                     }
                     .font(.caption.bold())
                     .buttonStyle(.plain)
@@ -1235,16 +1370,14 @@ struct AISettingsView: View {
                 Spacer()
                 if let target, hasFreshModelsForCurrentSource {
                     Button("从列表选") {
-                        modelAssignTarget = target
-                        showModelPicker = true
+                        activeSheet = .modelPicker(target)
                     }
                     .font(.caption.bold())
                     .buttonStyle(.plain)
                     .foregroundStyle(Color(Design.Palette.accent))
                 }
             }
-            TextField(placeholder, text: text, axis: .vertical)
-                .lineLimit(1...2)
+            TextField(placeholder, text: text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.footnote.monospaced())
@@ -1410,6 +1543,9 @@ struct AISettingsView: View {
                     .overlay(Capsule().stroke(Color(Design.Palette.hairline), lineWidth: 0.5))
                     .frame(maxWidth: 124, alignment: .trailing)
             }
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -1502,8 +1638,7 @@ struct AISettingsView: View {
                 Spacer(minLength: 4)
 
                 Button {
-                    modelAssignTarget = .primary
-                    Task { await triggerFetchModels(openSheetOnSuccess: true) }
+                    Task { await triggerFetchModels(openSheetOnSuccess: true, target: .primary) }
                 } label: {
                     HStack(spacing: 4) {
                         if appState.isFetchingAIModels {
@@ -1526,8 +1661,7 @@ struct AISettingsView: View {
 
                 if hasFreshModelsForCurrentSource {
                     Button {
-                        modelAssignTarget = .primary
-                        showModelPicker = true
+                        activeSheet = .modelPicker(.primary)
                     } label: {
                         Text("选择 · \(appState.aiConfig.fetchedModels.count)")
                             .font(.caption.bold())
@@ -1540,8 +1674,7 @@ struct AISettingsView: View {
                 }
             }
 
-            TextField(placeholder, text: text, axis: .vertical)
-                .lineLimit(1...3)
+            TextField(placeholder, text: text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.footnote.weight(.medium).monospaced())
@@ -1620,13 +1753,13 @@ struct AISettingsView: View {
         lastLatencyMs = nil
     }
 
-    private func triggerFetchModels(openSheetOnSuccess: Bool) async {
+    private func triggerFetchModels(openSheetOnSuccess: Bool, target: AIModelAssignTarget = .primary) async {
         modelFetchError = nil
         do {
             let models = try await appState.fetchAvailableAIModels()
             let chatCount = models.filter(\.isChatModel).count
             showToast("已拉取 \(models.count) 个远端模型（其中 \(chatCount) 个对话模型）")
-            if openSheetOnSuccess { showModelPicker = true }
+            if openSheetOnSuccess { activeSheet = .modelPicker(target) }
         } catch {
             modelFetchError = error.localizedDescription
             showToast("拉取失败：\(error.localizedDescription)", isError: true)

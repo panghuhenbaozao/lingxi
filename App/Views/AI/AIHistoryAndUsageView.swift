@@ -106,18 +106,19 @@ struct AIHistoryAndUsageView: View {
 
         return List {
             Section {
-                LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                    spacing: 12
-                ) {
-                    statTile(title: "累计调用", value: "\(entries.count)", unit: "次", icon: "bolt.fill")
-                    statTile(title: "平均首字", value: avgTTFT > 0 ? "\(avgTTFT)" : "--", unit: "ms", icon: "timer")
-                    if totalTokens > 0 {
-                        statTile(title: "实测 Token", value: formatCompactNumber(totalTokens), unit: "tok", icon: "cpu")
-                    } else {
-                        statTile(title: "累计生成", value: totalOut.formatted(), unit: "字", icon: "text.alignleft")
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        statTile(title: "累计调用", value: "\(entries.count)", unit: "次", icon: "bolt.fill")
+                        statTile(title: "平均首字", value: avgTTFT > 0 ? "\(avgTTFT)" : "--", unit: "ms", icon: "timer")
                     }
-                    statTile(title: "参考估算费用", value: AICostEstimator.formatCNY(estUSD), unit: "≈省\(max(0, totalOut / 38))分", icon: "yensign.circle")
+                    HStack(spacing: 12) {
+                        if totalTokens > 0 {
+                            statTile(title: "实测 Token", value: formatCompactNumber(totalTokens), unit: "tok", icon: "cpu")
+                        } else {
+                            statTile(title: "累计生成", value: totalOut.formatted(), unit: "字", icon: "text.alignleft")
+                        }
+                        statTile(title: "参考估算费用", value: AICostEstimator.formatCNY(estUSD), unit: "≈省\(max(0, totalOut / 38))分", icon: "yensign.circle")
+                    }
                 }
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)

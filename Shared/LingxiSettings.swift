@@ -344,6 +344,8 @@ struct LingxiSettings: Codable, Equatable {
     var speakSelectedCandidateEnabled: Bool = false
     /// 开启长辈关怀模式前的外观快照，关闭时一键无损还原
     var elderCareSnapshot: ElderCareSnapshot? = nil
+    /// 灵犀 AI 对打字功能与本地学习数据库的托管模式（默认全权自动托管，根据习惯自动开启并持续进化）
+    var aiAutopilotMode: AIAutopilotMode = .fullAutopilot
 
     struct ElderCareSnapshot: Codable, Equatable {
         let heightPreset: KeyboardHeightPreset
@@ -419,6 +421,7 @@ struct LingxiSettings: Codable, Equatable {
         case toolbarLayout, showComposingStrip, candidateBarHeight, candidateFontSize
         case selectionMagicEnabled, autoFuzzyPromptEnabled, geoLocationBoostEnabled, aiGeoContextEnabled, autoDeleteUploadedScreenshot, autoAnalyzeNewScreenshot, customSwipeUpMap, customSwipeDownMap, activeLayoutPackID, incognitoModeEnabled
         case draftRecoveryEnabled, autoExpireOTPEnabled, elderCareModeEnabled, speakSelectedCandidateEnabled, elderCareSnapshot
+        case aiAutopilotMode
     }
 
     init() {}
@@ -505,6 +508,7 @@ struct LingxiSettings: Codable, Equatable {
         elderCareModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .elderCareModeEnabled) ?? d.elderCareModeEnabled
         speakSelectedCandidateEnabled = try c.decodeIfPresent(Bool.self, forKey: .speakSelectedCandidateEnabled) ?? d.speakSelectedCandidateEnabled
         elderCareSnapshot = try c.decodeIfPresent(ElderCareSnapshot.self, forKey: .elderCareSnapshot)
+        aiAutopilotMode = try c.decodeIfPresent(AIAutopilotMode.self, forKey: .aiAutopilotMode) ?? d.aiAutopilotMode
     }
 
     private struct CustomKeymapSyncPayload: Codable {

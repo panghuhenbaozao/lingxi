@@ -291,6 +291,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private var sessionGlideWords: Int = 0
     private var sessionTypoCorrectedCount: Int = 0
     private var sessionConfusionCounts: [String: Int] = [:]
+    private var sessionEnglishMixWords: Int = 0
+    private var sessionDigitMixCount: Int = 0
+    private var sessionEmojiPickCount: Int = 0
+    private var sessionBracketPairCount: Int = 0
+    private var sessionLongDraftCount: Int = 0
+    private var sessionVModeCount: Int = 0
 
     // MARK: - 生命周期
 
@@ -3047,8 +3053,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
         // 若用户选择了带 Emoji 的推荐候选（如「今天好开心😊」或独立「😊」），同步记入 RecentEmojiStore
         if cand.source == .smartHelper {
+            if isBareVTool || rawComposing.lowercased().hasPrefix("v") {
+                sessionVModeCount += 1
+            }
             for scalar in cand.word.unicodeScalars where scalar.properties.isEmojiPresentation {
                 RecentEmojiStore.record(String(scalar))
+                sessionEmojiPickCount += 1
                 break
             }
         }
@@ -3062,6 +3072,13 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             learnedRecord = engine?.userLexicon.learn(word: cand.word, py: cand.py, prevWord: prevForRecord)
             if let prevForRecord {
                 engine?.userLexicon.learnBigram(prev: prevForRecord, next: cand.word)
+            }
+            if cand.word.count >= 2 {
+                let learnedWord = cand.word
+                let learnedPy = cand.py
+                DispatchQueue.global(qos: .utility).async {
+                    AICognitiveMemoryDB.shared.recordVocabLearning(word: learnedWord, pinyin: learnedPy)
+                }
             }
             pendingPhraseSegments.append((cand.word, cand.py))
         }
@@ -3091,6 +3108,9 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 if combinedWord.count <= 4 {
                     combinedLearnRecord = engine?.userLexicon.learn(word: combinedWord, py: combinedPy)
                     engine?.invalidateCache()
+                    DispatchQueue.global(qos: .utility).async {
+                        AICognitiveMemoryDB.shared.recordVocabLearning(word: combinedWord, pinyin: combinedPy)
+                    }
                 }
             }
             pendingPhraseSegments.removeAll()
@@ -3295,6 +3315,24 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
                 }
                 self.sessionCommittedChars += inserted.count
                 self.sessionCommittedWords += 1
+                var asciiLetterRun = 0
+                var hasDigit = false
+                var hasEmoji = false
+                for scalar in inserted.unicodeScalars {
+                    if (scalar.value >= 65 && scalar.value <= 90) || (scalar.value >= 97 && scalar.value <= 122) {
+                        asciiLetterRun += 1
+                    } else if scalar.value >= 48 && scalar.value <= 57 {
+                        hasDigit = true
+                    } else if scalar.properties.isEmojiPresentation {
+                        hasEmoji = true
+                    }
+                }
+                if asciiLetterRun >= 2 { self.sessionEnglishMixWords += 1 }
+                if hasDigit { self.sessionDigitMixCount += 1 }
+                if hasEmoji { self.sessionEmojiPickCount += 1 }
+                if inserted.contains("()") || inserted.contains("（）") || inserted.contains("《》") || inserted.contains("“”") || inserted.contains("「」") {
+                    self.sessionBracketPairCount += 1
+                }
                 if self.sessionCommittedChars >= 8 {
                     self.flushTypingHabitSessionIfNeeded()
                 }
@@ -3314,6 +3352,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         let hostBefore = (hostSnapshot.beforeInput ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let best = hostBefore.count > candidate.count ? hostBefore : candidate
         if best.count >= DraftRecoveryStore.minCaptureLength {
+            sessionLongDraftCount += 1
             DraftRecoveryStore.record(
                 best,
                 isSecureField: isSecureField,
@@ -3341,9 +3380,26 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     }
 
     private func flushTypingHabitSessionIfNeeded() {
-        guard sessionCommittedChars > 0, !settings.incognitoModeEnabled else { return }
+        guard sessionCommittedChars > 0, !settings.incognitoModeEnabled, !isSecureField else { return }
         let start = sessionHabitStartedAt ?? Date()
         let dur = max(1, min(300, Int(Date().timeIntervalSince(start))))
+        let topConfusionKey = sessionConfusionCounts.max(by: { $0.value < $1.value })?.key ?? ""
+        let obsSample = TypingObservationSample(
+            charsCommitted: sessionCommittedChars,
+            wordsCommitted: max(1, sessionCommittedWords),
+            backspaceCount: sessionDeleteCount,
+            typoFixHits: sessionTypoCorrectedCount,
+            englishMixWords: sessionEnglishMixWords,
+            digitMixCount: sessionDigitMixCount,
+            emojiPickCount: sessionEmojiPickCount,
+            bracketPairCount: sessionBracketPairCount,
+            longDraftCount: sessionLongDraftCount,
+            vmodeToolCount: sessionVModeCount,
+            glideWordCount: sessionGlideWords,
+            traditionalCount: settings.traditionalChineseEnabled ? sessionCommittedChars : 0,
+            fuzzyConfusionKey: topConfusionKey,
+            fieldKind: cachedKeyboardType == .webSearch ? "search" : "general"
+        )
         let event = TypingHabitEventPayload(
             startedAt: Int(start.timeIntervalSince1970),
             durationSeconds: dur,
@@ -3357,6 +3413,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             layoutID: settings.layoutMode.rawValue,
             confusionCounts: sessionConfusionCounts
         )
+        let settingsSnapshot = settings
         sessionHabitStartedAt = nil
         sessionCommittedChars = 0
         sessionCommittedWords = 0
@@ -3365,9 +3422,36 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         sessionGlideWords = 0
         sessionTypoCorrectedCount = 0
         sessionConfusionCounts = [:]
-        // 异步落盘，彻底避免每打满 8 字时主线程同步写 JSON 引发掉帧
-        DispatchQueue.global(qos: .utility).async {
-            _ = TypingHabitTracker.shared.recordTypingEvent(event)
+        sessionEnglishMixWords = 0
+        sessionDigitMixCount = 0
+        sessionEmojiPickCount = 0
+        sessionBracketPairCount = 0
+        sessionLongDraftCount = 0
+        sessionVModeCount = 0
+        // 异步落盘，彻底避免每打满 8 字时主线程同步写 JSON / SQLite 引发掉帧
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let updatedProfile = TypingHabitTracker.shared.recordTypingEvent(event)
+            AICognitiveMemoryDB.shared.recordTypingObservation(obsSample)
+            // 若开启「AI 全权自动托管」，每 15 分钟在后台静默评估本地 SQLite 数据库并自动开启匹配的新功能
+            if settingsSnapshot.aiAutopilotMode == .fullAutopilot {
+                let nowTs = Int(Date().timeIntervalSince1970)
+                let lastRun = Int(AICognitiveMemoryDB.shared.getMeta("last_autopilot_run_at") ?? "0") ?? 0
+                if nowTs - lastRun >= 900 {
+                    var mutableSettings = settingsSnapshot
+                    let outcome = AIAutopilotController.evaluateAndApplyLocal(
+                        settings: &mutableSettings,
+                        db: .shared,
+                        habitProfile: updatedProfile
+                    )
+                    if outcome.appliedCount > 0 {
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            self.settings = mutableSettings
+                            _ = mutableSettings.save()
+                        }
+                    }
+                }
+            }
         }
     }
 

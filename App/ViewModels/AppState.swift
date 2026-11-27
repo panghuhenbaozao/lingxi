@@ -34,6 +34,9 @@ final class AppState: ObservableObject {
     @Published var habitProfile: UserTypingHabitProfile = TypingHabitTracker.shared.currentProfile()
     @Published var aiInsightReport: AIAutoInsightReport? = AIAutoInsightService.loadCachedReport()
     @Published var isRunningAIInsight: Bool = false
+    @Published var isRunningAutopilot: Bool = false
+    @Published var lastAutopilotOutcome: AutopilotRunOutcome? = nil
+    @Published var cognitiveStats: CognitiveDBStats = .empty
     @Published var isFetchingAIModels: Bool = false
     @Published var isCloningStyleDNA: Bool = false
     @Published var aiUsageLedger: [AIUsageLedgerEntry] = []
@@ -87,6 +90,9 @@ final class AppState: ObservableObject {
         self.cloudConfig = CloudBackendConfig.load()
         refreshAll()
         registerSharedContainerObservers()
+        Task { @MainActor [weak self] in
+            self?.runLocalAutopilotIfNeeded(force: false)
+        }
     }
 
     private func registerSharedContainerObservers() {
@@ -179,6 +185,7 @@ final class AppState: ObservableObject {
         aiUsageLedger = AIUsageLedgerStore.load()
         isKeyboardEnabled = checkKeyboardEnabled()
         keyboardHeartbeat = KeyboardPermissionHeartbeat.load()
+        cognitiveStats = AICognitiveMemoryDB.shared.loadStats()
         loadCustomBackgroundPreview()
         loadUserAvatar()
     }
@@ -665,5 +672,130 @@ final class AppState: ObservableObject {
             settings = copy
         }
         return count
+    }
+
+    // MARK: - AI 全权托管与本地 SQLite 认知学习数据库
+
+    func refreshCognitiveStats() {
+        cognitiveStats = AICognitiveMemoryDB.shared.loadStats()
+    }
+
+    /// 0ms 本地习惯分析与自动托管体检（默认 10 分钟节流，force=true 立即执行）
+    @discardableResult
+    func runLocalAutopilotIfNeeded(force: Bool = false) -> AutopilotRunOutcome? {
+        guard settings.aiAutopilotMode != .off, !settings.incognitoModeEnabled else {
+            refreshCognitiveStats()
+            return nil
+        }
+        let now = Int(Date().timeIntervalSince1970)
+        let lastRun = Int(AICognitiveMemoryDB.shared.getMeta("last_autopilot_run_at") ?? "0") ?? 0
+        if !force && lastRun > 0 && (now - lastRun) < 600 {
+            refreshCognitiveStats()
+            return nil
+        }
+        var copy = settings
+        let topWords = userWords.prefix(24).map(\.word)
+        let outcome = AIAutopilotController.evaluateAndApplyLocal(
+            settings: &copy,
+            db: .shared,
+            habitProfile: habitProfile,
+            topUserWords: topWords
+        )
+        if copy != settings {
+            settings = copy
+        }
+        lastAutopilotOutcome = outcome
+        refreshCognitiveStats()
+        return outcome
+    }
+
+    /// 调用用户自己的大模型深度读取 SQLite 学习数据库并全权调优打字功能 + 沉淀「懂你」认知记忆
+    @discardableResult
+    func runDeepAIAutopilot() async -> AutopilotRunOutcome {
+        isRunningAutopilot = true
+        defer { isRunningAutopilot = false }
+        var copy = settings
+        let cfg = aiConfig
+        let currentHabit = TypingHabitTracker.shared.currentProfile()
+        habitProfile = currentHabit
+        let topWords = lexicon.allEntries(limit: 40).map(\.word)
+        let outcome = await AIAutopilotController.runDeepLLMAutopilot(
+            settings: &copy,
+            aiConfig: cfg,
+            db: .shared,
+            habitProfile: currentHabit,
+            topUserWords: topWords
+        )
+        if copy != settings {
+            settings = copy
+        }
+        lastAutopilotOutcome = outcome
+        refreshCognitiveStats()
+        return outcome
+    }
+
+    @discardableResult
+    func applyProposedAutopilotChange(_ change: AutopilotProposedChange) -> Bool {
+        var copy = settings
+        let targetBool = (change.targetValue == "开")
+        guard AIAutopilotController.writeSettingBool(change.settingKey, value: targetBool, into: &copy) else {
+            return false
+        }
+        settings = copy
+        AICognitiveMemoryDB.shared.insertDecision(AutopilotDecisionRecord(
+            settingKey: change.settingKey,
+            settingTitle: change.settingTitle,
+            oldValue: change.currentValue,
+            newValue: change.targetValue,
+            reason: change.reason,
+            evidence: change.evidence,
+            confidence: change.confidence,
+            source: "user_approved"
+        ))
+        if let prev = lastAutopilotOutcome {
+            let remaining = prev.suggestedChanges.filter { $0.id != change.id }
+            lastAutopilotOutcome = AutopilotRunOutcome(
+                usedLLM: prev.usedLLM,
+                appliedCount: prev.appliedCount + 1,
+                suggestedChanges: remaining,
+                newMemoriesCount: prev.newMemoriesCount,
+                summary: prev.summary
+            )
+        }
+        refreshCognitiveStats()
+        return true
+    }
+
+    @discardableResult
+    func revertAutopilotDecision(_ rec: AutopilotDecisionRecord) -> Bool {
+        var copy = settings
+        guard AIAutopilotController.revertDecision(rec, in: &copy, db: .shared) else {
+            return false
+        }
+        settings = copy
+        refreshCognitiveStats()
+        return true
+    }
+
+    func addManualCognitiveMemory(category: String, content: String) {
+        let clean = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let fact = CognitiveMemoryFact(
+            category: category,
+            memoryKey: "manual_\(UUID().uuidString.prefix(8))",
+            content: clean,
+            confidence: 1.0,
+            evidenceCount: 1,
+            source: "user_manual",
+            isPinned: true
+        )
+        AICognitiveMemoryDB.shared.upsertMemory(fact)
+        refreshCognitiveStats()
+    }
+
+    func clearCognitiveDatabase() {
+        AICognitiveMemoryDB.shared.clearAllData()
+        lastAutopilotOutcome = nil
+        refreshCognitiveStats()
     }
 }
