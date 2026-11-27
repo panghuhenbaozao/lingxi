@@ -362,10 +362,10 @@ struct LingxiSettings: Codable, Equatable {
                 candidateFontSize: candidateFontSize,
                 hapticStrength: hapticStrength
             )
-            heightPreset = .tall
+            heightPreset = .comfortable
             candidateBarHeight = 60
             candidateFontSize = 22
-            hapticStrength = .heavy
+            hapticStrength = .strong
             elderCareModeEnabled = true
         } else {
             if let snap = elderCareSnapshot {
