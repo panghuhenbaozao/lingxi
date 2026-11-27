@@ -398,7 +398,11 @@ final class AICognitiveMemoryDB {
 
     func recordVocabLearning(word: String, pinyin: String = "", now: Date = Date()) {
         let clean = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard clean.count >= 2, clean.count <= 16, !ClipboardClassifier.isSensitiveContent(clean) else { return }
+        guard clean.count >= 2,
+              clean.count <= 16,
+              !ClipboardClassifier.isSensitiveContent(clean),
+              !AIPrivacyShield.sanitize(clean).hasRedactions,
+              clean.contains(where: { !$0.isNumber && !$0.isPunctuation && !$0.isWhitespace }) else { return }
         let domain = inferDomain(for: clean)
         lock.lock()
         defer { lock.unlock() }
