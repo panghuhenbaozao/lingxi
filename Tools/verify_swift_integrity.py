@@ -275,6 +275,13 @@ def main() -> int:
             if "handleInputModeList(from:with:)" not in text:
                 print("ERROR: KeyboardViewController must wire native handleInputModeList(from:with:) for Globe key", file=sys.stderr)
                 return 1
+            if "safeAreaLayoutGuide" not in text:
+                print("ERROR: KeyboardViewController must pin horizontal content to safeAreaLayoutGuide for landscape notch safety", file=sys.stderr)
+                return 1
+        if rel == "Keyboard/Engine/PinyinEngine.swift":
+            if "maxTotalCachedRows" not in text:
+                print("ERROR: PinyinEngine must enforce maxTotalCachedRows RAM ceiling for Keyboard Extension Jetsam safety", file=sys.stderr)
+                return 1
         if rel in {
             "Keyboard/UI/TopToolbarView.swift",
             "Keyboard/UI/CandidateBarView.swift",

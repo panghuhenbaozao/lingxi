@@ -372,11 +372,11 @@ final class KeyboardCanvasView: UIView {
 
     private func buildKeyModels(in size: CGSize) -> [KeyModel] {
         var result: [KeyModel] = []
-        let hPad: CGFloat = 4
+        let hPad: CGFloat = 3.5
         let vTop: CGFloat = 6
         let vBottom: CGFloat = 5
-        let rowSpacing: CGFloat = 8
-        let colSpacing: CGFloat = size.width < 340 ? 4 : 5.5
+        let rowSpacing: CGFloat = 10
+        let colSpacing: CGFloat = size.width < 340 ? 4.5 : 5.5
 
         let usableW = size.width - hPad * 2
         let hasNumRow = settings.showNumberRow
@@ -1217,7 +1217,7 @@ private final class KeyCapView: UIView {
         isUserInteractionEnabled = false
 
         bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
-        bgView.layer.shadowRadius = 0.6
+        bgView.layer.shadowRadius = 0.25
         addSubview(bgView)
 
         primaryLabel.textAlignment = .center
@@ -1226,15 +1226,15 @@ private final class KeyCapView: UIView {
         addSubview(primaryLabel)
 
         secondaryLabel.textAlignment = .right
-        secondaryLabel.font = .systemFont(ofSize: 9.5, weight: .medium)
+        secondaryLabel.font = .systemFont(ofSize: 9.0, weight: .medium)
         addSubview(secondaryLabel)
 
         downHintLabel.textAlignment = .right
-        downHintLabel.font = .systemFont(ofSize: 8.5, weight: .regular)
+        downHintLabel.font = .systemFont(ofSize: 8.0, weight: .regular)
         addSubview(downHintLabel)
 
         doubleHintLabel.textAlignment = .left
-        doubleHintLabel.font = .systemFont(ofSize: 8.0, weight: .semibold)
+        doubleHintLabel.font = .systemFont(ofSize: 7.5, weight: .semibold)
         doubleHintLabel.adjustsFontSizeToFitWidth = true
         doubleHintLabel.minimumScaleFactor = 0.7
         addSubview(doubleHintLabel)
@@ -1253,10 +1253,11 @@ private final class KeyCapView: UIView {
         if let theme {
             updateShadowPathIfNeeded(bounds: bgView.bounds, radius: theme.keyCornerRadius)
         }
-        primaryLabel.frame = bounds.insetBy(dx: 3, dy: 2)
-        secondaryLabel.frame = CGRect(x: 0, y: 2, width: bounds.width - 3, height: 11)
-        downHintLabel.frame = CGRect(x: 0, y: bounds.height - 12, width: bounds.width - 3, height: 10)
-        doubleHintLabel.frame = CGRect(x: 3, y: bounds.height - 12, width: max(10, bounds.width * 0.65), height: 10)
+        let yShift: CGFloat = secondaryLabel.isHidden ? 0 : 1.5
+        primaryLabel.frame = CGRect(x: 3, y: 2 + yShift, width: max(4, bounds.width - 6), height: max(4, bounds.height - 4 - yShift))
+        secondaryLabel.frame = CGRect(x: 0, y: 2, width: bounds.width - 3.5, height: 10)
+        downHintLabel.frame = CGRect(x: 0, y: bounds.height - 11.5, width: bounds.width - 3.5, height: 9.5)
+        doubleHintLabel.frame = CGRect(x: 3.5, y: bounds.height - 11.5, width: max(10, bounds.width * 0.65), height: 9.5)
         iconView.frame = bounds.insetBy(dx: max(8, bounds.width * 0.28), dy: max(10, bounds.height * 0.28))
     }
 
@@ -1310,15 +1311,15 @@ private final class KeyCapView: UIView {
             if showHints, let secondary {
                 secondaryLabel.text = KeyboardSwipeCommand.keycapBadge(for: secondary)
                 secondaryLabel.textColor = KeyboardSwipeCommand.parse(secondary) != nil
-                    ? theme.candidateHighlight.withAlphaComponent(0.82)
-                    : theme.keyHintText.withAlphaComponent(0.62)
+                    ? theme.candidateHighlight.withAlphaComponent(0.74)
+                    : theme.keyHintText.withAlphaComponent(0.48)
                 secondaryLabel.isHidden = false
             }
             if showDownHints, let downPunct {
                 downHintLabel.text = KeyboardSwipeCommand.keycapBadge(for: downPunct)
                 downHintLabel.textColor = KeyboardSwipeCommand.parse(downPunct) != nil
-                    ? theme.candidateHighlight.withAlphaComponent(0.82)
-                    : theme.keyHintText.withAlphaComponent(0.58)
+                    ? theme.candidateHighlight.withAlphaComponent(0.74)
+                    : theme.keyHintText.withAlphaComponent(0.44)
                 downHintLabel.isHidden = false
             }
             if !isEnglishMode && showHints {
@@ -1424,11 +1425,11 @@ private final class KeyCapView: UIView {
         bgView.layer.cornerCurve = .continuous
         bgView.layer.cornerRadius = theme.keyCornerRadius
         bgView.layer.borderWidth = 0.5
-        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.22 : 0.18).cgColor
+        bgView.layer.borderColor = theme.keyBorder.withAlphaComponent(theme.preset.isDark ? 0.18 : 0.12).cgColor
         bgView.layer.shadowColor = theme.keyShadowColor.cgColor
         bgView.layer.shadowOpacity = pressed ? 0 : theme.keyShadowOpacity
         bgView.layer.shadowOffset = CGSize(width: 0, height: 1)
-        bgView.layer.shadowRadius = pressed ? 0 : 0.6
+        bgView.layer.shadowRadius = pressed ? 0 : 0.25
         if model.isAccent {
             bgView.backgroundColor = pressed ? theme.accentPressedFill : theme.accentFill
         } else if model.isSpecial {

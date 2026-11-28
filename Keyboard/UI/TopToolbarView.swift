@@ -224,37 +224,40 @@ final class TopToolbarView: UIView {
 
         leftClusterStack.axis = .horizontal
         leftClusterStack.alignment = .center
-        leftClusterStack.spacing = 8
+        leftClusterStack.spacing = 4
         idleScrollView.addSubview(leftClusterStack)
 
         rightClusterStack.axis = .horizontal
         rightClusterStack.alignment = .center
-        rightClusterStack.spacing = 6
+        rightClusterStack.spacing = 4
         idleScrollView.addSubview(rightClusterStack)
 
-        // 左侧核心胶囊：AI + 译 + 截屏识图 + 语音互译
+        // 左侧核心入口：保留 AI 主胶囊，其余升级为极简苹果/微信级无边框 SF Symbol 图标，375pt 屏一屏全显零溢出！
         configurePrimaryPillButton(
             aiButton,
             title: "AI",
             symbol: "sparkles",
             action: #selector(didTapAI)
         )
-        configurePrimaryPillButton(
+        configureUtilityButton(
             translateButton,
-            title: "译",
+            title: nil,
             symbol: "character.bubble",
+            accessibilityLabel: "边打边译",
             action: #selector(didTapTranslate)
         )
-        configurePrimaryPillButton(
+        configureUtilityButton(
             screenshotButton,
-            title: "识图",
+            title: nil,
             symbol: "camera.viewfinder",
+            accessibilityLabel: "截屏识图",
             action: #selector(didTapScreenshot)
         )
-        configurePrimaryPillButton(
+        configureUtilityButton(
             voiceButton,
-            title: "语音",
-            symbol: "mic.fill",
+            title: nil,
+            symbol: "mic",
+            accessibilityLabel: "语音输入",
             action: #selector(didTapVoice)
         )
 
@@ -448,7 +451,7 @@ final class TopToolbarView: UIView {
         btn.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
         btn.setTitle(" " + title, for: .normal)
         btn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 11, bottom: 6, right: 11)
+        btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 11)
         btn.layer.cornerRadius = 15
         btn.layer.cornerCurve = .continuous
         btn.layer.borderWidth = 0.5
@@ -463,20 +466,20 @@ final class TopToolbarView: UIView {
         action: Selector
     ) {
         if let symbol {
-            let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            let cfg = UIImage.SymbolConfiguration(pointSize: 14.5, weight: .regular)
             btn.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
         }
         if let title {
             let prefix = symbol == nil ? "" : " "
             btn.setTitle("\(prefix)\(title)", for: .normal)
             btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+            btn.contentEdgeInsets = UIEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
         } else {
-            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
+            btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 7, bottom: 6, right: 7)
         }
         btn.layer.cornerRadius = 15
         btn.layer.cornerCurve = .continuous
-        btn.layer.borderWidth = 0.5
+        btn.layer.borderWidth = 0
         btn.accessibilityLabel = accessibilityLabel
         btn.addTarget(self, action: action, for: .touchUpInside)
     }
@@ -785,11 +788,13 @@ final class TopToolbarView: UIView {
 
         stylePrimaryButtons(theme: theme, aiActive: false, translateActive: isTranslateBarActive)
 
+        // 苹果/微信级极简无框图标工具栏：去掉所有厚重边框与灰底块，仅保留清晰图标与 AI 主胶囊
+        let quietTint = theme.keyText.withAlphaComponent(theme.preset.isDark ? 0.84 : 0.76)
         for btn in [screenshotButton, voiceButton, emojiButton, clipboardButton, layoutButton, editPadButton, settingsButton, dismissKeyboardButton] {
-            btn.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
-            btn.tintColor = theme.keyText
-            btn.setTitleColor(theme.keyText, for: .normal)
-            btn.layer.borderColor = theme.keyBorder.withAlphaComponent(0.85).cgColor
+            btn.backgroundColor = .clear
+            btn.tintColor = quietTint
+            btn.setTitleColor(quietTint, for: .normal)
+            btn.layer.borderColor = UIColor.clear.cgColor
         }
 
         for sub in selectionMagicStack.arrangedSubviews {
@@ -873,10 +878,11 @@ final class TopToolbarView: UIView {
             translateButton.setTitleColor(theme.accentText, for: .normal)
             translateButton.layer.borderColor = UIColor.clear.cgColor
         } else {
-            translateButton.backgroundColor = theme.keyFill.withAlphaComponent(0.92)
-            translateButton.tintColor = theme.keyText
-            translateButton.setTitleColor(theme.keyText, for: .normal)
-            translateButton.layer.borderColor = theme.keyBorder.withAlphaComponent(0.85).cgColor
+            let quietTint = theme.keyText.withAlphaComponent(theme.preset.isDark ? 0.84 : 0.76)
+            translateButton.backgroundColor = .clear
+            translateButton.tintColor = quietTint
+            translateButton.setTitleColor(quietTint, for: .normal)
+            translateButton.layer.borderColor = UIColor.clear.cgColor
         }
     }
 

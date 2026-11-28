@@ -61,8 +61,35 @@ final class PinyinEngine {
     private static let mergedPairScore = 1.5
     private static let partialCompletionPenalty = 1.2
     private static let fuzzyPenalty = -0.65
-    private static let maxCacheEntries = 112
-    private static let maxBigramCacheEntries = 64
+    /// 严控键盘扩展内存红线（48–60MB Jetsam）：既限制缓存桶数，也对总缓存词条数设 12,000 硬上限（~1.2MB）
+    private static let maxCacheEntries = 56
+    private static let maxTotalCachedRows = 12_000
+    private static let maxBigramCacheEntries = 48
+
+    /// 高频英文缩略词补全与常见拼写纠错表（零内存开销，即时生效）
+    private static let englishAutoCorrections: [String: String] = [
+        "dont": "don't", "cant": "can't", "wont": "won't", "didnt": "didn't",
+        "doesnt": "doesn't", "isnt": "isn't", "arent": "aren't", "wasnt": "wasn't",
+        "werent": "weren't", "havent": "haven't", "hasnt": "hasn't", "hadnt": "hadn't",
+        "wouldnt": "wouldn't", "couldnt": "couldn't", "shouldnt": "shouldn't",
+        "im": "I'm", "ive": "I've", "ill": "I'll", "id": "I'd",
+        "youre": "you're", "youve": "you've", "youll": "you'll",
+        "theyre": "they're", "theyve": "they've", "weve": "we've",
+        "thats": "that's", "whats": "what's", "heres": "here's",
+        "theres": "there's", "lets": "let's", "whos": "who's",
+        "hes": "he's", "shes": "she's",
+        "teh": "the", "hte": "the", "taht": "that", "adn": "and",
+        "recieve": "receive", "becuase": "because", "definately": "definitely",
+        "seperate": "separate", "occured": "occurred", "untill": "until",
+        "wich": "which", "wierd": "weird", "thier": "their", "freind": "friend",
+        "tommorow": "tomorrow", "goverment": "government", "enviroment": "environment",
+        "realy": "really", "accomodate": "accommodate", "acheive": "achieve",
+        "arguement": "argument", "calender": "calendar", "commitee": "committee",
+        "concious": "conscious", "existance": "existence", "independant": "independent",
+        "knowlege": "knowledge", "necesary": "necessary", "occurence": "occurrence",
+        "recomend": "recommend", "sucessful": "successful", "truely": "truly",
+        "writting": "writing",
+    ]
 
     private static let adjacentKeys: [Character: [Character]] = [
         "q": Array("wa"), "w": Array("qes"), "e": Array("wrd"), "r": Array("etf"), "t": Array("ryg"),
@@ -114,6 +141,7 @@ final class PinyinEngine {
 
     private var cache: [CacheKey: [CachedRow]] = [:]
     private var cacheOrder: [CacheKey] = []
+    private var totalCachedRows: Int = 0
 
     private var sysBigramCache: [String: [(next: String, bonus: Double)]] = [:]
     private var sysBigramOrder: [String] = []
@@ -192,6 +220,7 @@ final class PinyinEngine {
         defer { engineLock.unlock() }
         cache.removeAll(keepingCapacity: true)
         cacheOrder.removeAll(keepingCapacity: true)
+        totalCachedRows = 0
     }
 
     /// 响应 iOS `didReceiveMemoryWarning()`，主动清空查询与二元缓存并释放 SQLite 页缓存，严防 Jetsam 杀掉键盘扩展。
@@ -200,6 +229,7 @@ final class PinyinEngine {
         defer { engineLock.unlock() }
         cache.removeAll(keepingCapacity: false)
         cacheOrder.removeAll(keepingCapacity: false)
+        totalCachedRows = 0
         sysBigramCache.removeAll(keepingCapacity: false)
         sysBigramOrder.removeAll(keepingCapacity: false)
         userLexicon.releaseMemory()
@@ -998,27 +1028,85 @@ final class PinyinEngine {
               let nextScalar = UnicodeScalar(lastScalar.value + 1) else {
             return []
         }
-        let upperBound = String(lower.dropLast()) + String(nextScalar)
 
+        let startsUpper = prefix.first?.isUppercase == true
+        var words: [String] = []
+        var seen = Set<String>()
+
+        func pushCandidate(_ rawWord: String) {
+            var word = rawWord
+            if startsUpper, let first = word.first, first.isLowercase {
+                word = first.uppercased() + String(word.dropFirst())
+            }
+            if word != prefix && seen.insert(word.lowercased()).inserted {
+                words.append(word)
+            }
+        }
+
+        // 1. 高频缩略词补全与常见拼写纠错（dont->don't / teh->the / recieve->receive）
+        if let corrected = Self.englishAutoCorrections[lower] {
+            pushCandidate(corrected)
+        }
+
+        // 2. 标准词典前缀补全
+        let upperBound = String(lower.dropLast()) + String(nextScalar)
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
         lower.withCString { sqlite3_bind_text(stmt, 1, $0, -1, Self.sqliteTransient) }
         upperBound.withCString { sqlite3_bind_text(stmt, 2, $0, -1, Self.sqliteTransient) }
         sqlite3_bind_int(stmt, 3, Int32(limit))
 
-        let startsUpper = prefix.first?.isUppercase == true
-        var words: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let ptr = sqlite3_column_text(stmt, 0) else { continue }
-            var word = String(cString: ptr)
-            if startsUpper, let first = word.first, first.isLowercase {
-                word = first.uppercased() + String(word.dropFirst())
+            pushCandidate(String(cString: ptr))
+            if words.count >= limit { break }
+        }
+
+        // 3. 无前缀命中时的 1-Edit 极速拼写容错（相邻颠倒 emial->email / 误重按 helllo->hello / 误多按 appple->apple）
+        if words.isEmpty && lower.count >= 3 && lower.count <= 16, let exactStmt = enExactStmt {
+            let chars = Array(lower)
+            var probes: [String] = []
+            probes.reserveCapacity(chars.count * 2 + 2)
+
+            // 3a. 相邻字母颠倒（如 wrod -> word, iphnoe -> iphone）
+            for i in 0..<(chars.count - 1) where chars[i] != chars[i + 1] {
+                var swapped = chars
+                swapped.swapAt(i, i + 1)
+                probes.append(String(swapped))
             }
-            if word != prefix {
-                words.append(word)
+            // 3b. 连按重复字母折叠（如 helllo -> hello, goood -> good）
+            var collapsed: [Character] = []
+            var hadRun = false
+            for ch in chars {
+                if collapsed.count >= 2 && collapsed[collapsed.count - 1] == ch && collapsed[collapsed.count - 2] == ch {
+                    hadRun = true
+                    continue
+                }
+                collapsed.append(ch)
+            }
+            if hadRun {
+                probes.append(String(collapsed))
+            }
+            // 3c. 单字误多按删除（如 keybaord / thiss）
+            for i in 0..<chars.count {
+                var trimmed = chars
+                trimmed.remove(at: i)
+                probes.append(String(trimmed))
+            }
+
+            var tried = Set<String>()
+            for probe in probes where tried.insert(probe).inserted {
+                sqlite3_reset(exactStmt)
+                sqlite3_clear_bindings(exactStmt)
+                probe.withCString { sqlite3_bind_text(exactStmt, 1, $0, -1, Self.sqliteTransient) }
+                if sqlite3_step(exactStmt) == SQLITE_ROW, let ptr = sqlite3_column_text(exactStmt, 0) {
+                    pushCandidate(String(cString: ptr))
+                    if words.count >= min(3, limit) { break }
+                }
             }
         }
-        return words
+
+        return Array(words.prefix(limit))
     }
 
     // MARK: - 二元上下文下一词预测 & 光标上文消歧图
@@ -1722,12 +1810,22 @@ final class PinyinEngine {
     }
 
     private func storeInCache(key: CacheKey, rows: [CachedRow]) {
-        if cache.count >= Self.maxCacheEntries, let oldest = cacheOrder.first {
+        // 单次极端超大桶直接跳过缓存，防止单个九宫格桶瞬间占满内存预算
+        guard rows.count <= Self.maxTotalCachedRows / 2 else { return }
+        if let existing = cache.removeValue(forKey: key) {
+            totalCachedRows = max(0, totalCachedRows - existing.count)
+            cacheOrder.removeAll { $0 == key }
+        }
+        while (cache.count >= Self.maxCacheEntries || totalCachedRows + rows.count > Self.maxTotalCachedRows),
+              let oldest = cacheOrder.first {
             cacheOrder.removeFirst()
-            cache.removeValue(forKey: oldest)
+            if let removed = cache.removeValue(forKey: oldest) {
+                totalCachedRows = max(0, totalCachedRows - removed.count)
+            }
         }
         cache[key] = rows
         cacheOrder.append(key)
+        totalCachedRows += rows.count
     }
 
     private func fetchRows(

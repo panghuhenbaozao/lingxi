@@ -20,6 +20,10 @@ public enum SideloadConfigBridge {
         public let aiConfigJSON: Data?
         public let themeJSON: Data?
         public let settingsJSON: Data?
+        /// 免费侧载无 App Group 时的跨沙盒核心资料快照：个人速填名片、自定义短语与 Obsidian 个人记忆笔记
+        public let personalCardsJSON: Data?
+        public let customWordsJSON: Data?
+        public let vaultNotesJSON: Data?
 
         public init(
             serverBaseURL: String,
@@ -30,7 +34,10 @@ public enum SideloadConfigBridge {
             e2eeSalt: String,
             aiConfigJSON: Data? = nil,
             themeJSON: Data? = nil,
-            settingsJSON: Data? = nil
+            settingsJSON: Data? = nil,
+            personalCardsJSON: Data? = nil,
+            customWordsJSON: Data? = nil,
+            vaultNotesJSON: Data? = nil
         ) {
             self.serverBaseURL = serverBaseURL
             self.userID = userID
@@ -41,6 +48,9 @@ public enum SideloadConfigBridge {
             self.aiConfigJSON = aiConfigJSON
             self.themeJSON = themeJSON
             self.settingsJSON = settingsJSON
+            self.personalCardsJSON = personalCardsJSON
+            self.customWordsJSON = customWordsJSON
+            self.vaultNotesJSON = vaultNotesJSON
         }
     }
 
@@ -110,6 +120,9 @@ public enum SideloadConfigBridge {
         var aiData: Data?
         var themeData: Data?
         var settingsData: Data?
+        var cardsData: Data?
+        var customWordsData: Data?
+        var vaultNotesData: Data?
         if includeLocalSnapshots {
             let encoder = JSONEncoder()
             var aiSnap = AIConfig.load()
@@ -125,6 +138,19 @@ public enum SideloadConfigBridge {
             aiData = try? encoder.encode(aiSnap)
             themeData = try? encoder.encode(ThemeCustomization.load(force: true))
             settingsData = try? encoder.encode(LingxiSettings.load(force: true))
+
+            let cards = Array(PersonalFillCardStore.load().prefix(24))
+            if !cards.isEmpty {
+                cardsData = try? encoder.encode(cards)
+            }
+            let cWords = Array(CustomWordStore.load(force: true).prefix(120))
+            if !cWords.isEmpty {
+                customWordsData = try? encoder.encode(cWords)
+            }
+            let vaultNotes = AICognitiveMemoryDB.shared.fetchVaultNotes(limit: 40)
+            if !vaultNotes.isEmpty {
+                vaultNotesData = try? encoder.encode(vaultNotes)
+            }
         }
         let payload = PairingPayload(
             serverBaseURL: serverBaseURL,
@@ -135,17 +161,31 @@ public enum SideloadConfigBridge {
             e2eeSalt: e2eeSalt,
             aiConfigJSON: aiData,
             themeJSON: themeData,
-            settingsJSON: settingsData
+            settingsJSON: settingsData,
+            personalCardsJSON: cardsData,
+            customWordsJSON: customWordsData,
+            vaultNotesJSON: vaultNotesData
         )
-        guard let data = try? JSONEncoder().encode(payload) else { return nil }
-        let b64u = data.base64EncodedString()
+        guard let rawJSON = try? JSONEncoder().encode(payload) else { return nil }
+        // 超 2KB 时启用苹果原生零依赖 LZFSE 压缩（带 4 字节 LZFS 魔数），使携带 40 篇 Obsidian 笔记与名片的口令依旧短小轻快
+        let wireData: Data
+        if rawJSON.count > 2048,
+           let compressed = try? (rawJSON as NSData).compressed(using: .lzfse) as Data,
+           compressed.count + 4 < rawJSON.count {
+            var framed = Data("LZFS".utf8)
+            framed.append(compressed)
+            wireData = framed
+        } else {
+            wireData = rawJSON
+        }
+        let b64u = wireData.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
         return tokenPrefix + b64u
     }
 
-    /// 键盘端解析并落地主 App 复制过来的 `LXBRIDGE1:...` 配对串（纯字符串，供单元测试与剪贴板识别复用）。
+    /// 键盘端解析并落地主 App 复制过来的 `LXBRIDGE1:...` 配对串（纯字符串，兼容明文 JSON 与 LZFSE 压缩帧）。
     @discardableResult
     public static func importPairingToken(_ rawText: String) -> Bool {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -155,8 +195,19 @@ public enum SideloadConfigBridge {
             .replacingOccurrences(of: "_", with: "/")
         let rem = b64.count % 4
         if rem > 0 { b64 += String(repeating: "=", count: 4 - rem) }
-        guard let data = Data(base64Encoded: b64),
-              let payload = try? JSONDecoder().decode(PairingPayload.self, from: data) else {
+        guard let rawWire = Data(base64Encoded: b64) else { return false }
+
+        let jsonData: Data
+        let lzfsMagic = Data("LZFS".utf8)
+        if rawWire.count > 4 && rawWire.prefix(4) == lzfsMagic {
+            guard let decompressed = try? (Data(rawWire.dropFirst(4)) as NSData).decompressed(using: .lzfse) as Data else {
+                return false
+            }
+            jsonData = decompressed
+        } else {
+            jsonData = rawWire
+        }
+        guard let payload = try? JSONDecoder().decode(PairingPayload.self, from: jsonData) else {
             return false
         }
 
@@ -210,6 +261,46 @@ public enum SideloadConfigBridge {
            let incomingSettings = try? decoder.decode(LingxiSettings.self, from: settingsData) {
             _ = incomingSettings.save()
             importedParts.append("设置")
+        }
+        if let cardsData = payload.personalCardsJSON,
+           let incomingCards = try? decoder.decode([PersonalFillCard].self, from: cardsData),
+           !incomingCards.isEmpty {
+            var merged = PersonalFillCardStore.load()
+            for card in incomingCards {
+                if let idx = merged.firstIndex(where: { $0.id == card.id }) {
+                    merged[idx] = card
+                } else {
+                    merged.insert(card, at: 0)
+                }
+            }
+            PersonalFillCardStore.save(merged)
+            importedParts.append("名片(\(incomingCards.count))")
+        }
+        if let cwData = payload.customWordsJSON,
+           let incomingWords = try? decoder.decode([CustomWordEntry].self, from: cwData),
+           !incomingWords.isEmpty {
+            var merged = CustomWordStore.load(force: true)
+            var seen = Set(merged.map { "\($0.code)|\($0.word)" })
+            for item in incomingWords where seen.insert("\(item.code)|\(item.word)").inserted {
+                merged.append(item)
+            }
+            _ = CustomWordStore.save(merged)
+            importedParts.append("短语(\(incomingWords.count))")
+        }
+        if let vnData = payload.vaultNotesJSON,
+           let incomingNotes = try? decoder.decode([ObsidianVaultNote].self, from: vnData),
+           !incomingNotes.isEmpty {
+            let db = AICognitiveMemoryDB.shared
+            for note in incomingNotes {
+                db.upsertVaultNote(note)
+            }
+            db.appendEvolutionLog(
+                action: "strengthen",
+                noteTitle: "侧载桥接同步",
+                detail: "从主 App 同步 \(incomingNotes.count) 篇 Obsidian 记忆笔记至键盘端",
+                source: "sideload_bridge"
+            )
+            importedParts.append("记忆库(\(incomingNotes.count))")
         }
 
         guard !importedParts.isEmpty else { return false }

@@ -4037,4 +4037,75 @@ final class LingxiTests: XCTestCase {
         let syncedCount = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(lex, db: db, minLearnCount: 2, limit: 20)
         XCTAssertEqual(syncedCount, 1, "仅专有名词「陈明远」应自动注音回流，通用「职场汇报原则」应被过滤")
     }
+
+    func testV76EnglishAutocorrectPinyinRAMCapAndFullSideloadBridge() throws {
+        // 1. 英文缩略词补全 + 常见拼写纠错 + 1-Edit 颠倒/连按容错
+        let dbURL = try XCTUnwrap(findTestDBURL(), "找不到 pinyin.sqlite 测试词库")
+        let engine = PinyinEngine(databaseURL: dbURL)
+        XCTAssertEqual(engine.queryEnglish(prefix: "dont").first, "don't")
+        XCTAssertEqual(engine.queryEnglish(prefix: "Dont").first, "Don't")
+        XCTAssertEqual(engine.queryEnglish(prefix: "im").first, "I'm")
+        XCTAssertEqual(engine.queryEnglish(prefix: "teh").first, "the")
+        XCTAssertEqual(engine.queryEnglish(prefix: "recieve").first, "receive")
+        XCTAssertTrue(engine.queryEnglish(prefix: "wrod").contains("word"), "相邻字母颠倒 wrod 应自动纠错为 word")
+        XCTAssertTrue(engine.queryEnglish(prefix: "helllo").contains("hello"), "误连按重复字母 helllo 应自动纠错为 hello")
+        XCTAssertTrue(engine.queryEnglish(prefix: "iph").contains("iPhone"), "原有前缀补全 iph -> iPhone 不得回归")
+
+        // 2. 拼音引擎内存硬上限 LRU 压力测试 + releaseMemory 后功能正常
+        let settings = LingxiSettings()
+        let probes = [
+            "ni", "wo", "ta", "de", "le", "shi", "bu", "zai", "you", "ge",
+            "ren", "zhe", "zhong", "guo", "da", "xiao", "shang", "xia", "lai", "qu",
+            "hao", "duo", "shao", "tian", "di", "shui", "huo", "feng", "yun", "shan",
+            "jin", "ming", "zuo", "hou", "qian", "zuo'tian", "ming'tian", "jin'tian", "ni'hao", "xie'xie",
+            "wei'xin", "shu'ru'fa", "peng'you", "gong'zuo", "xue'xi", "sheng'huo", "dian'nao", "shou'ji", "wang'luo", "xi'tong",
+            "kai'fa", "ce'shi", "she'ji", "chan'pin", "yun'ying", "shu'ju", "suan'fa", "mo'xing", "ji'yi", "zhi'neng",
+        ]
+        for p in probes {
+            XCTAssertFalse(engine.query(raw: p, settings: settings, limit: 16).candidates.isEmpty, "查询 \(p) 不应为空")
+        }
+        engine.releaseMemory()
+        XCTAssertEqual(engine.query(raw: "nihao", settings: settings).candidates.first?.word, "你好")
+
+        // 3. 免费侧载桥接口令（含 LZFSE 压缩）：完整往返个人速填名片 + 自定义短语 + Obsidian 记忆笔记
+        let cardID = UUID()
+        let testCard = PersonalFillCard(
+            id: cardID,
+            title: "v7测试名片",
+            kind: .contact,
+            fields: [PersonalCardField(label: "邮箱", value: "v7bridge@lingxi.dev")]
+        )
+        let origCards = PersonalFillCardStore.load()
+        let origWords = CustomWordStore.load(force: true)
+        defer {
+            PersonalFillCardStore.save(origCards)
+            _ = CustomWordStore.save(origWords)
+            AICognitiveMemoryDB.shared.deleteVaultNote(slug: "侧载桥接测试节点")
+        }
+
+        PersonalFillCardStore.upsert(testCard)
+        CustomWordStore.add(code: "v7test", word: "灵犀七代桥接")
+        AICognitiveMemoryDB.shared.upsertVaultNote(ObsidianVaultNote(
+            title: "侧载桥接测试节点",
+            folder: .wiki,
+            summary: "用于验证免费侧载口令携带 Obsidian 笔记并经 LZFSE 压缩无损还原",
+            bodyMarkdown: String(repeating: "记录一条较长的测试知识正文以触发 LZFSE 压缩帧路径。", count: 45),
+            tags: ["测试"],
+            strength: 0.88,
+            source: "user_manual"
+        ))
+
+        let token = try XCTUnwrap(SideloadConfigBridge.exportLocalConfigHandoffTokenFromMainApp())
+        XCTAssertTrue(token.hasPrefix(SideloadConfigBridge.tokenPrefix))
+
+        // 清空目标端模拟免费侧载另一沙盒，再导入校验全部还原
+        PersonalFillCardStore.delete(id: cardID)
+        AICognitiveMemoryDB.shared.deleteVaultNote(slug: "侧载桥接测试节点")
+        XCTAssertNil(AICognitiveMemoryDB.shared.fetchVaultNote(slug: "侧载桥接测试节点"))
+
+        XCTAssertTrue(SideloadConfigBridge.importPairingToken(token))
+        XCTAssertTrue(PersonalFillCardStore.load().contains(where: { $0.id == cardID }), "速填名片应通过侧载桥接无损还原")
+        XCTAssertNotNil(AICognitiveMemoryDB.shared.fetchVaultNote(slug: "侧载桥接测试节点"), "Obsidian 记忆笔记应通过侧载桥接无损还原")
+        XCTAssertTrue(CustomWordStore.load(force: true).contains(where: { $0.code == "v7test" && $0.word == "灵犀七代桥接" }))
+    }
 }

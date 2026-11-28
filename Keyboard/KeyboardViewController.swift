@@ -56,6 +56,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     private var didAutoSwitchToEnglish = false
     private var lastAppliedDockHeight: CGFloat = -1
     private var lastAppliedTotalHeight: CGFloat = -1
+    private var lastLaidOutWidth: CGFloat = 0
     private var themeDarwinObserver: AppGroupNotifications.Observer?
     private var settingsDarwinObserver: AppGroupNotifications.Observer?
     private var aiConfigDarwinObserver: AppGroupNotifications.Observer?
@@ -325,6 +326,7 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.backgroundColor = .clear
         settings = LingxiSettings.load(force: true)
         themeCustomization = ThemeCustomization.load(force: true)
         refreshCachedAIPrefs()
@@ -499,6 +501,11 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             lastBridgeCheckedChangeCount = clearedCount
             ClipboardStore.markChangeCountHandled(clearedCount)
             reloadConfigurationIfNeeded()
+            if let eng = engine, !settings.incognitoModeEnabled && settings.userLearningEnabled {
+                DispatchQueue.global(qos: .utility).async {
+                    _ = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(eng.userLexicon)
+                }
+            }
             if activePanel == .ai {
                 aiPanel.refreshAfterConfigChange(hasFullAccess: hasFullAccess)
             }
@@ -562,6 +569,15 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         // 注意：绝不在 viewWillLayoutSubviews 内修改 view.heightAnchor，防止触发布局重入抖动与跳帧
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let w = view.bounds.width
+        if w > 10 && abs(w - lastLaidOutWidth) > 2 {
+            lastLaidOutWidth = w
+            updatePreferredHeight()
+        }
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -755,10 +771,12 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
         lettersCanvas.clipsToBounds = false
         rootContainer.addSubview(bodyContainer)
 
+        // 水平方向严格贴齐 safeAreaLayoutGuide：竖屏与全宽完全一致，横屏刘海/灵动岛自动避让绝不裁切左右边缘键帽！
+        let safeGuide = rootContainer.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             liveDockView.topAnchor.constraint(equalTo: rootContainer.topAnchor),
-            liveDockView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
-            liveDockView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+            liveDockView.leadingAnchor.constraint(equalTo: safeGuide.leadingAnchor),
+            liveDockView.trailingAnchor.constraint(equalTo: safeGuide.trailingAnchor),
             {
                 let c = liveDockView.heightAnchor.constraint(equalToConstant: 0)
                 c.priority = UILayoutPriority(998)
@@ -767,8 +785,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             }(),
 
             toolbarView.topAnchor.constraint(equalTo: liveDockView.bottomAnchor),
-            toolbarView.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
-            toolbarView.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+            toolbarView.leadingAnchor.constraint(equalTo: safeGuide.leadingAnchor),
+            toolbarView.trailingAnchor.constraint(equalTo: safeGuide.trailingAnchor),
             {
                 let c = toolbarView.heightAnchor.constraint(equalToConstant: effectiveToolbarHeight)
                 c.priority = UILayoutPriority(998)
@@ -777,8 +795,8 @@ final class KeyboardViewController: UIInputViewController, PHPhotoLibraryChangeO
             }(),
 
             bodyContainer.topAnchor.constraint(equalTo: toolbarView.bottomAnchor),
-            bodyContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
-            bodyContainer.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+            bodyContainer.leadingAnchor.constraint(equalTo: safeGuide.leadingAnchor),
+            bodyContainer.trailingAnchor.constraint(equalTo: safeGuide.trailingAnchor),
             bodyContainer.bottomAnchor.constraint(equalTo: rootContainer.bottomAnchor),
         ])
 
