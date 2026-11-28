@@ -463,7 +463,7 @@ private struct UsageGuideAndDiagnosticsView: View {
     private let tips: [Tip] = [
         Tip(icon: "bolt.circle.fill", title: "随打随问 AI", desc: "直接输入「@ai 帮我委婉拒绝加班」，顶栏出现一键直达，不用切出键盘。"),
         Tip(icon: "location.fill", title: "全国地名 + 周边地标", desc: "全国省市区县开箱即用，开启定位自动学习附近路名商圈；打 vwz / vdz 一键发当前位置。"),
-        Tip(icon: "sparkles", title: "选中即改 · 续写 · 军师", desc: "选中一段文字自动浮现润色和翻译；复制棘手消息点「博弈军师」出 3 套高情商回复。"),
+        Tip(icon: "sparkles", title: "选中即改 · 翻译 · 记忆库", desc: "选中一段文字自动浮现润色与翻译；AI 回复自动召回你的 Obsidian 个人记忆库。"),
         Tip(icon: "character.textbox", title: "长句回改与声调筛字", desc: "打长句时点顶栏任意音节原地换字；展开候选切「只看单字」可按声调找生僻字。"),
         Tip(icon: "textformat.123", title: "中数英混输", desc: "连打 mingtian3dianjian 出「明天3点见」，fayigepdfgeiwo 出「发一个PDF给我」。"),
         Tip(icon: "arrow.up.and.down.and.arrow.left.and.right", title: "编辑台与自定义滑行", desc: "键盘快捷设置里打开「编辑台」可精准移光标；「键盘手感与手势」里可自定义任意键的上下滑。"),

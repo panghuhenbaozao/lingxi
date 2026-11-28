@@ -237,6 +237,7 @@ final class ScreenshotVisionPanelView: UIView, UITextViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         let pad: CGFloat = 8
         let topY: CGFloat = 7
         let row1H: CGFloat = 36

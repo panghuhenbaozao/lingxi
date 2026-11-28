@@ -272,6 +272,29 @@ def main() -> int:
             if m_va and ("tryImportBridgeTokenFromPasteboardIfPresent" in m_va.group(1) or "checkPasteboardScreenshotOnAppearIfNeeded" in m_va.group(1)):
                 print("ERROR: Synchronous pasteboard read must not run inside viewWillAppear()", file=sys.stderr)
                 return 1
+            if "handleInputModeList(from:with:)" not in text:
+                print("ERROR: KeyboardViewController must wire native handleInputModeList(from:with:) for Globe key", file=sys.stderr)
+                return 1
+        if rel in {
+            "Keyboard/UI/TopToolbarView.swift",
+            "Keyboard/UI/CandidateBarView.swift",
+            "Keyboard/UI/AIAssistantPanelView.swift",
+            "Keyboard/UI/ClipboardPanelView.swift",
+            "Keyboard/UI/QuickSettingsSheetView.swift",
+            "Keyboard/UI/NumberPadView.swift",
+            "Keyboard/UI/EmojiSymbolPanelView.swift",
+            "Keyboard/UI/LiveInputDockView.swift",
+            "Keyboard/UI/TextEditingPadView.swift",
+            "Keyboard/UI/VoiceInputPanelView.swift",
+            "Keyboard/UI/ScreenshotVisionPanelView.swift",
+        }:
+            lines = text.splitlines()
+            for idx, line in enumerate(lines):
+                if "override func layoutSubviews()" in line:
+                    win = "\n".join(lines[idx:idx+4])
+                    if "bounds.width >" not in win:
+                        print(f"ERROR: Missing zero-size bounds guard in layoutSubviews() at {rel}:{idx+1}", file=sys.stderr)
+                        return 1
         if rel.startswith("App/Views/") and "LazyVGrid(" in text:
             # Verify no LazyVGrid is placed directly inside a Form/List Section
             lines = text.splitlines()

@@ -57,6 +57,12 @@ final class KeyboardCanvasView: UIView {
     }
 
     var onEvent: ((Event) -> Void)?
+    /// 由宿主 UIInputViewController 绑定系统原生 `handleInputModeList(from:with:)`，支持点击切键盘 + 长按弹系统键盘选择菜单
+    var onConfigureGlobeButton: ((UIButton) -> Void)? {
+        didSet {
+            onConfigureGlobeButton?(globeOverlayButton)
+        }
+    }
 
     private var theme: ResolvedTheme?
     private var settings = LingxiSettings()
@@ -85,6 +91,9 @@ final class KeyboardCanvasView: UIView {
     private var keyViews: [String: KeyCapView] = [:]
     private var lastLayoutSignature: LayoutSignature?
     private let keysContainer = UIView()
+    private let globeOverlayButton = UIButton(type: .custom)
+    private var calibratedOffsets: [Character: (dx: Double, dy: Double)] = [:]
+    private var calibratedTapCounter: Int = 0
     private let glideTrailLayer = CAShapeLayer()
     private let popupView = KeyPopupView()
 
@@ -127,6 +136,15 @@ final class KeyboardCanvasView: UIView {
         glideTrailLayer.lineJoin = .round
         glideTrailLayer.zPosition = 999
         keysContainer.layer.addSublayer(glideTrailLayer)
+
+        globeOverlayButton.backgroundColor = .clear
+        globeOverlayButton.accessibilityLabel = "切换输入法"
+        globeOverlayButton.isHidden = true
+        globeOverlayButton.addTarget(self, action: #selector(handleGlobeTouchDown), for: .touchDown)
+        globeOverlayButton.addTarget(self, action: #selector(handleGlobeTouchEnd), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+        keysContainer.addSubview(globeOverlayButton)
+
+        calibratedOffsets = TouchOffsetCalibrator.shared.offsetSnapshot()
 
         sideRailStack.axis = .vertical
         sideRailStack.distribution = .fillEqually
@@ -177,6 +195,9 @@ final class KeyboardCanvasView: UIView {
         self.returnTitle = returnTitle
         self.returnHighlighted = returnHighlighted
         self.validNextLetters = validNextLetters
+        if fullVisualChanged {
+            self.calibratedOffsets = TouchOffsetCalibrator.shared.offsetSnapshot()
+        }
 
         guard fullVisualChanged || lightStateChanged || lastLayoutSignature == nil else { return }
 
@@ -301,6 +322,7 @@ final class KeyboardCanvasView: UIView {
 
             keys = buildKeyModels(in: keysContainer.bounds.size)
             syncKeyViews()
+            syncGlobeOverlayFrame()
         } else if forceSync {
             // 更新返回键高亮等可能独立变化的轻量状态
             if let retIdx = keys.firstIndex(where: { $0.id == "k_return" }) {
@@ -620,6 +642,11 @@ final class KeyboardCanvasView: UIView {
                 let dx = Double(pt.x - hitKey.rect.midX)
                 let dy = Double(pt.y - hitKey.rect.midY)
                 TouchOffsetCalibrator.shared.recordTouch(key: String(c), dx: dx, dy: dy)
+                calibratedTapCounter += 1
+                if calibratedTapCounter >= 16 {
+                    calibratedTapCounter = 0
+                    calibratedOffsets = TouchOffsetCalibrator.shared.offsetSnapshot()
+                }
             }
 
             let track = ActiveTouch(
@@ -661,6 +688,7 @@ final class KeyboardCanvasView: UIView {
                         track.trackpadActive = true
                         track.lastTrackpadX = pt.x
                         cancelLongPress(for: touch)
+                        keyViews[key.id]?.setTrackpadVisualActive(true)
                         KeyboardVibrator.shared.softTap()
                     }
                     let delta = pt.x - track.lastTrackpadX
@@ -792,7 +820,11 @@ final class KeyboardCanvasView: UIView {
         stopRepeatDelete()
         for (_, track) in activeTouches {
             setKeyPressed(track.keyID, pressed: false)
+            if track.trackpadActive {
+                keyViews[track.keyID]?.setTrackpadVisualActive(false)
+            }
         }
+        keyViews["k_space"]?.setTrackpadVisualActive(false)
         activeTouches.removeAll()
         popupView.hide()
         glideTrailLayer.removeAllAnimations()
@@ -800,10 +832,31 @@ final class KeyboardCanvasView: UIView {
         glideTrailLayer.path = nil
     }
 
+    @objc private func handleGlobeTouchDown() {
+        setKeyPressed("k_globe", pressed: true)
+    }
+
+    @objc private func handleGlobeTouchEnd() {
+        setKeyPressed("k_globe", pressed: false)
+    }
+
+    private func syncGlobeOverlayFrame() {
+        if let globeModel = keys.first(where: { $0.id == "k_globe" }) {
+            globeOverlayButton.frame = globeModel.rect
+            globeOverlayButton.isHidden = false
+            keysContainer.bringSubviewToFront(globeOverlayButton)
+        } else {
+            globeOverlayButton.isHidden = true
+        }
+    }
+
     private func finishTouch(_ touch: UITouch, commit: Bool) {
         cancelLongPress(for: touch)
         guard var track = activeTouches.removeValue(forKey: touch) else { return }
         setKeyPressed(track.keyID, pressed: false)
+        if track.trackpadActive {
+            keyViews[track.keyID]?.setTrackpadVisualActive(false)
+        }
 
         if track.glideActive {
             fadeOutGlideTrail()
@@ -964,6 +1017,7 @@ final class KeyboardCanvasView: UIView {
             case .space:
                 track.trackpadActive = true
                 self.activeTouches[touch] = track
+                self.keyViews[key.id]?.setTrackpadVisualActive(true)
                 self.onEvent?(.cursorMove(steps: 0))
             default:
                 break
@@ -1081,32 +1135,41 @@ final class KeyboardCanvasView: UIView {
 
     private func nearestKey(at point: CGPoint) -> KeyModel? {
         guard !keys.isEmpty else { return nil }
-        // 1. 若落点位于按键核心内圈（留出 1.2pt 极窄边缘缓冲），100% 忠实命中手指视觉按键，绝不漂移
-        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 1.2, dy: 1.2).contains(point) }) {
+        // 1. 若落点位于按键核心内圈（留出 2.0pt 边缘缓冲供手型偏移校准平滑介入），100% 忠实命中手指视觉按键
+        if let coreHit = keys.first(where: { $0.rect.insetBy(dx: 2.0, dy: 2.0).contains(point) }) {
             return coreHit
         }
         // 2. 键缝与边缘区域（含 A 左侧、L 右侧、Shift-Z 与 M-⌫ 间隙）：
-        //    采用 Apple 原生键盘同款全画布无死区最近邻（Voronoi）划分 + 温和拼音防误触（0.86 轻量领带消歧），
-        //    彻底消灭按键缝隙漏字/吞键与简拼按键漂移感！
+        //    结合已自学习收敛的每键手型落点偏移（TouchOffsetCalibrator，限幅 ±4.5pt）+ 全画布 Voronoi 最近邻 + 拼音防误触，
+        //    真正做到「越打越懂你的拇指姿势」，同时绝不抢占视觉中心键！
         let gridBounds = keysContainer.bounds.insetBy(dx: -8, dy: -10)
         guard gridBounds.contains(point) else { return nil }
 
         let useDynamicBias = settings.dynamicKeyHitBoxEnabled && !validNextLetters.isEmpty && !isEnglishMode
+        let hasCalib = !calibratedOffsets.isEmpty
         var best: KeyModel?
         var bestDist = CGFloat.infinity
         for key in keys {
-            // 计算点到按键边缘+中心混合距离：大键（如空格、回车、退格、Shift）按实际键帽矩形边缘度量，防止空格中心过远被误判给上排字母
-            let clampedX = min(max(point.x, key.rect.minX), key.rect.maxX)
-            let clampedY = min(max(point.y, key.rect.minY), key.rect.maxY)
+            var effRect = key.rect
+            var letterChar: Character?
+            if case .character(let primary, _, _, _) = key.kind,
+               primary.count == 1,
+               let ch = primary.lowercased().first,
+               ch >= "a" && ch <= "z" {
+                letterChar = ch
+                if hasCalib, let off = calibratedOffsets[ch] {
+                    // 用户按该键时常偏向 (midX + dx, midY + dy)，故将该键的有效触控框沿其习惯落点微移
+                    effRect = key.rect.offsetBy(dx: CGFloat(off.dx), dy: CGFloat(off.dy))
+                }
+            }
+            let clampedX = min(max(point.x, effRect.minX), effRect.maxX)
+            let clampedY = min(max(point.y, effRect.minY), effRect.maxY)
             let edgeDX = point.x - clampedX
             let edgeDY = point.y - clampedY
-            let centerDX = (point.x - key.rect.midX) * 0.18
-            let centerDY = (point.y - key.rect.midY) * 0.18
+            let centerDX = (point.x - effRect.midX) * 0.18
+            let centerDY = (point.y - effRect.midY) * 0.18
             var dist = edgeDX * edgeDX + edgeDY * edgeDY + centerDX * centerDX + centerDY * centerDY
-            if useDynamicBias,
-               case .character(let primary, _, _, _) = key.kind,
-               let ch = primary.lowercased().first,
-               validNextLetters.contains(ch) {
+            if useDynamicBias, let ch = letterChar, validNextLetters.contains(ch) {
                 dist *= 0.86
             }
             if dist < bestDist {
@@ -1130,6 +1193,7 @@ private final class KeyCapView: UIView {
 
     private var theme: ResolvedTheme?
     private var model: KeyModel?
+    private var normalSpaceTitle: String = "灵犀"
     private var spaceGradLayer: CAGradientLayer?
     private var lastShadowBounds: CGRect = .zero
     private var lastShadowRadius: CGFloat = -1
@@ -1320,11 +1384,14 @@ private final class KeyCapView: UIView {
             primaryLabel.font = .systemFont(ofSize: 14, weight: .semibold)
             primaryLabel.textColor = theme.keyText
         case .space:
+            let spaceLabel: String
             if isEnglishMode {
-                primaryLabel.text = "English"
+                spaceLabel = "English"
             } else {
-                primaryLabel.text = scheme == .quanpin ? "灵犀" : "灵犀 · \(scheme.shortBadge)"
+                spaceLabel = scheme == .quanpin ? "灵犀" : "灵犀 · \(scheme.shortBadge)"
             }
+            normalSpaceTitle = spaceLabel
+            primaryLabel.text = spaceLabel
             primaryLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
             primaryLabel.textColor = theme.keyHintText.withAlphaComponent(0.85)
         case .returnKey:
@@ -1334,6 +1401,20 @@ private final class KeyCapView: UIView {
         }
 
         setPressed(isPressed)
+    }
+
+    /// 空格触控板激活时实时给出直观光标反馈，抬指后还原。
+    func setTrackpadVisualActive(_ active: Bool) {
+        guard let theme, let model, case .space = model.kind else { return }
+        if active {
+            primaryLabel.text = "◀ 移动光标 ▶"
+            primaryLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
+            primaryLabel.textColor = theme.candidateHighlight
+        } else {
+            primaryLabel.text = normalSpaceTitle
+            primaryLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
+            primaryLabel.textColor = theme.keyHintText.withAlphaComponent(0.85)
+        }
     }
 
     func setPressed(_ pressed: Bool) {

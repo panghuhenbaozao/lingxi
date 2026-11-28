@@ -1464,6 +1464,7 @@ private final class ScrollableBannerTextView: UIView, UIScrollViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 4, bounds.height > 4 else { return }
         scrollView.frame = bounds
         let fit = textLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: max(28, bounds.height)))
         let textW = ceil(fit.width)

@@ -3963,4 +3963,78 @@ final class LingxiTests: XCTestCase {
         let synced = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(lex, db: db, minLearnCount: 2, limit: 20)
         XCTAssertEqual(synced, 1, "仅达到 2 次确认且非敏感的高频专属词应同步回流至 UserLexicon")
     }
+
+    func testV75TouchCalibratorNaturalFillCardsAndObsidianPinyinSync() throws {
+        // 1. TouchOffsetCalibrator 偏移快照限幅与生效开关
+        let calib = TouchOffsetCalibrator()
+        calib.reset()
+        for _ in 0..<8 {
+            calib.recordTouch(key: "a", dx: 9.0, dy: -7.5)
+        }
+        let snap = calib.offsetSnapshot(minSamples: 5, maxClamp: 4.5)
+        let aOff = try XCTUnwrap(snap["a"])
+        XCTAssertEqual(aOff.dx, 4.5, accuracy: 0.01, "单键偏移必须严格限幅在 ±4.5pt，防止越界抢占相邻键")
+        XCTAssertEqual(aOff.dy, -4.5, accuracy: 0.01)
+        calib.setApplied(false)
+        XCTAssertTrue(calib.offsetSnapshot().isEmpty, "关闭校准开关后快照应为空")
+        calib.reset()
+
+        // 2. 常规全拼直出个人速填名片（dizhi / youxiang / shouji / shuihao）与 v 模式 vyx / vdh 扩展
+        let cards: [PersonalFillCard] = [
+            PersonalFillCard(
+                title: "常用联系",
+                kind: .contact,
+                fields: [
+                    PersonalCardField(label: "姓名", value: "陈明远"),
+                    PersonalCardField(label: "手机", value: "13900001234"),
+                    PersonalCardField(label: "邮箱", value: "chen@lingxi.dev"),
+                ]
+            ),
+            PersonalFillCard(
+                title: "公司地址",
+                kind: .workAddress,
+                fields: [
+                    PersonalCardField(label: "地址", value: "上海市浦东新区张江高科技园区 88 号"),
+                ]
+            ),
+        ]
+        XCTAssertTrue(PersonalFillCardStore.vModeTriggers.contains("yx"))
+        XCTAssertTrue(PersonalFillCardStore.vModeTriggers.contains("dh"))
+        XCTAssertTrue(PersonalFillCardStore.naturalPinyinCandidates(forNormalizedPinyin: "youxiang", cards: cards).contains("chen@lingxi.dev"))
+        XCTAssertTrue(PersonalFillCardStore.naturalPinyinCandidates(forNormalizedPinyin: "shouji", cards: cards).contains("13900001234"))
+        XCTAssertTrue(PersonalFillCardStore.naturalPinyinCandidates(forNormalizedPinyin: "dizhi", cards: cards).contains(where: { $0.contains("张江高科技园区") }))
+        // 2 字母简拼不走 naturalPinyinCandidates（仅走 v 模式），避免打普通短拼干扰候选
+        XCTAssertTrue(PersonalFillCardStore.naturalPinyinCandidates(forNormalizedPinyin: "dz", cards: cards).isEmpty)
+
+        // 3. Obsidian 专有名词笔记标题自动注音并回流至 UserLexicon（自动跳过通用索引/原则标题）
+        XCTAssertEqual(ObsidianMemoryVaultEngine.deriveMandarinPinyin(for: "陈明远"), "chen'ming'yuan")
+        XCTAssertNil(ObsidianMemoryVaultEngine.deriveMandarinPinyin(for: "Lingxi123"))
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("lingxi_v75_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let db = AICognitiveMemoryDB(url: tmpDir.appendingPathComponent("v75_mem.sqlite"))
+        db.upsertVaultNote(ObsidianVaultNote(
+            title: "陈明远",
+            folder: .wiki,
+            summary: "项目核心后端负责人",
+            bodyMarkdown: "负责网关和存储引擎开发 #人名",
+            tags: ["人名"],
+            strength: 0.9,
+            source: "user_manual"
+        ))
+        db.upsertVaultNote(ObsidianVaultNote(
+            title: "职场汇报原则",
+            folder: .wiki,
+            summary: "通用原则不应作为专名写入词库",
+            bodyMarkdown: "先说结论",
+            tags: ["原则"],
+            strength: 0.9,
+            source: "ai_llm"
+        ))
+
+        let lex = UserLexicon()
+        let syncedCount = ObsidianMemoryVaultEngine.syncLearnedVocabToUserLexicon(lex, db: db, minLearnCount: 2, limit: 20)
+        XCTAssertEqual(syncedCount, 1, "仅专有名词「陈明远」应自动注音回流，通用「职场汇报原则」应被过滤")
+    }
 }

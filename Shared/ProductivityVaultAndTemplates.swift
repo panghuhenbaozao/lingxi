@@ -395,6 +395,23 @@ final class TouchOffsetCalibrator {
             return (max(-6, min(6, s.avgDX)), max(-6, min(6, s.avgDY)))
         }
     }
+
+    /// 导出当前所有已收敛字母键的轻量偏移快照（限制在 ±4.5pt），供 26 键触摸热路径零锁查表使用。
+    func offsetSnapshot(minSamples: Int = 5, maxClamp: Double = 4.5) -> [Character: (dx: Double, dy: Double)] {
+        queue.sync {
+            guard profile.calibrationApplied else { return [:] }
+            var out: [Character: (dx: Double, dy: Double)] = [:]
+            for (k, stat) in profile.perKey where k.count == 1 && stat.count >= minSamples {
+                guard let ch = k.lowercased().first else { continue }
+                let cx = max(-maxClamp, min(maxClamp, stat.avgDX))
+                let cy = max(-maxClamp, min(maxClamp, stat.avgDY))
+                if abs(cx) >= 0.35 || abs(cy) >= 0.35 {
+                    out[ch] = (cx, cy)
+                }
+            }
+            return out
+        }
+    }
 }
 
 // MARK: - 5. 零体积汉字四声调识别器（基于系统原生 CoreFoundation 转写，覆盖全部 20,000+ 汉字）

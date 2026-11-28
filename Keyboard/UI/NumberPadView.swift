@@ -49,7 +49,15 @@ final class NumberPadView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         layoutAll()
+    }
+
+    /// 键盘隐藏或切面板时停止连删定时器，防止后台持续误删宿主文本。
+    func resetTransientTimers() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+        repeatDeleteCount = 0
     }
 
     func configure(
@@ -75,7 +83,7 @@ final class NumberPadView: UIView {
         guard let theme else { return }
 
         let emojiEntryBtn = ActionClosureButton(type: .system)
-        emojiEntryBtn.setTitle("😊符号", for: .normal)
+        emojiEntryBtn.setTitle("符号", for: .normal)
         emojiEntryBtn.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
         emojiEntryBtn.setTitleColor(theme.candidateHighlight, for: .normal)
         emojiEntryBtn.backgroundColor = theme.accentFill.withAlphaComponent(0.14)
@@ -201,6 +209,7 @@ final class NumberPadView: UIView {
         let cellW = (gridW - gap * 4) / 5.0
         let cellH = (gridH - gap * 3) / 4.0
 
+        let cornerR = theme?.keyCornerRadius ?? 7
         for sub in gridContainer.subviews {
             let r = sub.tag / 10
             let c = sub.tag % 10
@@ -210,6 +219,9 @@ final class NumberPadView: UIView {
                 width: cellW,
                 height: cellH
             )
+            if sub.bounds.width > 0, sub.bounds.height > 0 {
+                sub.layer.shadowPath = UIBezierPath(roundedRect: sub.bounds, cornerRadius: cornerR).cgPath
+            }
         }
     }
 }

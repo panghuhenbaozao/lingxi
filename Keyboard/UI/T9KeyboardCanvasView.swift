@@ -28,6 +28,12 @@ final class T9KeyboardCanvasView: UIView {
     }
 
     var onEvent: ((Event) -> Void)?
+    /// 由宿主 UIInputViewController 绑定原生 `handleInputModeList(from:with:)`，支持点击切键盘 + 长按系统输入法列表
+    var onConfigureGlobeButton: ((UIButton) -> Void)? {
+        didSet {
+            onConfigureGlobeButton?(globeOverlayButton)
+        }
+    }
 
     fileprivate struct T9KeyModel {
         enum Kind {
@@ -58,6 +64,7 @@ final class T9KeyboardCanvasView: UIView {
     private var lockedSyllables: [String] = []
 
     private let gridHost = UIView()
+    private let globeOverlayButton = UIButton(type: .custom)
     private let leftScroll = LingxiScrollView()
     private let leftStack = UIStackView()
     private let sideRailStack = UIStackView()
@@ -103,7 +110,16 @@ final class T9KeyboardCanvasView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
+        clipsToBounds = false
+        gridHost.clipsToBounds = false
         addSubview(gridHost)
+
+        globeOverlayButton.backgroundColor = .clear
+        globeOverlayButton.accessibilityLabel = "切换输入法"
+        globeOverlayButton.isHidden = true
+        globeOverlayButton.addTarget(self, action: #selector(handleGlobeTouchDown), for: .touchDown)
+        globeOverlayButton.addTarget(self, action: #selector(handleGlobeTouchEnd), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+        gridHost.addSubview(globeOverlayButton)
 
         leftScroll.showsVerticalScrollIndicator = false
         leftScroll.layer.cornerRadius = 8
@@ -442,6 +458,21 @@ final class T9KeyboardCanvasView: UIView {
                 isPressed: pressed
             )
         }
+        if let globeModel = keyModels.first(where: { $0.id == "t9_globe" }) {
+            globeOverlayButton.frame = globeModel.rect
+            globeOverlayButton.isHidden = false
+            gridHost.bringSubviewToFront(globeOverlayButton)
+        } else {
+            globeOverlayButton.isHidden = true
+        }
+    }
+
+    @objc private func handleGlobeTouchDown() {
+        keyViews["t9_globe"]?.setPressed(true)
+    }
+
+    @objc private func handleGlobeTouchEnd() {
+        keyViews["t9_globe"]?.setPressed(false)
     }
 
     // MARK: - 触摸处理（防串手 + 空格触控板 + 退格左滑清屏）

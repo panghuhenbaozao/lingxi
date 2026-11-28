@@ -391,8 +391,16 @@ final class EmojiSymbolPanelView: UIView {
         setNeedsLayout()
     }
 
+    /// 键盘隐藏或切面板时安全停止长按连删定时器。
+    func resetTransientTimers() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+        repeatCount = 0
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         let pad: CGFloat = 8
         let topH: CGFloat = 32
         let botH: CGFloat = 38

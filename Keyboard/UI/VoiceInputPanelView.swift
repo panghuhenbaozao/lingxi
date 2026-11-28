@@ -236,6 +236,7 @@ final class VoiceInputPanelView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         let pad: CGFloat = 8
         let topY: CGFloat = 7
         let topH: CGFloat = 30

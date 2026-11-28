@@ -108,6 +108,7 @@ public enum PersonalFillCardStore {
     private static let lock = NSLock()
     public static let vModeTriggers: Set<String> = [
         "dz", "dizhi", "kp", "kaipiao", "mp", "mingpian", "cp", "chepai", "shuihao",
+        "yx", "youxiang", "dh", "dianhua", "shouji",
     ]
 
     public static func load() -> [PersonalFillCard] {
@@ -187,6 +188,14 @@ public enum PersonalFillCardStore {
             filtered = allCards.filter { card in
                 card.kind == .contact || card.nonEmptyFields.contains { $0.label.contains("车牌") }
             }
+        case "yx", "youxiang":
+            filtered = allCards.filter { card in
+                card.nonEmptyFields.contains { $0.label.contains("邮箱") || $0.value.contains("@") }
+            }
+        case "dh", "dianhua", "shouji":
+            filtered = allCards.filter { card in
+                card.nonEmptyFields.contains { $0.label.contains("手机") || $0.label.contains("电话") }
+            }
         default:
             filtered = allCards
         }
@@ -213,6 +222,18 @@ public enum PersonalFillCardStore {
                     push(f.value)
                 }
             }
+        } else if lower == "yx" || lower == "youxiang" {
+            for card in targetCards {
+                for f in card.nonEmptyFields where f.label.contains("邮箱") || f.value.contains("@") {
+                    push(f.value)
+                }
+            }
+        } else if lower == "dh" || lower == "dianhua" || lower == "shouji" {
+            for card in targetCards {
+                for f in card.nonEmptyFields where f.label.contains("手机") || f.label.contains("电话") {
+                    push(f.value)
+                }
+            }
         }
 
         for card in targetCards.prefix(4) {
@@ -229,5 +250,14 @@ public enum PersonalFillCardStore {
             }
         }
         return Array(out.prefix(8))
+    }
+
+    /// 常规全拼直出速填名片：打 `dizhi / youxiang / shouji / dianhua / kaipiao / shuihao / chepai / mingpian` 时
+    /// 无需记 `vdz` 前缀，直接把对应名片字段排在常规中文词之后供一键点选（不拦截 2 字母简拼）。
+    public static func naturalPinyinCandidates(forNormalizedPinyin rawPinyin: String, cards: [PersonalFillCard]? = nil) -> [String] {
+        let lower = rawPinyin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let fullTriggers: Set<String> = ["dizhi", "youxiang", "shouji", "dianhua", "kaipiao", "shuihao", "chepai", "mingpian"]
+        guard fullTriggers.contains(lower) else { return [] }
+        return Array(vModeCandidates(forBody: lower, cards: cards).prefix(3))
     }
 }

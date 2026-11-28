@@ -761,8 +761,36 @@ enum ObsidianMemoryVaultEngine {
         }
     }
 
-    /// 记忆库 ↔ 词库正向回流：将认知学习数据库中高频确认的专属词条同步至本地 `UserLexicon`，
-    /// 让用户常打的项目名、专业术语和人名在 26 键/九宫格候选前排自然涌现（严格跳过隐私敏感词）。
+    /// 离线零依赖汉字转拼音（基于系统 CoreFoundation `kCFStringTransformToLatin`），供 Obsidian 笔记词条自动回流至拼音词库。
+    static func deriveMandarinPinyin(for chineseWord: String) -> String? {
+        let trimmed = chineseWord.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2, trimmed.count <= 6 else { return nil }
+        for scalar in trimmed.unicodeScalars {
+            guard (0x4E00...0x9FFF).contains(scalar.value) else { return nil }
+        }
+        var syllables: [String] = []
+        syllables.reserveCapacity(trimmed.count)
+        for ch in trimmed {
+            let mutable = NSMutableString(string: String(ch))
+            guard CFStringTransform(mutable, nil, kCFStringTransformToLatin, false),
+                  CFStringTransform(mutable, nil, kCFStringTransformStripDiacritics, false) else {
+                return nil
+            }
+            let clean = (mutable as String)
+                .lowercased()
+                .replacingOccurrences(of: "ü", with: "v")
+                .filter { $0 >= "a" && $0 <= "z" }
+            guard !clean.isEmpty, clean.count <= 6 else { return nil }
+            syllables.append(clean)
+        }
+        guard syllables.count == trimmed.count else { return nil }
+        return syllables.joined(separator: "'")
+    }
+
+    /// 记忆库 ↔ 词库正向回流：
+    /// 1) 将认知学习数据库中高频确认的专属词条同步至本地 `UserLexicon`；
+    /// 2) 将 Obsidian 记忆库中用户手动记录或提炼的纯中文专有名词笔记标题自动注音并回流至 `UserLexicon`，
+    /// 让项目名、人名与高频术语在 26 键/九宫格候选前排自然涌现（严格跳过隐私敏感词与通用系统标题）。
     @discardableResult
     static func syncLearnedVocabToUserLexicon(
         _ userLexicon: UserLexicon,
@@ -772,6 +800,7 @@ enum ObsidianMemoryVaultEngine {
     ) -> Int {
         let records = db.fetchTopVocab(limit: limit)
         var synced = 0
+        var seenWords = Set<String>()
         for rec in records {
             guard rec.learnCount >= minLearnCount else { continue }
             let cleanWord = rec.word.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -779,7 +808,24 @@ enum ObsidianMemoryVaultEngine {
             guard cleanWord.count >= 2, cleanWord.count <= 8, !cleanPy.isEmpty else { continue }
             guard !ClipboardClassifier.isSensitiveContent(cleanWord),
                   !AIPrivacyShield.sanitize(cleanWord).hasRedactions else { continue }
-            if userLexicon.learn(word: cleanWord, py: cleanPy, prevWord: nil) != nil {
+            if seenWords.insert(cleanWord).inserted,
+               userLexicon.learn(word: cleanWord, py: cleanPy, prevWord: nil) != nil {
+                synced += 1
+            }
+        }
+
+        let genericTitleTokens = ["索引", "总览", "习惯", "原则", "画像", "偏好", "规则", "节奏", "美学", "概览", "清单", "记忆", "配置", "设置", "模式"]
+        let notes = db.fetchVaultNotes(limit: 40)
+        for note in notes {
+            guard note.folder == .wiki || note.folder == .inbox else { continue }
+            let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard title.count >= 2, title.count <= 6 else { continue }
+            guard !genericTitleTokens.contains(where: { title.contains($0) }) else { continue }
+            guard !ClipboardClassifier.isSensitiveContent(title),
+                  !AIPrivacyShield.sanitize(title).hasRedactions else { continue }
+            guard seenWords.insert(title).inserted,
+                  let derivedPy = deriveMandarinPinyin(for: title) else { continue }
+            if userLexicon.learn(word: title, py: derivedPy, prevWord: nil) != nil {
                 synced += 1
             }
         }

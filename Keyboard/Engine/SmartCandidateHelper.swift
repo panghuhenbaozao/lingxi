@@ -121,6 +121,11 @@ enum SmartCandidateHelper {
             appendCandidate(dateStr, lp: -2.0 - Double(idx) * 0.05, isExact: false, source: .smartHelper)
         }
 
+        // 1.2 常规全拼直出已存速填名片（打 dizhi/youxiang/shouji/kaipiao/shuihao/chepai 时自动浮现于中文词之后，无需死记 vdz/vkp）
+        for (idx, cardVal) in PersonalFillCardStore.naturalPinyinCandidates(forNormalizedPinyin: lower).enumerated() {
+            appendCandidate(cardVal, lp: -1.6 - Double(idx) * 0.05, isExact: false, source: .smartHelper)
+        }
+
         // 1.5 输入 weizhi / dizhi / dangqianweizhi 时补充当前实时定位地址
         if settings.geoLocationBoostEnabled && ["weizhi", "dizhi", "dangqianweizhi", "wodeweizhi"].contains(lower) {
             let geo = GeoLocationContext.load()

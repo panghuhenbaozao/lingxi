@@ -51,11 +51,11 @@ final class TextEditingPadView: UIView {
         headerStack.spacing = 8
         addSubview(headerStack)
 
-        titleLabel.text = "📐 专业光标与离线排版编辑台"
+        titleLabel.text = "光标与排版"
         titleLabel.font = .systemFont(ofSize: 13.5, weight: .bold)
         headerStack.addArrangedSubview(titleLabel)
 
-        closeButton.setTitle("返回键盘", for: .normal)
+        closeButton.setTitle("返回", for: .normal)
         closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .semibold)
         closeButton.layer.cornerRadius = 8
         closeButton.layer.cornerCurve = .continuous
@@ -86,18 +86,18 @@ final class TextEditingPadView: UIView {
 
         // 第 3 行：隐私粘贴 / 复制 / 剪切 / 按词删
         bodyStack.addArrangedSubview(makeRow([
-            ("📋 粘贴", .paste),
+            ("粘贴", .paste),
             ("复制", .copy),
             ("剪切", .cut),
-            ("✂️ 删前词", .deleteWordBefore),
+            ("删前词", .deleteWordBefore),
         ], smartStyle: false))
 
         // 第 4 行：零联网智能文本工具
         bodyStack.addArrangedSubview(makeRow([
-            ("🩺 离线排版", .offlineLintFix),
-            ("🛡️ 脱敏", .privacyRedact),
+            ("离线排版", .offlineLintFix),
+            ("隐私脱敏", .privacyRedact),
             ("繁⇄简", .toggleTraditional),
-            ("🧹 去空行", .formatCollapseLines),
+            ("去空行", .formatCollapseLines),
         ], smartStyle: true))
     }
 
@@ -129,6 +129,7 @@ final class TextEditingPadView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard bounds.width > 10, bounds.height > 10 else { return }
         let pad: CGFloat = 10
         headerStack.frame = CGRect(x: pad, y: 6, width: bounds.width - pad * 2, height: 26)
         let bodyY = headerStack.frame.maxY + 7
